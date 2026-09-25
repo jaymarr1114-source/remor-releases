@@ -1,9 +1,9 @@
 import sys, os, json
-sys.path.insert(0, os.path.join(r'/home/hatch/workspace/remor_convergence/canonical/tests/track2b', '..', 'pylib'))
+sys.path.insert(0, os.path.join(r'/home/hatch/workspace/remor_convergence/canonical/tests/track2_new', '..', 'pylib'))
 from swarm_engine.core.engine import SwarmEngine
 from swarm_engine.synthesis.intent_router import IntentRouter
 from swarm_engine.synthesis.nl_dispatch import NLToolDispatcher
-eng = SwarmEngine(db_path=r'/home/hatch/workspace/remor_convergence/canonical/tests/track2b/fresh_wjq_oaof/eng.db')
+eng = SwarmEngine(db_path=r'/home/hatch/workspace/remor_convergence/canonical/tests/track2_new/fresh_mmfi7nab/eng.db')
 disp = NLToolDispatcher(eng, IntentRouter(eng))
 hist = disp.history()
 d2 = disp.dispatch('add two numbers together', {'a': 1, 'b': 2})

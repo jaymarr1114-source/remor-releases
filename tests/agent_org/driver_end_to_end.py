@@ -169,7 +169,7 @@ def make_assignment(org, agent_id, ws, origin):
 
 def phase1(workdir):
     t0 = time.time()
-    org = RemorOrganization.boot(workdir)
+    org = deploy_org(workdir, authority="agent_org:test")
 
     # -- steps 2-4: Agent A discovers X -------------------------------------
     A = org.factory.create("tpl_symbolic_coder_v1")
@@ -331,7 +331,7 @@ def phase1(workdir):
 def phase2(workdir):
     with open(os.path.join(EVIDENCE_DIR, "e2e_meta.json")) as f:
         meta = json.load(f)
-    org = RemorOrganization.boot(workdir)  # fresh process, fresh engine token
+    org = deploy_org(workdir, authority="agent_org:test")  # fresh process, fresh engine token
     ok_aud, aud_msg = audit_ok(org.audit())
     check("L.rehydrate-audit", ok_aud, aud_msg)
 

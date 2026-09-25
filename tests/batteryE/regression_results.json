@@ -1,0 +1,32 @@
+[
+ {
+  "probe": "R1_engine_boots",
+  "pass": true,
+  "detail": "registry + handle wired"
+ },
+ {
+  "probe": "R2_validator_end_to_end",
+  "pass": true,
+  "detail": "correct=True wrong=False reasons=['all required evidence present']"
+ },
+ {
+  "probe": "R3_grant_rehydrated",
+  "pass": true,
+  "detail": "granted by read_fs:/tmp/ws/*"
+ },
+ {
+  "probe": "R4_record_use_promotion",
+  "pass": true,
+  "detail": "trust=TrustLevel.TRUSTED log_head=TRUSTED"
+ },
+ {
+  "probe": "R4b_demotion",
+  "pass": true,
+  "detail": "trust=TrustLevel.SANDBOXED"
+ },
+ {
+  "probe": "R5_audit_all_clean",
+  "pass": true,
+  "detail": "all chains intact"
+ }
+]

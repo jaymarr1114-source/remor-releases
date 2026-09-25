@@ -1,0 +1,279 @@
+{
+  "phase": "phase1",
+  "workdir": "/home/hatch/workspace/remor_convergence/canonical/tests/track3_new/{work_root}/track3_new/L",
+  "checks": [
+    {
+      "name": "capability admitted",
+      "ok": true,
+      "detail": "id=cap_674fe522fad3c1f53b1d"
+    },
+    {
+      "name": "capability effectively active",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "effective_status active+consistent",
+      "ok": true,
+      "detail": "{'effective': 'active', 'store_status': 'active', 'trust': None, 'lifecycle': 'discovered', 'consistent': True}"
+    },
+    {
+      "name": "router refuses paraphrase 'please sort 9 2 7'",
+      "ok": true,
+      "detail": "unknown_intent"
+    },
+    {
+      "name": "router refuses paraphrase 'arrange 4 1 9 in ascending order'",
+      "ok": true,
+      "detail": "unknown_intent"
+    },
+    {
+      "name": "router refuses paraphrase 'arrange 12 4 8 in ascending order'",
+      "ok": true,
+      "detail": "unknown_intent"
+    },
+    {
+      "name": "router routes the bound goal",
+      "ok": true,
+      "detail": "exact_goal cap_674fe522fad3c1f53b1d"
+    },
+    {
+      "name": "agent A created",
+      "ok": true,
+      "detail": "agt_854d55ab4bac7315"
+    },
+    {
+      "name": "assignment active",
+      "ok": true,
+      "detail": "asg_bc9ebde05f862fe2"
+    },
+    {
+      "name": "A maps request",
+      "ok": true,
+      "detail": "{'ok': True, 'dispatch_text': 'sort numbers', 'capability_id': 'cap_674fe522fad3c1f53b1d', 'capability_version': 1, 'args': {'items': [5, 3, 8, 1]}}"
+    },
+    {
+      "name": "A dispatch ok",
+      "ok": true,
+      "detail": "result=[1, 3, 5, 8] refusal=None"
+    },
+    {
+      "name": "dispatch routed via exact_goal",
+      "ok": true,
+      "detail": "exact_goal"
+    },
+    {
+      "name": "dispatch recorded with validated capability",
+      "ok": true,
+      "detail": "cap_674fe522fad3c1f53b1d"
+    },
+    {
+      "name": "evidence captured",
+      "ok": true,
+      "detail": "dsp_ev_b440c7732cee618a"
+    },
+    {
+      "name": "evidence attributes agent A",
+      "ok": true,
+      "detail": "agt_854d55ab4bac7315"
+    },
+    {
+      "name": "evidence binds dispatch",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "evidence carries plan fingerprint",
+      "ok": true,
+      "detail": "cap_674fe522fad3c1f5"
+    },
+    {
+      "name": "evidence row chained+anchored",
+      "ok": true,
+      "detail": "ao_dispatch_evidence: 1 rows, chain intact"
+    },
+    {
+      "name": "dispatch evidence verdict admitted",
+      "ok": true,
+      "detail": "all required evidence present"
+    },
+    {
+      "name": "verdict row bound to evidence bytes",
+      "ok": true,
+      "detail": "vex_a68b910a56b2e643"
+    },
+    {
+      "name": "dispatch knowledge admitted",
+      "ok": true,
+      "detail": "exp_9b56d1f37a823465"
+    },
+    {
+      "name": "experience is L2",
+      "ok": true,
+      "detail": "L2"
+    },
+    {
+      "name": "experience origin dispatch_discovery",
+      "ok": true,
+      "detail": "dispatch_discovery"
+    },
+    {
+      "name": "experience derived_from evidence",
+      "ok": true,
+      "detail": "['dsp_ev_b440c7732cee618a']"
+    },
+    {
+      "name": "experience discovered_by A",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "experience code digest matches mapper",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "A. fake dispatch refused",
+      "ok": true,
+      "detail": "\"no operational dispatch row for 'dsp_nonexistent123'\""
+    },
+    {
+      "name": "A2. forged row refused",
+      "ok": true,
+      "detail": "capture refused: supplied args do not reproduce the recorded input_digest for dsp_forged001"
+    },
+    {
+      "name": "B. forged result refused",
+      "ok": true,
+      "detail": "capture refused: supplied result does not reproduce the recorded result_digest for dsp_c4d7a2d010d448b9"
+    },
+    {
+      "name": "C. tool substitution impossible via API",
+      "ok": true,
+      "detail": "evidence names cap_674fe522fad3..."
+    },
+    {
+      "name": "D. argument substitution refused",
+      "ok": true,
+      "detail": "capture refused: supplied args do not reproduce the recorded input_digest for dsp_c4d7a2d010d448b9"
+    },
+    {
+      "name": "E. dispatcher refuses swapped plan",
+      "ok": true,
+      "detail": "capability_tampered"
+    },
+    {
+      "name": "E. stale-plan re-verification refused",
+      "ok": true,
+      "detail": "dispatch evidence dsp_ev_b440c7732cee618a: stored plan fingerprint mismatch (recorded cap_674fe522fad3... vs live cap_0ea6af3cf218...): stale capability version"
+    },
+    {
+      "name": "E2. admission refuses stale evidence",
+      "ok": true,
+      "detail": "stale dispatch evidence: live plan fingerprint no longer matches the verified evidence"
+    },
+    {
+      "name": "E. dispatch works after plan restore",
+      "ok": true,
+      "detail": "[1, 2, 3]"
+    },
+    {
+      "name": "F. agent forgery refused",
+      "ok": true,
+      "detail": "capture refused: assignment asg_bc9ebde05f862fe2 belongs to agent 'agt_854d55ab4bac7315', not 'agt_4f838e478ae7a5d2' (ag"
+    },
+    {
+      "name": "G1. forged verifier identity refused",
+      "ok": true,
+      "detail": "verdict binding refused: verdict row not produced by the authorized verification procedure (verifier='mallory:subprocess"
+    },
+    {
+      "name": "G1b. genuine verdict unaffected",
+      "ok": true,
+      "detail": "vex_a68b910a56b2e643"
+    },
+    {
+      "name": "G2. evidence DB tamper detected by chain audit",
+      "ok": true,
+      "detail": "ao_dispatch_evidence: tamper at seq 1 (row_digest mismatch)"
+    },
+    {
+      "name": "G2. evidence DB tamper detected by anchor",
+      "ok": true,
+      "detail": "anchor mismatch: live heads differ from anchored heads (journal tip seq 130, 1 differing scope(s): org:ao_dispatch_evide"
+    },
+    {
+      "name": "H. phantom evidence refused",
+      "ok": true,
+      "detail": "\"unknown dispatch evidence 'dsp_ev_doesnotexist'\""
+    },
+    {
+      "name": "H2. raw dispatch row refused as evidence",
+      "ok": true,
+      "detail": "\"unknown dispatch evidence 'dsp_c4d7a2d010d448b9'\""
+    },
+    {
+      "name": "stray dispatch executed",
+      "ok": true,
+      "detail": "[1, 2, 3]"
+    },
+    {
+      "name": "worker deletion w/o admission creates no knowledge",
+      "ok": true,
+      "detail": "1 -> 1"
+    },
+    {
+      "name": "duplicate capture refused",
+      "ok": true,
+      "detail": "capture refused: evidence dsp_ev_b440c7732cee618a already exists for dispatch dsp_c4d7a2d010d448b9 / agent agt_854d55ab4"
+    },
+    {
+      "name": "duplicate admission refused",
+      "ok": true,
+      "detail": "admission refused: experience exp_9b56d1f37a823465 already admitted from evidence dsp_ev_b440c7732cee618a (replay refuse"
+    },
+    {
+      "name": "agent A destroyed",
+      "ok": true,
+      "detail": "DESTROYED"
+    },
+    {
+      "name": "A workspace removed",
+      "ok": true,
+      "detail": "/home/hatch/workspace/remor_convergence/canonical/tests/track3_new/{work_root}/track3_new/L/agents/agt_854d55ab4bac7315"
+    },
+    {
+      "name": "A substrate gone",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "knowledge survives A destruction",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "evidence survives A destruction",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "I. post-destruction dispatch still executes",
+      "ok": true,
+      "detail": "[1, 2]"
+    },
+    {
+      "name": "I. destroyed-agent capture refused",
+      "ok": true,
+      "detail": "capture refused: agent agt_854d55ab4bac7315 is DESTROYED"
+    }
+  ],
+  "agent_a": "agt_854d55ab4bac7315",
+  "assignment": "asg_bc9ebde05f862fe2",
+  "capability_id": "cap_674fe522fad3c1f53b1d",
+  "capability_version": 1,
+  "dispatch_id": "dsp_c4d7a2d010d448b9",
+  "evidence_id": "dsp_ev_b440c7732cee618a",
+  "experience_id": "exp_9b56d1f37a823465",
+  "verdict_execution_id": "vex_a68b910a56b2e643"
+}

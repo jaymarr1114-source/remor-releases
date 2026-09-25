@@ -3,6 +3,8 @@ import sys, os, shutil, json
 
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "pylib"))
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from anchor_shim import deploy_org, install_auto_anchor  # noqa: E402
 
 _WORK_ROOT = _os.environ.get("REMOR_TEST_WORK_ROOT", _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "work"))
 
@@ -35,7 +37,7 @@ r = self_check()
 check("codec self_check", r["method_params_checked"] == 7)
 
 # 2. boot
-org = RemorOrganization.boot(WORK)
+org = deploy_org(WORK, authority="agent_org:test")
 check("boot templates", len(org.templates.list()) == 3)
 for attr in ("factory agents templates assignments runner review experience "
              "performance synthesizer relationships engine oregistry store "
