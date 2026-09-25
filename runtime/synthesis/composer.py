@@ -658,11 +658,14 @@ class Composer:
         return self.checker.check(plan)
 
     def plan_hash(self, plan: Dict[str, Any]) -> str:
-        # Use representation codec so plans carrying set/bytes/tuple literals
-        # (e.g. discrete_lookup tables, structural wraps) hash instead of crash.
-        from swarm_engine.representation.json_codec import canonical_json_dumps
-        canonical = canonical_json_dumps(_strip_volatile(plan))
-        return "cap_" + hashlib.sha256(canonical.encode()).hexdigest()[:20]
+        # Batch 9: unified identity. Execution attribution MUST match the
+        # stored identity from synthesis/capability_store.plan_fingerprint.
+        # Previously this used a different exclusion set (_strip_volatile),
+        # causing the same logical plan to receive different cap_ IDs at
+        # execution vs storage. Now delegates to the single canonical
+        # fingerprint function.
+        from swarm_engine.synthesis.capability_store import plan_fingerprint
+        return plan_fingerprint(plan)
 
     def permitted(self, plan: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Is every effect this plan demands grantable right now? Checked up
@@ -726,6 +729,3 @@ class Composer:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(_run_in_fresh_loop).result()
 
-
-def _strip_volatile(plan: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: v for k, v in plan.items() if k not in ("created_at", "notes", "provenance")}
