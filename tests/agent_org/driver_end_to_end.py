@@ -28,8 +28,11 @@ Usage:
 """
 import sys, os, json, time, tempfile, subprocess, argparse
 
-PYLIB = os.path.expanduser("~/workspace/remor_agent_org/pylib")
+PYLIB = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "pylib")
 sys.path.insert(0, PYLIB)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from anchor_shim import deploy_org, fresh_workdir  # noqa: E402
 
 from swarm_engine.agent_org.org import RemorOrganization
 from swarm_engine.agent_org.substrates import CallableSubstrate
@@ -39,8 +42,7 @@ from swarm_engine.agent_org.synthesis import token_similarity
 from swarm_engine.acquisition.semantic import Case
 from swarm_engine.verification.independent import IndependentValidator
 
-EVIDENCE_DIR = os.path.expanduser("~/workspace/remor_agent_org/evidence")
-os.makedirs(EVIDENCE_DIR, exist_ok=True)
+EVIDENCE_DIR = None  # set per-phase under the workdir
 
 CHECKS = []
 
@@ -168,6 +170,9 @@ def make_assignment(org, agent_id, ws, origin):
 
 
 def phase1(workdir):
+    global EVIDENCE_DIR
+    EVIDENCE_DIR = os.path.join(workdir, "evidence")
+    os.makedirs(EVIDENCE_DIR, exist_ok=True)
     t0 = time.time()
     org = deploy_org(workdir, authority="agent_org:test")
 
@@ -329,6 +334,8 @@ def phase1(workdir):
 
 
 def phase2(workdir):
+    global EVIDENCE_DIR
+    EVIDENCE_DIR = os.path.join(workdir, "evidence")
     with open(os.path.join(EVIDENCE_DIR, "e2e_meta.json")) as f:
         meta = json.load(f)
     org = deploy_org(workdir, authority="agent_org:test")  # fresh process, fresh engine token
