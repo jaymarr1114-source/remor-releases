@@ -41,7 +41,7 @@ org = deploy_org(ORGDIR)
 
 # ---------------------------------------------------------------- step 1
 # Agent A is created with a repair-technique-authoring substrate.
-T1_PATH = os.path.join(TRACK1, "scratch", "track1", "technique_v1.py")
+T1_PATH = os.path.join(TRACK1, "technique_v1.py")
 
 
 def author_t1(task):

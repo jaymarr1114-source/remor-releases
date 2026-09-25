@@ -522,6 +522,102 @@ class ReviewBoard:
         return verdict
 
     # -- decisions (engine-only) ----------------------------------------
+
+    def verify_repair(self, repair_id: str, agent_id: str,
+                      defect_signature: Dict[str, Any], diagnosis: str,
+                      pre_code: str, post_code: str, entrypoint: str,
+                      spec: Any, cases: Sequence[Case]) -> Verdict:
+        """Independently verify a repair instance.
+
+        Executes the real IndependentValidator against the REPAIRED
+        artifact bytes (post_code) under subprocess isolation with
+        oracle-bound case judgments. The agent's diagnosis and its claim
+        that the repair succeeded are recorded (diagnosis) but NEVER read
+        by the verdict path -- there is no code path from them to the
+        verdict.
+
+        Persists the authoritative verdict row bound to digest(post_code)
+        with artifact_kind="repair" and artifact_ref=repair_id, and
+        inserts the structured repair record into ao_repair_records.
+        This is the ONLY verification path whose verdict can authorize
+        repair admission via admit_repair(): a "repair" verdict never
+        authorizes any other admission kind.
+        """
+        if not post_code:
+            raise VerificationFailed("verify_repair: empty repaired code")
+        if not repair_id:
+            raise VerificationFailed("verify_repair: empty repair_id")
+        verdict = self._run_validator(post_code, entrypoint or "selftest",
+                                      spec, list(cases))
+        execution_id = self._store_verdict(
+            verdict, post_code, spec, list(cases),
+            artifact_kind="repair", artifact_ref=repair_id)
+        self.store.insert("ao_repair_records", {
+            "repair_id": repair_id,
+            "agent_id": agent_id,
+            "defect_signature_json": json.dumps(defect_signature,
+                                                sort_keys=True, default=str),
+            "diagnosis": (diagnosis or "")[:2000],
+            "pre_digest": digest(pre_code or ""),
+            "post_digest": digest(post_code),
+            "spec_digest": self._spec_digest(spec, list(cases)),
+            "verifier": VERIFIER_ID,
+            "verdict_execution_id": execution_id,
+            "admission_decision_id": "",
+            "created_at": now()})
+        return verdict
+
+
+    def get_repair_record(self, repair_id: str) -> Dict[str, Any]:
+        row = self.store.latest("ao_repair_records", "repair_id", repair_id)
+        if row is None:
+            raise KeyError(f"unknown repair {repair_id!r}")
+        return row
+
+
+    def admit_repair(self, repair_id: str, engine_handle: Any) -> str:
+        """Admit an independently verified repair. Returns decision_id.
+
+        Requires a live engine handle AND a stored admitted independent
+        verdict (artifact_kind="repair") for the EXACT post-repair bytes
+        recorded at verify time: verification cannot be skipped, and a
+        verdict for bytes X never authorizes different bytes Y (this is
+        what makes rollback-to-unverified and wrong-bytes attacks fail).
+        Trust is derived from the stored verdict row only.
+        """
+        _require_engine(engine_handle)
+        rec = self.get_repair_record(repair_id)
+        if rec.get("admission_decision_id"):
+            raise LifecycleError(
+                f"repair {repair_id}: already admitted "
+                f"(decision {rec['admission_decision_id']})")
+        # The single trust-derivation point: the stored verdict for the
+        # exact post bytes must exist, be admitted, and come from the
+        # authorized verification procedure. Any tampering with the
+        # record's digests, the verdict chain, or the anchor refuses here.
+        vrow = self.require_admitted_verdict(rec["post_digest"], "repair")
+        if vrow.get("artifact_ref") != repair_id:
+            raise VerificationFailed(
+                f"repair {repair_id}: stored verdict binds a different "
+                f"repair ref ({vrow.get('artifact_ref')!r}) -- refused")
+        decision_id = self._record_decision(
+            None, "ACCEPT", "repair_admission",
+            {"repair_id": repair_id,
+             "agent_id": rec["agent_id"],
+             "pre_digest": rec["pre_digest"],
+             "post_digest": rec["post_digest"],
+             "verdict_execution_id": vrow.get("execution_id"),
+             "spec_digest": vrow.get("spec_digest")})
+        # Append the admission to the repair record (new chained row).
+        new_row = dict(rec)
+        new_row["admission_decision_id"] = decision_id
+        fields = {k: new_row[k] for k in new_row
+                  if k not in ("seq", "prev_digest", "row_digest")}
+        self.store.insert("ao_repair_records", fields)
+        return decision_id
+
+    # -- decisions (engine-only) ----------------------------------------
+
     def _record_decision(self, wp_id: Optional[str], verdict: str,
                          kind: str, reasons: Any) -> str:
         decision_id = "dec_" + digest(

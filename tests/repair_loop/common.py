@@ -12,12 +12,16 @@ import os
 import re
 import sys
 
-TRACK1 = os.path.expanduser("~/workspace/remor_repair_loop")
-sys.path.insert(0, os.path.join(TRACK1, "pylib"))   # swarm_engine -> runtime_work
-sys.path.insert(0, os.path.join(TRACK1, "scratch"))  # anchor_shim
-sys.path.insert(0, os.path.join(TRACK1, "scratch", "track1"))
+# Canonical paths (ported from remor_repair_loop)
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_CANONICAL = os.path.join(_THIS_DIR, "..", "..")
+sys.path.insert(0, os.path.join(_CANONICAL, "pylib"))   # swarm_engine -> runtime
+sys.path.insert(0, _THIS_DIR)  # anchor_shim (local)
 
-WORK = os.path.join(TRACK1, "scratch", "track1", "work")
+_WORK_ROOT = os.environ.get("REMOR_TEST_WORK_ROOT", "/tmp/remor_repair_test")
+WORK = os.path.join(_WORK_ROOT, "repair_loop", "work")
+# TRACK1 for compatibility (points to canonical test dir)
+TRACK1 = _THIS_DIR
 os.makedirs(WORK, exist_ok=True)
 
 import anchor_shim  # noqa: E402

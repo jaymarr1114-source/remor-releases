@@ -68,7 +68,7 @@ check("A's verdict still admitted", vrow_a.get("admitted") == "1")
 
 # ---------------------------------------------------------------- step 3
 # B is created: genuinely new identity.
-T2_PATH = os.path.join(TRACK1, "scratch", "track1", "technique_v2.py")
+T2_PATH = os.path.join(TRACK1, "technique_v2.py")
 
 
 def author_t2(task):

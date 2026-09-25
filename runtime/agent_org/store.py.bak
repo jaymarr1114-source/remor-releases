@@ -99,18 +99,6 @@ SCHEMAS: Dict[str, List[str]] = {
                        "verdict_execution_id"],
     "ao_performance": ["agent_id", "template_id", "problem_class", "outcome",
                        "verified", "resource_usage_json", "created_at"],
-    # --- repair records (Track 1 mission 2026-09-25) ---
-    # One row per independently-verified repair instance. The full
-    # structured representation of a repair: defect signature, the
-    # agent's diagnosis (a claim, never trusted), pre/post artifact
-    # digests, the verification standard, the verifier identity, the
-    # authoritative verdict row, and the admission decision. Trust is
-    # derived from the stored ao_review_verdicts row (kind="repair"),
-    # never from the agent's assertion that the repair succeeded.
-    "ao_repair_records": ["repair_id", "agent_id", "defect_signature_json",
-                          "diagnosis", "pre_digest", "post_digest",
-                          "spec_digest", "verifier", "verdict_execution_id",
-                          "admission_decision_id", "created_at"],
     # --- dispatch evidence (Track 3, 2026-09-25) ---
     # Canonical record of one real tool dispatch, attributable to the exact
     # agent + assignment that performed it. The evidence_json column carries

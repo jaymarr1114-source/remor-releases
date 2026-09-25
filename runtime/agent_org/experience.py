@@ -193,7 +193,9 @@ class ExperienceStore:
 
     # -- L1 -> L2 gate --------------------------------------------------
     def promote(self, candidate_id: str,
-                generality_cases: List[Any]) -> Tuple[bool, Any]:
+                generality_cases: List[Any],
+                derived_from: Optional[List[str]] = None
+                ) -> Tuple[bool, Any]:
         """Promote a candidate to L2 organizational experience.
 
         The generality gauntlet is executed by the ENGINE's ReviewBoard
@@ -204,12 +206,24 @@ class ExperienceStore:
         validator parameter: a caller must not choose the oracle that
         judges its own candidate.
 
+        derived_from optionally records lineage: the exp_ids this
+        technique was adapted from (Track 1: B's T2 derived from A's T1).
+        The ids are validated to reference existing experiences; lineage
+        is a claim about derivation, not a trust input.
+
         ALL held-out cases must pass or the candidate stays a candidate.
         Returns (True, exp_id) or (False, reasons).
         """
         cand = self.get_candidate(candidate_id)
         if not generality_cases:
             return False, ["no generality cases supplied: cannot promote"]
+        derived_from = list(derived_from or [])
+        # Lineage must reference real experiences; unknown ids are refused
+        # (fail closed) rather than recorded as unvalidated claims.
+        for parent in derived_from:
+            if self.store.latest("ao_experiences", "exp_id", parent) is None:
+                raise KeyError(
+                    f"promote: unknown lineage parent {parent!r}: refused")
         board = self._require_board()
         spec = _GeneralitySpec(
             [(dict(c.args), None) for c in generality_cases[:2]])
@@ -228,7 +242,7 @@ class ExperienceStore:
             "tags_json": json.dumps(cand.tags, sort_keys=True),
             "io_contract_json": json.dumps(cand.io_contract, sort_keys=True),
             "params_json": json.dumps(cand.params, sort_keys=True),
-            "derived_from_json": json.dumps([]),
+            "derived_from_json": json.dumps(derived_from, sort_keys=True),
             "validation_evidence_json": json.dumps(
                 {"verdict": "admitted",
                  "execution_id": row["execution_id"],
