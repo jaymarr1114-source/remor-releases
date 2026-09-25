@@ -205,8 +205,7 @@ def phase1(workdir):
     validator = IndependentValidator(runner=run_code, oracle_registry=org.oregistry,
                                      engine_oracle=org.engine)
     okA, resA = org.experience.promote(
-        candA.candidate_id, generality_cases=codec_cases(W1_GEN, 0.6, "Xg"),
-        validator=validator)
+        candA.candidate_id, generality_cases=codec_cases(W1_GEN, 0.6, "Xg"))
     check("e2e.X-promoted", okA is True, str(resA)[:120])
     expX = org.experience.get_experience(resA)
     check("e2e.X-promoted-L2", expX.level == "L2", expX.exp_id)
@@ -244,8 +243,7 @@ def phase1(workdir):
     cands = org.experience.list_candidates()
     candB = [c for c in cands if c.wp_id == wpB][0]
     okB, resB = org.experience.promote(
-        candB.candidate_id, generality_cases=codec_cases(W2_GEN, 0.6, "Yg"),
-        validator=validator)
+        candB.candidate_id, generality_cases=codec_cases(W2_GEN, 0.6, "Yg"))
     check("e2e.Y-promoted", okB is True, str(resB)[:120])
     expY = org.experience.get_experience(resB)
     check("e2e.Y-promoted-L2", expY.level == "L2" and expY.exp_id != expX.exp_id,
