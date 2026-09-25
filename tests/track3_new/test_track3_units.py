@@ -27,6 +27,13 @@ def check(name, cond, detail=""):
 
 
 def main(workdir):
+    import shutil
+    # Fresh workdir: remove prior state (journal lives in workdir_anchor)
+    if os.path.exists(workdir):
+        shutil.rmtree(workdir)
+    anchor_dir = os.path.abspath(workdir) + "_anchor"
+    if os.path.exists(anchor_dir):
+        shutil.rmtree(anchor_dir)
     os.makedirs(workdir, exist_ok=True)
     from swarm_engine.synthesis.nl_dispatch import NLToolDispatcher
     from swarm_engine.agent_org.dispatch_learning import (

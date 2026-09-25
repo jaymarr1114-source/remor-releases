@@ -32,7 +32,7 @@ PYLIB = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "pylib")
 sys.path.insert(0, PYLIB)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from anchor_shim import deploy_org, fresh_workdir  # noqa: E402
+from anchor_shim import deploy_org, attach_org, fresh_workdir  # noqa: E402
 
 from swarm_engine.agent_org.org import RemorOrganization
 from swarm_engine.agent_org.substrates import CallableSubstrate
@@ -343,7 +343,7 @@ def phase2(workdir):
     EVIDENCE_DIR = os.path.join(workdir, "evidence")
     with open(os.path.join(EVIDENCE_DIR, "e2e_meta.json")) as f:
         meta = json.load(f)
-    org = deploy_org(workdir, authority="agent_org:test")  # fresh process, fresh engine token
+    org = attach_org(workdir)  # fresh process, fresh engine token
     ok_aud, aud_msg = audit_ok(org.audit())
     check("L.rehydrate-audit", ok_aud, aud_msg)
 
