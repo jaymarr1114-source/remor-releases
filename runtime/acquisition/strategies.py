@@ -99,12 +99,17 @@ class CapabilitySpec:
                          ) -> "CapabilitySpec":
         # Normalize example forms (Batch 10): accept tuple
         # (input_dict, expected) and explicit dict
-        # {'input': ..., 'output': ...}. Reject malformed, ambiguous,
-        # or mixed forms clearly -- never silently misinterpret.
+        # {'input': ..., 'output': ...}. Also accept the 2-list
+        # [input_dict, expected] (same shape as the tuple form; this is
+        # what JSON-decoded callers such as the HTTP run API submit).
+        # Reject malformed, ambiguous, or mixed forms clearly -- never
+        # silently misinterpret.
         raw = list(examples or [])
         examples = []
         for i, ex in enumerate(raw):
             if isinstance(ex, tuple) and len(ex) == 2 and isinstance(ex[0], dict):
+                examples.append((ex[0], ex[1]))
+            elif isinstance(ex, list) and len(ex) == 2 and isinstance(ex[0], dict):
                 examples.append((ex[0], ex[1]))
             elif isinstance(ex, dict) and set(ex.keys()) == {"input", "output"} \
                     and isinstance(ex["input"], dict):
@@ -112,7 +117,8 @@ class CapabilitySpec:
             else:
                 raise ValueError(
                     f"from_requirement: example {i} malformed: expected "
-                    f"(input_dict, expected) tuple or "
+                    f"(input_dict, expected) tuple, [input_dict, expected] "
+                    f"list, or "
                     f"{{'input': input_dict, 'output': expected}} dict, "
                     f"got {type(ex).__name__}: {ex!r:.120}")
         # Mixed forms are rejected: all examples must use the same shape.

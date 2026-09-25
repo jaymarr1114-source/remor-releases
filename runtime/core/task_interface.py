@@ -160,6 +160,18 @@ class UniversalTaskInterface:
         except RunStopped as exc:
             detail = f"run stopped by user request ({exc})"
             outcome.trace.append(StageTrace(Stage.STOPPED, True, detail))
+            # Fire the stage event through the same _event_cb channel the
+            # TracingTaskInterface subclasses use. This deliberately
+            # bypasses self._trace(): its checkpoint would re-raise
+            # RunStopped here because the stop is still requested.
+            cb = getattr(self, "_event_cb", None)
+            if cb is not None:
+                try:
+                    cb({"type": "stage", "stage": Stage.STOPPED.value,
+                        "ran": True, "detail": detail[:250],
+                        "elapsed_ms": 0.0, "at": time.time()})
+                except Exception:
+                    pass
             outcome.success = False
             outcome.error = detail
             return outcome
@@ -307,6 +319,10 @@ class UniversalTaskInterface:
                 else:
                     route = getattr(gresult, "route_attempted", "failed") if gresult else "none"
                     failed_nodes.append(f"growth:{route}")
+            except RunStopped:
+                # A user stop must propagate to handle()'s STOPPED outcome,
+                # never degrade into "acquisition failed".
+                raise
             except Exception as ex:
                 failed_nodes.append(f"growth:{type(ex).__name__}")
 
@@ -571,6 +587,10 @@ class UniversalTaskInterface:
         for args, expected in parsed:
             try:
                 out = await self.engine.composer.execute(record.plan, dict(args))
+            except RunStopped:
+                # A user stop during verification is still a stop, not a
+                # failed oracle check.
+                raise
             except Exception as ex:
                 mismatches.append(f"{args!r}: raised {type(ex).__name__}: {ex}")
                 continue
