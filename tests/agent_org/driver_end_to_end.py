@@ -39,6 +39,7 @@ from swarm_engine.agent_org.substrates import CallableSubstrate
 from swarm_engine.agent_org.discovery import make_discovery_callable
 from swarm_engine.agent_org.subprocess_runner import run_code
 from swarm_engine.agent_org.synthesis import token_similarity
+from swarm_engine.agent_org.store import digest as code_digest_of
 from swarm_engine.acquisition.semantic import Case
 from swarm_engine.verification.independent import IndependentValidator
 
@@ -287,13 +288,22 @@ def phase1(workdir):
           f"own RMZ1 framing; token-sim vs X={sim_x:.3f} vs Y={sim_y:.3f}")
 
     # -- steps 16-17: independent verification of Z ---------------------------
+    # Engine-executed: verify_artifact persists the authoritative verdict
+    # row (artifact_kind="synthesis"); record_l3() below derives trust
+    # ONLY from that stored row.
     z_cases = codec_cases(W3_FRESH, 0.5, "Z")
     specZ = CodecSpec("fused codec", [({"data_hex": h}, None) for h in W3_FRESH])
-    verdictZ = validator.validate(code_z, entry_z, specZ, z_cases)
+    verdictZ = org.review.verify_artifact(
+        code_z, entry_z, specZ, z_cases, artifact_ref="fused_rmz1")
     check("e2e.Z-verified", verdictZ.admitted, ";".join(verdictZ.reasons[:3]))
     check("K.verified-before-trust",
           verdictZ.admitted and len((verdictZ.evidence or {}).get("findings", [])) > 0,
           f"findings={len((verdictZ.evidence or {}).get('findings', []))}")
+    stored_z = org.review.latest_artifact_verdict(
+        code_digest_of(code_z), "synthesis")
+    check("K.verdict-stored",
+          stored_z is not None and stored_z.get("admitted") == "1",
+          f"execution_id={stored_z.get('execution_id') if stored_z else None}")
 
     # -- step 18: admission ----------------------------------------------------
     org.engine.transition_trust("artifact:codec_z", None, "TRUSTED",
@@ -303,10 +313,7 @@ def phase1(workdir):
         problem_class="byte_codec", tags=["synthesized", "fused"],
         io_contract={"input": "bytes", "output": "bytes"},
         derived_from=[expX.exp_id, expY.exp_id],
-        validation_evidence={"verdict": "admitted",
-                              "n_findings": len((verdictZ.evidence or {}).get("findings", [])),
-                              "params": rel_ev.get("z_params", {}),
-                              "z_ratio": rel_ev.get("z_ratio")},
+        params=rel_ev.get("z_params", {}),
         engine=org.engine)
     check("e2e.Z-admitted-L3", expZ.level == "L3" and
           set(expZ.derived_from) == {expX.exp_id, expY.exp_id}, expZ.exp_id)
