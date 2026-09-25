@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from swarm_engine.project.commands import CommandRunner, CommandDenied
 from swarm_engine.project.modification import ProjectModificationGuard
+from swarm_engine.services.run_control import checkpoint
 
 
 @dataclass
@@ -693,6 +694,13 @@ class ProjectWorkLoop:
             })
 
         for round_i in range(1, self.max_rounds + 1):
+            # Cooperation point for the frozen run_control contract:
+            # raises RunStopped here if another thread requested stop, blocks
+            # here while paused. No-op when no RunControl is installed on this
+            # thread. (Added by the projects-service track; the parallel
+            # preemption change provides this same call — duplicates are
+            # harmless since checkpoints are idempotent.)
+            checkpoint(f"project-loop-round-{round_i}")
             report.rounds = round_i
             gaps = self.inspect_gaps(requirements, self._inventory())
             report.gaps = [asdict(g) for g in gaps]

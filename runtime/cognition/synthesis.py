@@ -32,6 +32,7 @@ from swarm_engine.pow_safety import (
     _ensure_pow_safe,
     _pow_safe_scalar,
 )
+from swarm_engine.services.run_control import checkpoint
 
 
 def _is_numeric_input_type(_v):
@@ -2874,6 +2875,10 @@ class GeneralSynthesizer:
                     f"wall-clock limit ({self.wall_clock_limit_s}s) reached; "
                     f"stopped rather than continuing an open-ended search")
                 return None, trace
+            # Cooperation point (one per level): an operator stop/pause
+            # takes effect here rather than only at the wall-clock bound.
+            # No-op when no control is installed.
+            checkpoint("synthesize:level")
             trace.depths_explored += 1
             # Tie-break by a stable hash of the op name, not by the name
             # itself. Python's sort is stable, so with a neutral/cold bias
@@ -3288,6 +3293,11 @@ class GeneralSynthesizer:
                                 "stopped_reason": "wall_clock",
                             })
                             return None, trace
+                        # Cooperation point (throttled by the % 500 sweep
+                        # stride): a stop takes effect mid-level, not only
+                        # at the per-level or wall-clock checks. No-op when
+                        # no control is installed.
+                        checkpoint("synthesize:sweep")
                         trace.candidates_tried += 1
                         child_exprs = {name: expr for name, (expr, _) in
                                       zip(required, combo)}

@@ -63,6 +63,10 @@ from swarm_engine.cognition.synthesis import (
     _is_numeric_input_type, _is_numeric_output_prim)
 from swarm_engine.pow_safety import _pow_safe_scalar
 from swarm_engine.primitives.core import Effect
+from swarm_engine.services.run_control import (
+    RunStopped,
+    checkpoint,
+)
 
 try:
     import numpy as _np
@@ -361,6 +365,10 @@ _DICT_ALGEBRA = _FoldAlgebra(op_name="deep_merge", domain="dict")
 def _check_deadline(t0: float, budget_s: float) -> None:
     if time.perf_counter() - t0 > budget_s:
         raise _Deadline()
+    # Cooperation point: the decomposition search calls _check_deadline
+    # throughout enumeration, so a stop/pause takes effect here without
+    # disturbing the wall-clock semantics (no control -> no-op).
+    checkpoint("decompose:search")
 
 
 def _json_scalar(v: Any) -> Any:
@@ -4616,6 +4624,10 @@ class BehavioralDecomposer:
                                          _recursion_depth=0)
         except _Deadline:
             return None
+        except RunStopped:
+            # A user stop must propagate to the run's STOPPED outcome,
+            # never degrade into a quiet "no decomposition".
+            raise
         except Exception:
             # Fail closed: a decomposition search must never break
             # acquisition with an exception. (Unit tests call the

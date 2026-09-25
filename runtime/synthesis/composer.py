@@ -58,6 +58,12 @@ from swarm_engine.primitives.core import (
     ANY, BOOL, CALLABLE, DICT, LIST, NUM, STR, Effect, ExecContext, Kind,
     PrimitiveRegistry, TypeSpec, infer,
 )
+from swarm_engine.services.run_control import (
+    RunStopped,
+    checkpoint,
+    current as _current_run_control,
+    set_current as _set_current_run_control,
+)
 
 CONTROL_OPS = {"if", "foreach", "while", "try", "parallel", "let"}
 _KINDS = {"int": Kind.INT, "float": Kind.FLOAT, "num": Kind.NUM, "str": Kind.STR,
@@ -314,6 +320,9 @@ class PlanExecutor:
 
     async def run(self, plan: Dict[str, Any], args: Optional[Dict[str, Any]] = None,
                   ctx: Optional[ExecContext] = None) -> Dict[str, Any]:
+        # Cooperation point: a stop requested before/while a plan executes
+        # takes effect here. No-op when no control is installed.
+        checkpoint("execute:plan")
         ctx = ctx or ExecContext(self.reg.governor, self.reg)
         env: Dict[str, Any] = {"__params__": dict(args or {})}
         started = _now()
@@ -323,6 +332,10 @@ class PlanExecutor:
                 await self._exec_steps(steps, env, ctx)
             else:
                 await self._exec_steps_lazy(plan, env, ctx)
+        except RunStopped:
+            # Cooperative stop: must propagate, never be reported as a
+            # normal execution failure.
+            raise
         except Exception as exc:  # surfaced, never swallowed
             return {"success": False, "error": f"{type(exc).__name__}: {exc}",
                     "elapsed_ms": _ms(started), "trace": ctx.trace[-25:],
@@ -334,6 +347,10 @@ class PlanExecutor:
             out_ref = {"$step": steps[-1].get("id")} if steps else None
         try:
             value = await self._resolve(out_ref, env, ctx) if out_ref is not None else None
+        except RunStopped:
+            # Cooperative stop: must propagate, never be reported as a
+            # normal execution failure.
+            raise
         except Exception as exc:
             return {"success": False, "error": f"output resolution failed: {exc}",
                     "elapsed_ms": _ms(started)}
@@ -358,6 +375,9 @@ class PlanExecutor:
         async def ensure(sid):
             if sid in env:
                 return env[sid]
+            # Cooperation point: one per evaluated step (each step runs at
+            # most once thanks to env caching). No-op without a control.
+            checkpoint("execute:step")
             step = by_id.get(sid)
             if step is None:
                 raise PlanError(f"reference to undefined step {sid!r}")
@@ -388,7 +408,12 @@ class PlanExecutor:
             await ensure(steps[-1]["id"])
 
     async def _exec_steps(self, steps, env, ctx) -> None:
-        for step in steps:
+        # Cooperation point (throttled): plans with many steps or
+        # control-flow loops stay stoppable mid-execution. No-op when no
+        # control is installed.
+        for idx, step in enumerate(steps):
+            if idx % 64 == 0:
+                checkpoint("execute:steps")
             sid = step.get("id")
             control = step.get("control")
             if control:
@@ -676,9 +701,23 @@ class Composer:
         invoked from UniversalTaskInterface). When a loop is running, the
         work is done in a worker thread with its own loop so the caller's
         loop is never nested or blocked unsafely.
+
+        Cooperative-preemption note: contextvars do not cross the thread
+        boundary on their own, so the current RunControl (if any) is
+        installed explicitly in the worker thread. A stop requested on the
+        calling thread therefore still takes effect at the next checkpoint
+        inside the worker.
         """
+        parent_control = _current_run_control()
+
         def _run_in_fresh_loop():
-            return asyncio.run(self.execute(plan, args, ctx, skip_check))
+            prev = _current_run_control()
+            if parent_control is not None:
+                _set_current_run_control(parent_control)
+            try:
+                return asyncio.run(self.execute(plan, args, ctx, skip_check))
+            finally:
+                _set_current_run_control(prev)
         try:
             asyncio.get_running_loop()
         except RuntimeError:

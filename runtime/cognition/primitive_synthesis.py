@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from swarm_engine.cognition.representations import Expr, SearchBias
 from swarm_engine.cognition.synthesis import GeneralSynthesizer
+from swarm_engine.services.run_control import checkpoint
 from swarm_engine.primitives.core import Effect, Primitive
 
 
@@ -148,6 +149,11 @@ class PrimitiveConstructor:
                 tried += 1
                 if tried >= max_matching_attempts:
                     return None
+                # Cooperation point (throttled): iteration-hypothesis
+                # matching is a genuinely long CPU loop. No-op when no
+                # control is installed.
+                if tried % 200 == 0:
+                    checkpoint("iterate:match")
                 if tried % 200 == 0 and time.time() - started > matching_wall_clock_s:
                     return None
                 if self._matches_all(step_expr, stop_value, examples, param_name):
