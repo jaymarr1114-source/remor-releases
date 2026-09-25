@@ -33,6 +33,9 @@ sys.path.insert(0, HERE)  # anchor_shim (battery E harness)
 from anchor_shim import (  # noqa: E402
     fresh_workdir, deploy_org, attach_org, anchor_paths_for)
 
+PYLIB = os.path.join(os.path.dirname(HERE), "..", "pylib")
+PYLIB = os.path.abspath(PYLIB)
+
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "pylib"))
 

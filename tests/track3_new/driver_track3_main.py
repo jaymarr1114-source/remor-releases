@@ -16,6 +16,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def cmd_phase1(workdir):
+    import shutil
+    # Fresh workdir: remove any prior L and L_anchor from earlier runs
+    if os.path.exists(workdir):
+        shutil.rmtree(workdir)
+    anchor_dir = os.path.abspath(workdir) + "_anchor"
+    if os.path.exists(anchor_dir):
+        shutil.rmtree(anchor_dir)
     os.makedirs(workdir, exist_ok=True)
     from driver_track3_ph1 import phase1
     res = phase1(workdir)
