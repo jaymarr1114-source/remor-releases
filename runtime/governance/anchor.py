@@ -60,6 +60,7 @@ import json
 import os
 import secrets
 import subprocess
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -69,6 +70,13 @@ GENESIS_DIGEST = "GENESIS"
 REASONS = frozenset({
     "genesis", "verdict", "transition",
     "migration", "rollback", "rotation", "recovery",
+    # "attest": routine post-write attestation by service domains
+    # (scheduler / artifacts) that anchor their chain heads after every
+    # mutation. Added 2026-09-25 for the cross-DB trust scope (Batch 11):
+    # the services are not verdict-admission points, so "verdict" would
+    # mislabel their records. Backward compatible: old journals verify
+    # unchanged (their reasons are a subset).
+    "attest",
 })
 
 #: Reasons allowed for transition(): audited head changes without a
@@ -108,6 +116,32 @@ class AnchorMissing(AnchorError):
     journal can never be silently recreated over a live database."""
 
 
+# ---------------------------------------------------------------------------
+# Shared chained-store exceptions (scheduler_runs, artifacts).
+#
+# Defined here (not per service module) so build_services() and tests
+# can catch one class regardless of which store raised it.
+
+
+class LegacySchemaError(Exception):
+    """A table has the pre-chain schema.
+
+    Refusing to open it is deliberate: silently rebuilding (re-chaining)
+    legacy rows would also re-anchor a database an attacker downgraded
+    to the legacy shape after deleting the journal. The operator runs
+    the explicit migrate_legacy_*_db() step -- that call is the
+    trust-on-first-use decision, and it is loudly logged.
+    """
+
+
+class ChainAuditError(Exception):
+    """A chained table's hash chain does not verify (tamper evidence)."""
+
+
+class AnchorVerifyError(Exception):
+    """An attached service anchor refused a write (fail-closed)."""
+
+
 def _canonical(obj: Any) -> str:
     """Deterministic JSON encoding shared by signing and verification."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
@@ -133,25 +167,47 @@ def _refuse_db_root_db(journal_path: str, key_path: str, db_path: str) -> None:
     parent directory, and the database must not sit inside the anchor
     directory. Raises AnchorConfigError.
     """
-    db_real = os.path.realpath(db_path)
-    db_parent = os.path.dirname(db_real)
-    for label, candidate in (("journal", journal_path), ("key", key_path)):
-        cand_real = os.path.realpath(candidate)
-        cand_dir = os.path.dirname(cand_real)
-        if cand_real == db_real:
+    _refuse_db_root_db_multi(journal_path, key_path, [db_path])
+
+
+def _refuse_db_root_db_multi(journal_path: str, key_path: str,
+                             db_paths: List[str]) -> None:
+    """Multi-database version of _refuse_db_root_db.
+
+    The journal/key must live outside EVERY protected database's parent
+    directory, and no protected database may sit inside the journal/key
+    directories. Used by CrossDbAnchor, which protects several databases
+    with one journal.
+    """
+    if not db_paths:
+        raise AnchorConfigError(
+            "cross-db anchor requires at least one protected database")
+    seen = set()
+    for db_path in db_paths:
+        db_real = os.path.realpath(db_path)
+        if db_real in seen:
             raise AnchorConfigError(
-                f"anchor {label} path is the database file itself: "
-                f"{candidate!r}")
-        if _is_within(cand_real, db_parent):
-            raise AnchorConfigError(
-                f"anchor {label} path {candidate!r} is inside the database "
-                f"directory {db_parent!r}: the anchor must live outside "
-                f"the database it protects")
-        if _is_within(db_real, cand_dir):
-            raise AnchorConfigError(
-                f"database path {db_path!r} is inside the anchor {label} "
-                f"directory {cand_dir!r}: the anchor must live outside "
-                f"the database it protects")
+                f"duplicate protected database path: {db_path!r}")
+        seen.add(db_real)
+        db_parent = os.path.dirname(db_real)
+        for label, candidate in (("journal", journal_path),
+                                 ("key", key_path)):
+            cand_real = os.path.realpath(candidate)
+            cand_dir = os.path.dirname(cand_real)
+            if cand_real == db_real:
+                raise AnchorConfigError(
+                    f"anchor {label} path is the database file itself: "
+                    f"{candidate!r}")
+            if _is_within(cand_real, db_parent):
+                raise AnchorConfigError(
+                    f"anchor {label} path {candidate!r} is inside the "
+                    f"database directory {db_parent!r}: the anchor must "
+                    f"live outside the databases it protects")
+            if _is_within(db_real, cand_dir):
+                raise AnchorConfigError(
+                    f"database path {db_path!r} is inside the anchor "
+                    f"{label} directory {cand_dir!r}: the anchor must "
+                    f"live outside the databases it protects")
 
 
 def _tighten(path: str, mode: int) -> None:
@@ -663,3 +719,175 @@ class AnchorStore:
         return True, (
             f"anchor verified: {total} record(s), tip seq {total}, "
             f"{len(live)} scope(s), key {records[-1].get('key_id')}")
+
+
+class CrossDbAnchor:
+    """One signed anchor journal protecting several databases.
+
+    The org anchor (AnchorStore over the org DB) cannot see the service
+    databases: the ReviewBoard never holds their handles. CrossDbAnchor
+    covers that gap with one journal whose inventory enumerates chained
+    tables from every bound provider::
+
+        scope = f"{prefix}:{table}"
+
+    e.g. ``org:ao_repair_records``, ``svc:scheduler_runs``,
+    ``svc:artifacts``. Providers are duck-typed on the OrgStore surface:
+    ``audit_all() -> {table: (ok, msg)}`` and
+    ``head_digest(table) -> str`` (full-table digest, GENESIS when empty).
+
+    Placement: the journal/key must live outside EVERY protected
+    database's parent directory (checked up front for all of them, not
+    just the first). The journal mechanics (HMAC chain, explicit-only
+    genesis, fail-closed verify, audited transition) are AnchorStore's,
+    unchanged.
+
+    Attestation discipline mirrors the org anchor: providers mutate via
+    chained appends, then the holder calls anchor_all() to commit the new
+    heads (reason + authority recorded). Verification is fail-closed and
+    happens at trust boundaries (boot, explicit attest, test batteries).
+    A crash between a chained write and anchor_all() surfaces as a head
+    mismatch at the next verify; recovery is the audited transition()
+    path, never a silent re-anchor.
+
+    Concurrency: all public attestation methods take _ATTEST_LOCK (a
+    class-level RLock). Providers must NOT take their own store locks
+    inside audit()/audit_all()/head_digest() -- collection runs under
+    _ATTEST_LOCK, and a provider lock here would invert the lock order
+    (store lock -> attest lock on the write path) and deadlock against a
+    concurrent writer. Writers hold their store lock across the whole
+    pre-verify -> append -> anchor sequence, so chain head read + append
+    stays atomic; SQLite statement atomicity keeps collection reads
+    consistent.
+    """
+
+    _ATTEST_LOCK = threading.RLock()
+
+    def __init__(self, journal_path: str, key_path: str,
+                 protected_dbs: List[Tuple[str, str]]) -> None:
+        """protected_dbs: [(scope_prefix, db_path), ...], non-empty.
+
+        Scope prefixes must be unique; database paths must be distinct.
+        """
+        if not protected_dbs:
+            raise AnchorConfigError(
+                "CrossDbAnchor requires at least one protected database")
+        prefixes = [p for p, _ in protected_dbs]
+        if len(set(prefixes)) != len(prefixes):
+            raise AnchorConfigError(
+                f"duplicate scope prefix in {prefixes!r}")
+        for p in prefixes:
+            if not isinstance(p, str) or not p or ":" in p:
+                raise AnchorConfigError(
+                    f"bad scope prefix {p!r}: non-empty, no ':'")
+        _refuse_db_root_db_multi(journal_path, key_path,
+                                 [db for _, db in protected_dbs])
+        self.journal_path = os.path.abspath(journal_path)
+        self.key_path = os.path.abspath(key_path)
+        self.protected_dbs = [(p, os.path.abspath(db))
+                              for p, db in protected_dbs]
+        # AnchorStore re-checks placement against the first DB; the full
+        # multi-DB check above already ran.
+        self._anchor = AnchorStore(journal_path, key_path,
+                                   self.protected_dbs[0][1])
+        self._providers: List[Tuple[str, Any]] = []
+
+    # -- provider binding ------------------------------------------------
+    def bind(self, providers: List[Tuple[str, Any]]) -> None:
+        """Bind (scope_prefix, store) providers.
+
+        Every prefix must have been declared in protected_dbs; a store
+        must expose audit_all() and head_digest(table). Binding is
+        explicit and replaceable (tests rebind per case); nothing is
+        registered implicitly.
+        """
+        declared = {p for p, _ in self.protected_dbs}
+        bound = []
+        for prefix, store in providers:
+            if prefix not in declared:
+                raise AnchorConfigError(
+                    f"scope prefix {prefix!r} not in protected_dbs "
+                    f"{sorted(declared)}")
+            for meth in ("audit_all", "head_digest"):
+                if not callable(getattr(store, meth, None)):
+                    raise AnchorConfigError(
+                        f"provider {prefix!r}: store lacks {meth}()")
+            bound.append((prefix, store))
+        prefixes = [p for p, _ in bound]
+        if len(set(prefixes)) != len(prefixes):
+            raise AnchorConfigError("duplicate provider prefix")
+        self._providers = bound
+
+    @property
+    def providers(self) -> List[Tuple[str, Any]]:
+        return list(self._providers)
+
+    # -- collection ------------------------------------------------------
+    def collect(self) -> Dict[str, str]:
+        """Heads inventory: {scope: head_digest} over all bound providers.
+
+        Scope tables come from each provider's audit_all() keys (the same
+        enumeration rule as collect_anchor_heads). Unbound -> empty dict
+        (initialize/anchor accept it -- callers must bind first; verify()
+        against {} only passes a pristine deployment, which is honest).
+        Takes _ATTEST_LOCK; providers must not take their own store locks
+        inside audit()/audit_all()/head_digest().
+        """
+        with CrossDbAnchor._ATTEST_LOCK:
+            return self._collect_locked()
+
+    # -- journal operations (delegate to AnchorStore) --------------------
+    def journal_exists(self) -> bool:
+        return self._anchor.journal_exists()
+
+    @property
+    def record_count(self) -> int:
+        return self._anchor.record_count
+
+    def latest_heads(self) -> Dict[str, str]:
+        return self._anchor.latest_heads()
+
+    def initialize(self, authority: str) -> str:
+        """Explicit deployment-time genesis over the bound providers."""
+        with CrossDbAnchor._ATTEST_LOCK:
+            return self._anchor.initialize(self._collect_locked(), authority)
+
+    def anchor_all(self, reason: str = "attest",
+                   authority: Optional[str] = None) -> str:
+        """Commit current heads of all bound providers. Post-write call."""
+        with CrossDbAnchor._ATTEST_LOCK:
+            return self._anchor.anchor(self._collect_locked(), reason,
+                                       authority)
+
+    def transition(self, reason: str, authority: str) -> str:
+        """Audited head change (migration/rollback/rotation/recovery)."""
+        with CrossDbAnchor._ATTEST_LOCK:
+            return self._anchor.transition(self._collect_locked(), reason,
+                                           authority)
+
+    def verify_all(self) -> Tuple[bool, str]:
+        """Fail-closed verification of the journal against live heads."""
+        with CrossDbAnchor._ATTEST_LOCK:
+            return self._anchor.verify(self._collect_locked())
+
+    def _collect_locked(self) -> Dict[str, str]:
+        """collect() without taking _ATTEST_LOCK (caller holds it)."""
+        heads: Dict[str, str] = {}
+        for prefix, store in self._providers:
+            for table in store.audit_all().keys():
+                scope = f"{prefix}:{table}"
+                heads[scope] = store.head_digest(table)
+        return heads
+
+    def audit_providers(self) -> Dict[str, Tuple[bool, str]]:
+        """Internal chain audits, per scope: {scope: (ok, msg)}.
+
+        Takes _ATTEST_LOCK; providers must not take their own store
+        locks inside audit_all().
+        """
+        with CrossDbAnchor._ATTEST_LOCK:
+            out: Dict[str, Tuple[bool, str]] = {}
+            for prefix, store in self._providers:
+                for table, result in store.audit_all().items():
+                    out[f"{prefix}:{table}"] = result
+            return out

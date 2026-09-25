@@ -439,11 +439,75 @@ def build_services(base_dir: str) -> Dict[str, Any]:
     )
     files = ScopedFileService(root=browser_root, writable=True)
     artifacts = ArtifactStore(db_path=artifacts_db, sandbox_dir=sandbox_dir)
+    service_anchor = _attach_service_anchor(
+        base_dir, scheduler, artifacts, authority="remor:services")
     return {
         "scheduler": scheduler, "projects": projects,
         "files": files, "artifacts": artifacts,
-        "base_dir": base_dir,
+        "base_dir": base_dir, "service_anchor": service_anchor,
     }
+
+
+def _attach_service_anchor(base_dir: str, scheduler, artifacts,
+                           authority: str = "remor:services"):
+    """Create, bind, and initialize-or-verify the service anchor journal.
+
+    One CrossDbAnchor covers both service DBs (scopes
+    ``scheduler:scheduler_runs`` + ``artifact:artifacts``). The journal
+    and key live in ``<base_dir>/../anchor_store`` -- outside every
+    protected DB's parent dir (``base_dir``), enforced by the anchor's
+    multi-DB placement check.
+
+    Boot discipline (fail-closed):
+    - journal exists -> verify_all() must pass, else raise;
+    - journal missing -> both chain tables must be pristine (empty),
+      then initialize(authority); a non-empty chain table with no
+      journal is REFUSED (possible journal-deletion cover);
+    - legacy (pre-chain) schema -> the stores already raised
+      LegacySchemaError at construction; the operator migrates
+      explicitly via migrate_legacy_*_db().
+    """
+    from swarm_engine.governance.anchor import (
+        ChainAuditError, CrossDbAnchor)
+    anchor_dir = os.path.abspath(
+        os.path.join(base_dir, "..", "anchor_store"))
+    os.makedirs(anchor_dir, exist_ok=True)
+    journal = os.path.join(anchor_dir, "services.anchor.journal")
+    key_path = os.path.join(anchor_dir, "services.anchor.key")
+    anchor = CrossDbAnchor(
+        journal, key_path,
+        [("scheduler", scheduler.db_path),
+         ("artifact", artifacts.db_path)])
+    anchor.bind([("scheduler", scheduler), ("artifact", artifacts)])
+    scheduler.attach_anchor(anchor, authority=authority)
+    artifacts.attach_anchor(anchor, authority=authority)
+    if anchor.journal_exists():
+        ok, msg = anchor.verify_all()
+        if not ok:
+            raise ChainAuditError(
+                f"service anchor verify failed at boot: {msg}")
+    else:
+        pristine = _chain_table_empty(
+            scheduler.db_path, "scheduler_runs") and _chain_table_empty(
+            artifacts.db_path, "artifacts")
+        if not pristine:
+            raise ChainAuditError(
+                "service anchor journal is missing but the service "
+                "databases are not pristine: refusing boot (possible "
+                "journal-deletion cover). Restore the journal from "
+                "backup or re-initialize explicitly.")
+        anchor.initialize(authority)
+    return anchor
+
+
+def _chain_table_empty(db_path: str, table: str) -> bool:
+    import sqlite3
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        return conn.execute(
+            f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def _lazy_engine(db_path: str):

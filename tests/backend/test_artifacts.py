@@ -216,9 +216,12 @@ class TestExecution(unittest.TestCase):
 class TestTamperHonesty(unittest.TestCase):
     def test_tampered_blob_returned_verbatim_no_integrity_illusion(self):
         """Flip a code blob directly in sqlite. get() must return exactly
-        the tampered bytes — the store does NOT tamper-evidence code
-        blobs. Classification: ABSENT (integrity of code blobs), unlike
-        the oracle-bound capability store."""
+        the tampered bytes -- the store never pretends an unread blob is
+        intact. Classification as of 2026-09-25 (Batch 11 cross-DB trust
+        scope): DETECTED -- the chained rows make the tamper visible to
+        audit()/verify, which MUST fail. get() stays a verbatim read;
+        the detection surface is the chain + the anchor journal, mirroring
+        the org store (latest() reads rows; audit() verifies)."""
         td, store = _store()
         try:
             s = store.save("victim", "python", "print('original')")
@@ -235,6 +238,11 @@ class TestTamperHonesty(unittest.TestCase):
             self.assertTrue(g["ok"])
             self.assertEqual(g["code"], "print('TAMPERED-BY-DB-WRITE')",
                              "store must not pretend the blob is intact")
+            ok, msg = store.audit()
+            self.assertFalse(
+                ok,
+                f"chain audit must detect the out-of-band blob flip: {msg}")
+            self.assertIn("row_digest mismatch", msg)
         finally:
             td.cleanup()
 
