@@ -9,8 +9,12 @@ Usage: python3 driver_boundaries.py
 """
 import sys, os, json, time, tempfile, sqlite3
 
-PYLIB = os.path.expanduser("~/workspace/remor_agent_org/pylib")
-sys.path.insert(0, PYLIB)
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)  # anchor_shim (agent_org harness)
+from anchor_shim import deploy_org  # noqa: E402
+
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "pylib"))
 
 from swarm_engine.agent_org.org import RemorOrganization
 from swarm_engine.agent_org.substrates import (
@@ -213,13 +217,10 @@ def part1():
     check("E.review-accepted", v5.admitted, ";".join(v5.reasons[:2]))
     org.review.accept(wp5, org.engine)
     cand = [c for c in org.experience.list_candidates() if c.wp_id == wp5][0]
-    validator = IndependentValidator(runner=run_code, oracle_registry=org.oregistry,
-                                     engine_oracle=org.engine)
     gen_cases = [Case(args={"data_hex": chunk_hex(9)},
                       predicate=lambda v: bool(v.get("roundtrip_ok")),
                       label="eg[0]")]
-    ok5, res5 = org.experience.promote(cand.candidate_id, generality_cases=gen_cases,
-                                       validator=validator)
+    ok5, res5 = org.experience.promote(cand.candidate_id, generality_cases=gen_cases)
     check("E.promoted", ok5 is True, str(res5)[:120])
     exp5 = org.experience.get_experience(res5)
     check("E.promoted-L2", exp5.level == "L2", exp5.exp_id)

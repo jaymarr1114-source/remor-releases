@@ -21,7 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
     TRACK1, WORK, check, failfast, attach_org, digest,
-    engine_extract_examples, TechniqueSpec,
+    engine_extract_examples, TechniqueSpec, CHECKS,
 )
 import defects  # noqa: E402
 
@@ -361,4 +361,4 @@ handoff2 = {
 }
 with open(os.path.join(PHASE, "handoff.json"), "w") as fh:
     json.dump(handoff2, fh, indent=2, sort_keys=True)
-print(f"\nPHASE 2 COMPLETE", flush=True)
+print(f"\nPHASE 2 COMPLETE: {CHECKS['pass']} checks passed", flush=True)
