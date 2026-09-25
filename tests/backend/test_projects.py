@@ -25,7 +25,7 @@ import zipfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.normpath(
-    os.path.join(_HERE, "..", "..", "..", "pylib")))
+    os.path.join(_HERE, "..", "..", "pylib")))
 
 from swarm_engine.services.projects import ProjectService  # noqa: E402
 from swarm_engine.project.lifecycle import ProjectLifecycle  # noqa: E402

@@ -25,7 +25,7 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "pylib")))
+    os.path.join(os.path.dirname(__file__), "..", "..", "pylib")))
 
 from swarm_engine.core.engine import SwarmEngine  # noqa: E402
 from swarm_engine.core.task_interface import (  # noqa: E402
@@ -468,11 +468,16 @@ class TestTouchedFilesCompile(unittest.TestCase):
 
     def test_compileall_clean(self):
         root = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "..", ".."))
-        for rel in self._TOUCHED:
-            path = os.path.join(root, rel)
-            self.assertTrue(os.path.isfile(path), f"missing: {rel}")
-            py_compile.compile(path, doraise=True)
+            os.path.dirname(__file__), "..", "..", "runtime"))
+        # Bytecode output goes to a temp dir, never beside canonical sources:
+        # the test asserts every _TOUCHED file exists and compiles clean,
+        # without polluting canonical/runtime/ with .pyc files.
+        with tempfile.TemporaryDirectory() as td:
+            for i, rel in enumerate(self._TOUCHED):
+                path = os.path.join(root, rel)
+                self.assertTrue(os.path.isfile(path), f"missing: {rel}")
+                cfile = os.path.join(td, "touched_%d.pyc" % i)
+                py_compile.compile(path, cfile=cfile, doraise=True)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-sys.path.insert(0, os.path.expanduser("~/workspace/remor_backend_ff/pylib"))
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "pylib")))
 
 from swarm_engine.services.http_adapter import serve, close_services  # noqa: E402
 

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "pylib")))
+    os.path.join(os.path.dirname(__file__), "..", "..", "pylib")))
 
 from swarm_engine.services.files import ScopedFileService  # noqa: E402
 
