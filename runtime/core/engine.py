@@ -11,6 +11,7 @@ Lifecycle:
 The engine owns orchestration. Agents execute capabilities. Capabilities do
 not become the engine itself.
 """
+from swarm_engine.services.run_control import checkpoint
 import json
 import sqlite3
 import time
@@ -676,6 +677,9 @@ class SwarmEngine:
             task.task_type, payload=getattr(task, 'payload', None),
             composer=self.composer, registry=self.primitives, examples=_ex,
             semantic_store=getattr(self, 'semantic_store', None))
+        # Cooperation point: stop/pause take effect at stage transitions.
+        # No-op when no control is installed.
+        checkpoint("arbitrate")
         task.metadata["arbitration"] = {
             "tier": decision.tier.value,
             "reason": decision.reason,
@@ -694,6 +698,7 @@ class SwarmEngine:
             # vocabulary, then let admission decide whether the result is
             # good enough to keep.
             if task.task_type != "forge":
+                checkpoint("synthesize")
                 synth = self._synthesize_capability(task)
                 examples = task.metadata.get("acquisition_examples")
 
@@ -798,6 +803,7 @@ class SwarmEngine:
 
         # A matched capability is a stored plan over primitives, so it runs
         # through the composer rather than an agent handler.
+        checkpoint("execute")
         if decision.matched_capability and decision.matched_capability.startswith("cap_"):
             task.state = "executing"
             result = await self._execute_capability(decision.matched_capability, task)
@@ -814,6 +820,7 @@ class SwarmEngine:
             )
 
         task.state = "verifying"
+        checkpoint("verify")
         verification = await self.verifier.verify(result)
         passed = result.get("success", False) and verification["status"] == "passed"
 

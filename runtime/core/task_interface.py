@@ -27,6 +27,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from swarm_engine.services.run_control import (
+    RunControl,
+    RunStopped,
+    checkpoint,
+    current as _current_run_control,
+    set_current as _set_current_run_control,
+)
+
 
 def _normalize_example(ex: Any) -> Optional[Tuple[Dict[str, Any], Any]]:
     """Accept (input_dict, expected) or {"input": ..., "output": ...}."""
@@ -83,6 +91,7 @@ class Stage(Enum):
     LEARN = "learn"
     IMPROVE = "improve"
     PERSIST = "persist"
+    STOPPED = "stopped"
 
 
 @dataclass
@@ -131,7 +140,39 @@ class UniversalTaskInterface:
                      examples: Optional[List[Any]] = None,
                      metadata: Optional[Dict[str, Any]] = None,
                      driver_id: Optional[str] = None) -> TaskOutcome:
+        """Run the full pipeline with cooperative preemption installed.
+
+        The caller may pass a ``RunControl`` as ``metadata["run_control"]``
+        (e.g. the GUI's run service); otherwise a fresh one is installed for
+        the run's duration. A ``RunStopped`` raised at any checkpoint is
+        converted into an honest STOPPED outcome.
+        """
         outcome = TaskOutcome(goal=goal, success=False)
+        control = (metadata or {}).get("run_control")
+        if not isinstance(control, RunControl):
+            control = RunControl()
+        prev = _current_run_control()
+        _set_current_run_control(control)
+        try:
+            return await self._handle_inner(
+                goal, payload=payload, examples=examples,
+                metadata=metadata, driver_id=driver_id, outcome=outcome)
+        except RunStopped as exc:
+            detail = f"run stopped by user request ({exc})"
+            outcome.trace.append(StageTrace(Stage.STOPPED, True, detail))
+            outcome.success = False
+            outcome.error = detail
+            return outcome
+        finally:
+            _set_current_run_control(prev)
+
+    async def _handle_inner(self, goal: str, payload: Optional[Dict[str, Any]] = None,
+                            examples: Optional[List[Any]] = None,
+                            metadata: Optional[Dict[str, Any]] = None,
+                            driver_id: Optional[str] = None,
+                            outcome: Optional[TaskOutcome] = None) -> TaskOutcome:
+        outcome = outcome if outcome is not None else TaskOutcome(
+            goal=goal, success=False)
 
         # Public-boundary schema guard (Defect #8). Non-dict payloads must
         # become structured TaskOutcome failures, never uncaught exceptions.
