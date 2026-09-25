@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.join(r'/home/hatch/workspace/remor_convergence/canoni
 from swarm_engine.core.engine import SwarmEngine
 from swarm_engine.synthesis.intent_router import IntentRouter
 from swarm_engine.synthesis.nl_dispatch import NLToolDispatcher
-eng = SwarmEngine(db_path=r'/home/hatch/workspace/remor_convergence/canonical/tests/track2_new/fresh_mmfi7nab/eng.db')
+eng = SwarmEngine(db_path=r'/home/hatch/workspace/remor_convergence/canonical/tests/track2_new/fresh_9_r8ixal/eng.db')
 disp = NLToolDispatcher(eng, IntentRouter(eng))
 hist = disp.history()
 d2 = disp.dispatch('add two numbers together', {'a': 1, 'b': 2})

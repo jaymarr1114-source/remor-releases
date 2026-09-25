@@ -200,7 +200,7 @@ gen_cases = [Case(args={"data_hex": h},
                   and v.get("roundtrip_ok") is True,
                   label=f"gen{i}")
              for i, h in enumerate(["99" * 200, "abcd" * 60, "0707" * 90])]
-promoted, info = org.experience.promote(cand_id, gen_cases, validator)
+promoted, info = org.experience.promote(cand_id, gen_cases)
 check("promote -> L2", promoted)
 exp1 = org.experience.get_experience(info)
 check("L2 level", exp1.level == "L2" and exp1.derived_from == [])
@@ -227,7 +227,7 @@ v2 = org.review.review(wp2, spec, [Case(
     label=f"rt{i}") for i, h in enumerate(task2["probe_corpus"])])
 check("second verdict admitted", v2.admitted)
 cand2 = org.review.accept(wp2, org.engine)
-promoted2, info2 = org.experience.promote(cand2, gen_cases, validator)
+promoted2, info2 = org.experience.promote(cand2, gen_cases)
 check("second promote -> L2", promoted2)
 exp2 = org.experience.get_experience(info2)
 check("different techniques", exp1.technique_name != exp2.technique_name)
