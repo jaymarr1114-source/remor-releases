@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -86,6 +87,41 @@ _TOMBSTONE_REV = 0
 #: and is refused at open (see LegacySchemaError).
 _LEGACY_REQUIRED_ABSENT = ("prev_digest", "row_digest")
 
+#: Staging dirs older than this with no committed rows are treated as
+#: orphaned (crashed writer) and removed by open-time recovery.
+_STAGING_GRACE_S = 60
+
+#: Windows-reserved device names (James's G0-4 targets Windows): a job
+#: file with one of these names would not materialize on Windows.
+_WINDOWS_RESERVED = (
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def _safe_filename(name: Any) -> Optional[str]:
+    """None if name is a safe plain filename, else the refusal reason.
+
+    save_many() materializes files on disk, so names must be plain
+    filenames: no separators, no traversal, no Windows device names.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return "name is required"
+    name = name.strip()
+    if len(name) > 255:
+        return "name too long (max 255)"
+    if "/" in name or "\\" in name or "\x00" in name:
+        return "name must be a plain filename (no path separators)"
+    if name in (".", ".."):
+        return "name must be a plain filename"
+    if os.path.isabs(name):
+        return "name must be a plain filename (no absolute paths)"
+    stem = name.split(".")[0].upper()
+    if stem in _WINDOWS_RESERVED:
+        return f"name {name!r} is a reserved device name"
+    return None
+
 
 def _canonical(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"),
@@ -110,6 +146,10 @@ class ArtifactStore:
         self._anchor = None
         self._authority = "artifact"
         self._init_db()
+        # Crash recovery for atomic multi-file jobs: a writer killed
+        # between staging and publish leaves a .staging/<job_id> dir
+        # that no finally block could clean. See _recover_staging().
+        self._recover_staging()
 
     @property
     def db_path(self) -> str:
@@ -384,6 +424,226 @@ class ArtifactStore:
         with self._lock:
             self._attested_write(_write, "save")
         return result
+
+    # -- atomic multi-file jobs ----------------------------------------
+    def _committed_job_ids(self) -> set:
+        """Job ids with at least one committed row (crash-recovery aid)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT "
+                "json_extract(metadata_json, '$.job.job_id') AS jid "
+                "FROM artifacts WHERE "
+                "json_extract(metadata_json, '$.job.job_id') IS NOT NULL"
+            ).fetchall()
+        return {r["jid"] for r in rows}
+
+    def _recover_staging(self) -> None:
+        """Open-time recovery for atomic multi-file jobs.
+
+        A writer killed mid-job (SIGKILL: no finally block runs) can
+        leave `<sandbox>/.staging/<job_id>/` behind. Two cases:
+        * the DB has committed rows for the job -> the crash happened
+          after the DB commit but before the publish rename: complete
+          the job by renaming the staging dir into place;
+        * otherwise -> orphan staging: remove it, but only if it is
+          older than _STAGING_GRACE_S, so a racing live writer's fresh
+          staging dir is never reaped.
+        Residual (documented): a writer that dies within the grace
+        period leaves staging debris until the next open past it.
+        """
+        staging_root = os.path.join(self._sandbox_dir, ".staging")
+        if not os.path.isdir(staging_root):
+            return
+        jobs_root = os.path.join(self._sandbox_dir, "jobs")
+        os.makedirs(jobs_root, exist_ok=True)
+        committed = self._committed_job_ids()
+        for job_id in sorted(os.listdir(staging_root)):
+            src = os.path.join(staging_root, job_id)
+            if not os.path.isdir(src):
+                continue
+            dst = os.path.join(jobs_root, job_id)
+            if job_id in committed:
+                if os.path.isdir(dst):
+                    shutil.rmtree(src, ignore_errors=True)
+                else:
+                    try:
+                        os.rename(src, dst)
+                    except OSError:
+                        pass
+            else:
+                try:
+                    age = time.time() - os.path.getmtime(src)
+                except OSError:
+                    continue
+                if age > _STAGING_GRACE_S:
+                    shutil.rmtree(src, ignore_errors=True)
+
+    def save_many(
+        self,
+        files: List[Dict[str, Any]],
+        job: Optional[Dict[str, Any]] = None,
+        _fail_after: int = 0,
+        _file_delay: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Create N files as ONE atomic job (all-or-nothing).
+
+        files: list of {name, language, code, metadata?}. Every file is
+        validated BEFORE anything is written (fail-fast: a validation
+        failure writes nothing anywhere). Names must be safe plain
+        filenames (no separators/traversal/device names) because the
+        job materializes working copies on disk.
+
+        The job: stage all files to `<sandbox>/.staging/<job_id>/`,
+        append all N revision rows in ONE sqlite transaction, COMMIT,
+        then atomically rename the staging dir to
+        `<sandbox>/jobs/<job_id>/`. Any failure before the commit rolls
+        back the transaction AND removes the staging dir: zero rows,
+        zero files. A process killed mid-job is cleaned by
+        open-time recovery (_recover_staging).
+
+        Every row's metadata_json carries an authoritative job record
+        {job_id, job_seq, job_created_at, producer, purpose} --
+        first-class provenance for James's locked constraint. The whole
+        job runs under one _attested_write: one anchor attestation per
+        job, concurrent jobs serialize on the store lock.
+
+        _fail_after / _file_delay are TEST-ONLY fault-injection hooks
+        (real exceptions/sleeps in the real path, default off).
+        """
+        # --- fail-fast validation: zero writes on any problem ---
+        if not isinstance(files, (list, tuple)) or not files:
+            return {"ok": False, "error": "files must be a non-empty list"}
+        seen = set()
+        cleaned: List[Dict[str, Any]] = []
+        for i, f in enumerate(files):
+            if not isinstance(f, dict):
+                return {"ok": False,
+                        "error": f"file {i}: must be a mapping"}
+            err = _safe_filename(f.get("name"))
+            if err:
+                return {"ok": False, "error": f"file {i}: {err}"}
+            name = str(f["name"]).strip()
+            if name in seen:
+                return {"ok": False,
+                        "error": f"file {i}: duplicate name {name!r} "
+                                 f"in one job"}
+            seen.add(name)
+            code = f.get("code")
+            if not isinstance(code, str) or not code.strip():
+                return {"ok": False,
+                        "error": f"file {i} ({name}): empty code"}
+            language = (f.get("language") or "").strip().lower() \
+                or "python"
+            meta = f.get("metadata")
+            cleaned.append({
+                "name": name, "language": language, "code": code,
+                "metadata": dict(meta) if isinstance(meta, dict) else {},
+            })
+        job = job or {}
+        producer = job.get("producer")
+        purpose = job.get("purpose")
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        result: Dict[str, Any] = {}
+
+        def _write() -> None:
+            staging = os.path.join(self._sandbox_dir, ".staging", job_id)
+            jobs_root = os.path.join(self._sandbox_dir, "jobs")
+            os.makedirs(staging, exist_ok=False)
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                ids: List[Dict[str, Any]] = []
+                try:
+                    for i, f in enumerate(cleaned):
+                        fpath = os.path.join(staging, f["name"])
+                        with open(fpath, "w", encoding="utf-8") as fh:
+                            fh.write(f["code"])
+                        if _file_delay:
+                            time.sleep(_file_delay)
+                        meta = dict(f["metadata"])
+                        meta["job"] = {
+                            "job_id": job_id, "job_seq": i,
+                            "job_created_at": now,
+                            "producer": producer, "purpose": purpose,
+                        }
+                        key = self._key_for_name(conn, f["name"])
+                        if key is None:
+                            key = uuid.uuid4().hex
+                            rev = 1
+                        else:
+                            row = conn.execute(
+                                "SELECT MAX(rev) AS m FROM artifacts "
+                                "WHERE artifact_key = ?",
+                                (key,),
+                            ).fetchone()
+                            rev = int(row["m"]) + 1
+                        row_id = self._append_row(conn, {
+                            "artifact_key": key, "name": f["name"],
+                            "language": f["language"], "rev": rev,
+                            "code": f["code"],
+                            "metadata_json": json.dumps(meta),
+                            "created_at": now,
+                        })
+                        if rev == 1:
+                            artifact_id = row_id
+                        else:
+                            artifact_id = conn.execute(
+                                "SELECT id FROM artifacts "
+                                "WHERE artifact_key = ? AND rev = 1",
+                                (key,),
+                            ).fetchone()["id"]
+                        ids.append({"artifact_id": artifact_id,
+                                    "name": f["name"],
+                                    "revision": rev})
+                        if _fail_after and (i + 1) == _fail_after:
+                            raise RuntimeError(
+                                "injected failure after "
+                                f"{_fail_after} file(s)")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
+                # DB committed: publish the staged files atomically.
+                os.makedirs(jobs_root, exist_ok=True)
+                os.rename(staging,
+                          os.path.join(jobs_root, job_id))
+                result.update({"ok": True, "job_id": job_id,
+                               "artifacts": ids})
+            except Exception:
+                # In-process failure: nothing survives (DB rolled back
+                # above; staging removed here). A killed process skips
+                # this path -- _recover_staging handles that on open.
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+
+        with self._lock:
+            self._attested_write(_write, "save_many")
+        return result
+
+    def artifacts_for_job(self, job_id: str) -> List[Dict[str, Any]]:
+        """List a job's files from their provenance records."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT a.id AS row_id, a.name, a.rev, "
+                "json_extract(a.metadata_json, '$.job.job_seq') "
+                "  AS job_seq, "
+                "(SELECT b.id FROM artifacts b "
+                " WHERE b.artifact_key = a.artifact_key AND b.rev = 1"
+                ") AS artifact_id "
+                "FROM artifacts a WHERE "
+                "json_extract(a.metadata_json, '$.job.job_id') = ? "
+                "ORDER BY job_seq",
+                (job_id,),
+            ).fetchall()
+        return [
+            {"row_id": r["row_id"], "artifact_id": r["artifact_id"],
+             "name": r["name"], "revision": r["rev"],
+             "job_seq": r["job_seq"]}
+            for r in rows
+        ]
 
     def _resolve(self, artifact_id: int) -> Optional[Dict[str, Any]]:
         with self._lock, self._connect() as conn:

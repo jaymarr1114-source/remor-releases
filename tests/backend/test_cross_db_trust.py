@@ -46,6 +46,7 @@ from swarm_engine.services.artifacts import ArtifactStore  # noqa: E402
 from swarm_engine.services.http_adapter import (  # noqa: E402
     build_services,
     close_services,
+    service_anchor_paths,
 )
 from swarm_engine.services.scheduler import (  # noqa: E402
     RunScheduler,
@@ -428,8 +429,8 @@ class CrossDbTrustBattery(unittest.TestCase):
         finally:
             close_services(svc)
         # Attacker deletes the journal to cover a DB tamper.
-        os.remove(os.path.join(base, "..", "anchor_store",
-                               "services.anchor.journal"))
+        journal, _key = service_anchor_paths(base)
+        os.remove(journal)
         with self.assertRaises(ChainAuditError):
             build_services(base)
 
@@ -454,6 +455,52 @@ class CrossDbTrustBattery(unittest.TestCase):
             self.assertTrue(ok, msg)
         finally:
             close_services(svc)
+
+
+    # -- 14. sibling deployments under one parent do not share a journal --
+    def test_14_sibling_deployments_have_independent_anchors(self):
+        # Regression: with a fixed shared journal name, a second
+        # build_services() whose base_dir shared a parent with the first
+        # (e.g. two e2e_drive mkdtemp runs under /tmp) fail-closed at
+        # boot against the first deployment's heads. Journal/key file
+        # names are scoped per base_dir, so this must boot cleanly.
+        base1 = os.path.join(self.td.name, "deploy_a")
+        base2 = os.path.join(self.td.name, "deploy_b")
+        svc1 = build_services(base1)
+        try:
+            r = svc1["artifacts"].save("w", "python", "print(1)")
+            self.assertTrue(r["ok"], r)
+            aid1 = r["artifact_id"]
+            ok, msg = svc1["service_anchor"].verify_all()
+            self.assertTrue(ok, msg)
+            j1, _k1 = service_anchor_paths(base1)
+            self.assertTrue(os.path.isfile(j1))
+        finally:
+            close_services(svc1)
+        # Second deployment under the SAME parent: must boot fresh and
+        # verify on its own journal, not fail-closed on deploy_a's heads.
+        svc2 = build_services(base2)
+        try:
+            j2, _k2 = service_anchor_paths(base2)
+            self.assertTrue(os.path.isfile(j2))
+            self.assertNotEqual(j1, j2)
+            ok, msg = svc2["service_anchor"].verify_all()
+            self.assertTrue(ok, msg)
+            r = svc2["artifacts"].save("w2", "python", "print(2)")
+            self.assertTrue(r["ok"], r)
+            ok, msg = svc2["service_anchor"].verify_all()
+            self.assertTrue(ok, msg)
+        finally:
+            close_services(svc2)
+        # Re-boot of the first deployment reuses its own journal and
+        # still verifies (idempotent, heads intact).
+        svc1b = build_services(base1)
+        try:
+            ok, msg = svc1b["service_anchor"].verify_all()
+            self.assertTrue(ok, msg)
+            self.assertTrue(svc1b["artifacts"].get(aid1)["ok"])
+        finally:
+            close_services(svc1b)
 
 
 if __name__ == "__main__":

@@ -448,6 +448,29 @@ def build_services(base_dir: str) -> Dict[str, Any]:
     }
 
 
+def service_anchor_paths(base_dir: str) -> Tuple[str, str]:
+    """(journal_path, key_path) for the service anchor of one deployment.
+
+    The anchor dir stays ``<base_dir>/../anchor_store`` -- outside the
+    databases' parent dir, so the multi-DB placement check passes -- but
+    the journal/key file names are scoped to THIS base_dir
+    (``services_<basename>.anchor.{journal,key}``), matching the
+    ``default_anchor_paths()`` per-database convention.
+
+    A fixed shared journal name is a real defect: two ``build_services()``
+    deployments whose base_dirs share one parent (e.g. two e2e runs with
+    mkdtemp dirs directly under /tmp) would share one journal, and the
+    second boot fail-closes against the first deployment's heads.
+    Scoping the file names keeps each deployment's anchor independent
+    while a re-boot of the SAME base_dir reuses its own journal.
+    """
+    base_abs = os.path.abspath(base_dir)
+    stem = "services_" + (os.path.basename(base_abs) or "root")
+    anchor_dir = os.path.normpath(os.path.join(base_abs, "..", "anchor_store"))
+    return (os.path.join(anchor_dir, stem + ".anchor.journal"),
+            os.path.join(anchor_dir, stem + ".anchor.key"))
+
+
 def _attach_service_anchor(base_dir: str, scheduler, artifacts,
                            authority: str = "remor:services"):
     """Create, bind, and initialize-or-verify the service anchor journal.
@@ -456,7 +479,8 @@ def _attach_service_anchor(base_dir: str, scheduler, artifacts,
     ``scheduler:scheduler_runs`` + ``artifact:artifacts``). The journal
     and key live in ``<base_dir>/../anchor_store`` -- outside every
     protected DB's parent dir (``base_dir``), enforced by the anchor's
-    multi-DB placement check.
+    multi-DB placement check -- with file names scoped per base_dir via
+    service_anchor_paths() so sibling deployments never share a journal.
 
     Boot discipline (fail-closed):
     - journal exists -> verify_all() must pass, else raise;
@@ -469,11 +493,8 @@ def _attach_service_anchor(base_dir: str, scheduler, artifacts,
     """
     from swarm_engine.governance.anchor import (
         ChainAuditError, CrossDbAnchor)
-    anchor_dir = os.path.abspath(
-        os.path.join(base_dir, "..", "anchor_store"))
-    os.makedirs(anchor_dir, exist_ok=True)
-    journal = os.path.join(anchor_dir, "services.anchor.journal")
-    key_path = os.path.join(anchor_dir, "services.anchor.key")
+    journal, key_path = service_anchor_paths(base_dir)
+    os.makedirs(os.path.dirname(journal), exist_ok=True)
     anchor = CrossDbAnchor(
         journal, key_path,
         [("scheduler", scheduler.db_path),

@@ -46,22 +46,44 @@ def cmd_http(workdir):
     """Real HTTP: serve the deployment, GET the evidence doc, verify."""
     import threading
     import time
+    import traceback
     import urllib.request
     import urllib.error
     from swarm_engine.services.http_adapter import run
     db_path = os.path.join(workdir, "engine.db")
-    port = 8471
     holder = {}
+    errors = {}
 
     def _serve():
         # run() builds the engine in the serving thread (thread-affinity).
-        server, _svc = run(db_path, port=port)
-        holder["server"] = server
-        server.serve_forever()
+        # Ephemeral port: a fixed port flakes when two runners (or a
+        # leftover server) contend for it; the test's purpose is the
+        # evidence round-trip, not the port number.
+        try:
+            server, _svc = run(db_path, port=0)
+            holder["server"] = server
+            holder["port"] = server.server_address[1]
+            server.serve_forever()
+        except Exception:
+            errors["trace"] = traceback.format_exc()
 
     srv = threading.Thread(target=_serve, daemon=True)
     srv.start()
-    time.sleep(1.0)
+    # Wait for the bind instead of a fixed sleep: on a loaded machine
+    # engine boot can exceed 1s, and a single immediate urlopen then
+    # fails with connection refused. Surface the thread's real error
+    # if it died instead of masking it as a refused connection.
+    deadline = time.time() + 60
+    while "port" not in holder and time.time() < deadline:
+        if "trace" in errors:
+            raise AssertionError(
+                "http server thread failed:\n" + errors["trace"])
+        time.sleep(0.1)
+    if "port" not in holder:
+        raise AssertionError(
+            "http server did not bind within 60s" +
+            (" :\n" + errors["trace"] if "trace" in errors else ""))
+    port = holder["port"]
     try:
         with open(os.path.join(workdir, "track3_meta.json")) as fh:
             meta = json.load(fh)
