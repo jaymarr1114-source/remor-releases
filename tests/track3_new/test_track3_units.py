@@ -8,7 +8,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/workspace/remor_track3_learning/pylib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "pylib"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from driver_track3 import (boot_engine, deploy_org, install_auto_anchor,
