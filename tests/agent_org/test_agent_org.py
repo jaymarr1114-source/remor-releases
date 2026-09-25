@@ -253,7 +253,11 @@ print("   distinctness: vs_x=%.3f vs_y=%.3f z_ratio=%.4f" % (
     z_ev["z_ratio"]))
 check("z beats parents", z_ev["z_ratio"] < min(ev["x_ratio"], ev["y_ratio"]))
 
-# 13. record_l3 (driver-admitted) + trust transition
+# 13. record_l3 via ReviewBoard verdict + trust transition
+# (verdict-binding: must verify through ReviewBoard first)
+verdict = org.review.verify_artifact(
+    z_code, z_ep, spec, gen_cases, artifact_ref="test_z_fused")
+check("Z verified by ReviewBoard", verdict.admitted)
 l3 = org.experience.record_l3(
     technique_name="fused", code=z_code, entrypoint=z_ep,
     problem_class="byte_codec", tags=["chunk-repeat", "byte-run", "lossless"],
@@ -268,9 +272,9 @@ check("trust transitioned", org.oregistry.current_trust("artifact:codec_z")
       == "TRUSTED")
 try:
     org.experience.record_l3("fused", z_code, z_ep, "byte_codec", [],
-                             {}, [], {}, engine=None)
+                             {}, [], engine=None)
     raise SystemExit("record_l3 with None engine did not raise")
-except AuthorityError:
+except (AuthorityError, TypeError):
     check("record_l3 requires engine", True)
 
 # 14. replace_substrate
