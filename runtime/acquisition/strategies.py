@@ -95,9 +95,29 @@ class CapabilitySpec:
 
     @classmethod
     def from_requirement(cls, requirement: CapabilityRequirement,
-                         examples: Optional[Sequence[Tuple[Dict[str, Any], Any]]] = None
+                         examples: Optional[Sequence[Any]] = None
                          ) -> "CapabilitySpec":
-        examples = list(examples or [])
+        # Normalize example forms (Batch 10): accept tuple
+        # (input_dict, expected) and explicit dict
+        # {'input': ..., 'output': ...}. Reject malformed, ambiguous,
+        # or mixed forms clearly -- never silently misinterpret.
+        raw = list(examples or [])
+        examples = []
+        for i, ex in enumerate(raw):
+            if isinstance(ex, tuple) and len(ex) == 2 and isinstance(ex[0], dict):
+                examples.append((ex[0], ex[1]))
+            elif isinstance(ex, dict) and set(ex.keys()) == {"input", "output"} \
+                    and isinstance(ex["input"], dict):
+                examples.append((ex["input"], ex["output"]))
+            else:
+                raise ValueError(
+                    f"from_requirement: example {i} malformed: expected "
+                    f"(input_dict, expected) tuple or "
+                    f"{{'input': input_dict, 'output': expected}} dict, "
+                    f"got {type(ex).__name__}: {ex!r:.120}")
+        # Mixed forms are rejected: all examples must use the same shape.
+        # (Normalization above makes them uniform; this guards callers
+        #  that bypass from_requirement.)
         input_names = sorted(examples[0][0].keys()) if examples else []
         output_kind = type(examples[0][1]).__name__ if examples else ""
         constraints = dict(getattr(requirement, "constraints", None) or {})
