@@ -35,6 +35,10 @@ from swarm_engine.acquisition.strategies import (
 from swarm_engine.synthesis.acquisition_learning import AcquisitionLearner
 from swarm_engine.synthesis.capability_store import stable_code_id
 from swarm_engine.verification.independent import IndependentValidator
+from swarm_engine.services.run_control import (
+    RunStopped,
+    checkpoint,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +416,9 @@ class AcquisitionOrchestrator:
                 node.requirement.examples_batch_id = examples_batch_id
             spec = CapabilitySpec.from_requirement(node.requirement,
                                                    node_examples)
+            # Cooperation point: one checkpoint per resolved node. No-op
+            # when no control is installed.
+            checkpoint(f"acquire:node:{node.name}")
 
             # A missing dependency this node relies on means there is nothing
             # to compose or generalise from yet. Recorded, not silently
@@ -920,6 +927,9 @@ class AcquisitionOrchestrator:
                     pass
 
         for choice in choices:
+            # Cooperation point: one checkpoint per strategy attempt.
+            # No-op when no control is installed.
+            checkpoint(f"acquire:strategy:{choice.strategy.value}")
             _skip = _general_skip_suppresses(
                 self.engine, learner, signature, choice.strategy.value,
                 self._strategy_failure_context())
@@ -3648,6 +3658,10 @@ class AcquisitionOrchestrator:
                 result = cognition.propose_multi(
                     spec.description, spec.examples,
                     tuple(spec.input_names), oracle=oracle)
+            except RunStopped:
+                # A user stop must propagate to the run's STOPPED outcome,
+                # never degrade into "generation failed".
+                raise
             except Exception:
                 result = None
             finally:
@@ -3880,7 +3894,11 @@ class AcquisitionOrchestrator:
             oracle_registry=self.engine.oracle_registry,
             engine_oracle=self.engine.oracle)
         cases = [Case(args=dict(a), expect=v) for a, v in spec.examples[:1]]
-        for candidate in candidates:
+        for idx, candidate in enumerate(candidates):
+            # Cooperation point (throttled): each candidate runs the full
+            # sandbox validation gauntlet. No-op when no control installed.
+            if idx % 64 == 0:
+                checkpoint("acquire:experiment-candidate")
             scan = self.engine.acquisition.scanner.scan(candidate)
             if not scan.passed:
                 continue

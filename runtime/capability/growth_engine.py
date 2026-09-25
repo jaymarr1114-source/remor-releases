@@ -41,6 +41,7 @@ from swarm_engine.capability.external_knowledge import (
     ExternalKnowledgeSource, NoExternalKnowledgeSource,
 )
 from swarm_engine.capability.requirement import CapabilityRequirement
+from swarm_engine.services.run_control import checkpoint
 
 
 @dataclass
@@ -142,6 +143,9 @@ class GenericCapabilityGrowthEngine:
             result.trace.append("requirement carries real (input, output) "
                                 "examples — routing to existing composition/"
                                 "synthesis/admission")
+            # Cooperation point at each route transition. No-op when no
+            # control is installed.
+            checkpoint("grow:composition")
             outcome = self.engine.synthesize_and_admit(
                 requirement.description, requirement.examples,
                 param_names=requirement.param_names)
@@ -163,6 +167,7 @@ class GenericCapabilityGrowthEngine:
                                     "the existing improvement pipeline "
                                     "before falling through to external "
                                     "knowledge")
+                checkpoint("grow:recovery")
                 recovery_reports = self.engine.improvement_pipeline.run_cycle()
                 result.trace.append(f"recovery outcome(s): "
                                     f"{[r['outcome'] for r in recovery_reports]}")
@@ -222,6 +227,7 @@ class GenericCapabilityGrowthEngine:
                                     "construction as a structurally "
                                     "different fallback before external "
                                     "knowledge")
+                checkpoint("grow:iteration")
                 name = self.engine.iterative_primitive_grower.grow(
                     requirement.description, requirement.examples,
                     param_name=requirement.param_names[0])
@@ -258,6 +264,7 @@ class GenericCapabilityGrowthEngine:
             return result
 
         result.route_attempted = "external_knowledge"
+        checkpoint("grow:external")
         query = self._formulate_query(requirement)
         result.trace.append(f"formulated research query: {query!r}")
         retrieved = self.knowledge_source.research(
