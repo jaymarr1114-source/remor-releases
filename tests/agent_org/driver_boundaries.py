@@ -11,7 +11,7 @@ import sys, os, json, time, tempfile, sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # anchor_shim (agent_org harness)
-from anchor_shim import deploy_org  # noqa: E402
+from anchor_shim import deploy_org, fresh_workdir  # noqa: E402
 
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "pylib"))
@@ -95,7 +95,7 @@ TASK = {"problem_class": "byte_codec", "probe_corpus": W, "objective": "max_comp
 
 
 def part1():
-    org = deploy_org(tempfile.mkdtemp(prefix="ao_bound1_"), authority="agent_org:test")
+    org = deploy_org(fresh_workdir("ao_bound1_"), authority="agent_org:test")
 
     # ---- A. distinct identity / provenance ---------------------------------
     a1 = org.factory.create("tpl_symbolic_coder_v1")
@@ -286,7 +286,7 @@ def part1():
 
 def part2_tamper():
     """Direct sqlite mutation probes: every one must be detected."""
-    wd = tempfile.mkdtemp(prefix="ao_bound2_")
+    wd = fresh_workdir("ao_bound2_")
     org = deploy_org(wd, authority="agent_org:test")
     a = org.factory.create("tpl_symbolic_coder_v1")
     asg = mk_assignment(org, a.agent_id, a.workspace_path, ["codec:*"])

@@ -79,7 +79,7 @@ def cmd_http(workdir):
         except urllib.error.HTTPError as e:
             assert e.code == 404, e.code
         print("HTTP evidence retrieval: PASS", flush=True)
-        print(json.dumps({"evidence_id": ev_id, "http": "ok"}))
+        print(json.dumps({"evidence_id": ev_id, "http": "ok", "http_checks": 1}))
     finally:
         holder.get("server", None) and holder["server"].shutdown()
 

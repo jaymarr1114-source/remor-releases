@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
     TRACK1, WORK, check, failfast, attach_org, deploy_org, digest,
     engine_extract_examples, FuncSpec, instance_cases, TechniqueSpec,
-    technique_case,
+    technique_case, CHECKS,
 )
 import defects  # noqa: E402
 
@@ -441,4 +441,4 @@ check("A still DESTROYED", org4.agents.get(A_ID).state == "DESTROYED")
 check("B live", org4.agents.get(h2["agent_b"]["agent_id"]).state != "DESTROYED")
 
 failfast()
-print(f"\nADVERSARIAL BATTERY COMPLETE", flush=True)
+print(f"\nADVERSARIAL BATTERY COMPLETE: {CHECKS['pass']} checks passed", flush=True)
