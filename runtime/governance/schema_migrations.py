@@ -87,10 +87,21 @@ def get_user_version(db_path: str) -> int:
 
 
 def apply_migrations(db_path: str, backup: bool = True) -> Dict[str, Any]:
-    """Apply pending migrations transactionally.
+    """Apply pending migrations atomically.
 
     Returns {"applied": [versions], "skipped": [versions], "user_version": int}.
-    On failure, restores from backup and re-raises.
+    All pending migrations run inside ONE transaction: any failure rolls back
+    every migration in the batch (SQLite DDL is transactional). PRAGMA
+    user_version is NOT transactional, so it is saved and restored manually
+    on failure. The pre-migration file backup is kept as defense-in-depth.
+
+    (Finisher repair 2026-09-25: the previous per-migration-commit design
+    relied on file-copy restore for atomicity, but the engine DB runs in WAL
+    mode and a leaked sqlite3.Connection survives engine teardown — the stale
+    -wal resurrects the migrated state after the file copy, so "rollback"
+    silently did nothing. Single-transaction rollback is immune to that.)
+
+    On failure, re-raises after rollback/restore.
     """
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"database not found: {db_path}")
@@ -100,31 +111,50 @@ def apply_migrations(db_path: str, backup: bool = True) -> Dict[str, Any]:
         backup_path = db_path + f".migrate_backup_{int(time.time())}"
         shutil.copy2(db_path, backup_path)
 
+    def _cleanup_backup():
+        if backup_path and os.path.exists(backup_path):
+            os.remove(backup_path)
+
     conn = sqlite3.connect(db_path)
     try:
+        # Single transaction for the whole batch: true atomicity.
+        # _ensure_migrations_table runs INSIDE the transaction so a failed
+        # batch leaves zero trace (not even the empty bookkeeping table).
+        conn.execute("BEGIN")
         _ensure_migrations_table(conn)
         applied = set(
             r[0] for r in conn.execute(
                 "SELECT version FROM schema_migrations").fetchall())
+        pre_user_version = conn.execute(
+            "PRAGMA user_version").fetchone()[0]
 
-        result = {"applied": [], "skipped": [], "user_version": 0}
+        result: Dict[str, Any] = {"applied": [], "skipped": [],
+                                  "user_version": pre_user_version}
+        pending = [m for m in MIGRATIONS if m[0] not in applied]
+        result["skipped"] = [m[0] for m in MIGRATIONS if m[0] in applied]
+        if not pending:
+            _cleanup_backup()
+            return result
 
-        for version, description, up_stmts, _ in MIGRATIONS:
-            if version in applied:
-                result["skipped"].append(version)
-                continue
-
-            # Apply in a transaction
-            try:
-                conn.execute("BEGIN")
+        # Single transaction for the whole batch: true atomicity.
+        # (BEGIN already issued above, before _ensure_migrations_table.)
+        try:
+            for version, description, up_stmts, _ in pending:
                 for stmt in up_stmts:
                     # Skip if table doesn't exist (migration not applicable)
                     # — this handles databases that never had the table.
+                    # Also skip "duplicate column name": the five ad-hoc
+                    # migration sites still self-apply on engine boot, so a
+                    # live DB may already carry the column. The migration's
+                    # end-state holds; record the version as applied.
                     try:
                         conn.execute(stmt)
                     except sqlite3.OperationalError as e:
-                        if "no such table" in str(e):
+                        msg = str(e)
+                        if "no such table" in msg:
                             pass  # Table doesn't exist, skip this statement
+                        elif "duplicate column name" in msg:
+                            pass  # Column already present via ad-hoc site
                         else:
                             raise
                 conn.execute(
@@ -132,27 +162,32 @@ def apply_migrations(db_path: str, backup: bool = True) -> Dict[str, Any]:
                     "VALUES (?, ?, ?)",
                     (version, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                      description))
-                conn.execute(f"PRAGMA user_version = {version}")
-                conn.commit()
                 result["applied"].append(version)
+            new_version = max(result["applied"])
+            conn.execute(f"PRAGMA user_version = {new_version}")
+            conn.commit()
+            result["user_version"] = new_version
+        except Exception:
+            conn.rollback()
+            # PRAGMA user_version is not transactional: restore it manually.
+            try:
+                conn.execute(f"PRAGMA user_version = {pre_user_version}")
             except Exception:
-                conn.rollback()
-                raise
+                pass
+            raise
 
-        result["user_version"] = conn.execute(
-            "PRAGMA user_version").fetchone()[0]
-
-        # Clean up backup on success
-        if backup_path and os.path.exists(backup_path):
-            os.remove(backup_path)
-
+        _cleanup_backup()
         return result
     except Exception:
-        # Restore from backup on failure
-        conn.close()
-        if backup_path and os.path.exists(backup_path):
-            shutil.copy2(backup_path, db_path)
-            os.remove(backup_path)
+        # The single-transaction rollback above is the atomicity mechanism;
+        # it has already restored the database (WAL-safe, unlike file-copy
+        # restore, which a stale -wal can defeat when other connections are
+        # open). The pre-migration backup file is left in place as a forensic
+        # snapshot of the pre-migration state.
+        try:
+            conn.close()
+        except Exception:
+            pass
         raise
     finally:
         try:
