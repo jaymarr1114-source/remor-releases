@@ -1,35 +1,67 @@
-"""Operational HTTP adoption layer (stdlib only).
+"""REMOR unified HTTP adoption layer (stdlib only).
 
-Exposes the reachable Track 2 fronts over real HTTP so the GUI backend,
-operators, and tests exercise the same code paths as in-process callers:
+One server, two route groups, no duplicated routes.
 
+Engine front (Track 2B/3 — served from the engine-bound _Service):
   POST /api/intent/dispatch        NL tool dispatch (real Composer path)
   GET  /api/dispatches             dispatch history (audit log)
   GET  /api/capabilities           capability inventory + effective_status
   POST /api/capabilities/<id>/restore  governed capability recovery
+  GET  /api/dispatch_evidence/<id> dispatch evidence (Track 3, read-only)
   GET  /api/voice/status           voice substrate status (UNAVAILABLE)
   POST /api/voice/stt | /api/voice/tts -> 501 honest refusal
   GET  /api/media/status           media substrate status (UNAVAILABLE)
   POST /api/media/image | /api/media/video -> 501 honest refusal
   GET  /api/health                 liveness
 
-Restore authority: this service is operator tooling. The restore endpoint
-authorizes with the engine's own oracle handle (remor:engine), the same
-identity the engine uses for its internal trust transitions. Do not
-expose this endpoint beyond the operator's trust boundary without adding
-caller authentication.
+Third-track services (backend-FF — runs/projects/files/artifacts):
+  POST /api/runs                       {goal, examples?, conversation_id?}
+  GET  /api/runs
+  GET  /api/runs/<id>
+  GET  /api/runs/<id>/events
+  POST /api/runs/<id>/pause|resume|stop|cancel
+  POST /api/projects                   {kind: blank|zip|dir, project_id?, path?}
+  GET  /api/projects
+  GET  /api/projects/<id>
+  POST /api/projects/<id>/transition   {to_state, reason?}
+  POST /api/projects/<id>/run_loop     {max_rounds?}
+  GET  /api/projects/<id>/loop/<job_id>
+  POST /api/projects/<id>/loop/<job_id>/stop
+  GET  /api/files?path=<rel>           list_dir
+  GET  /api/files/content?path=<rel>   read_text
+  POST /api/files/write                {path, content}
+  POST /api/artifacts                  {name, language, code, metadata?}
+  GET  /api/artifacts
+  GET  /api/artifacts/<id>?revision=n
+  GET  /api/artifacts/<id>/revisions
+  DELETE /api/artifacts/<id>
+  POST /api/artifacts/<id>/run         {revision?, timeout?}
 
-Run: python3 -m swarm_engine.services.http_adapter --db <path> --port 8471
+Threading discipline (KD-2): the SwarmEngine is thread-affine (the oracle
+registry holds a thread-bound sqlite connection). This server is
+single-threaded BY DESIGN: the engine is constructed on the serving thread
+and every request is handled on that same thread. Do not wrap this in a
+ThreadingHTTPServer. `serve()` starts the serving thread itself, so the
+engine still boots on the thread that serves.
+
+JSON discipline: every route uses the strict reader (256KB cap, 400 on
+malformed or non-object JSON). Service-dict results map via _status_for:
+ok -> 200, "not found"/"unknown ..." -> 404, illegal transition -> 409,
+else 400. Nothing here fabricates data.
+
+Run: python3 -m swarm_engine.services.http_adapter --db <path> --dir <svcdata>
+     --port 8471
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from swarm_engine.core.engine import SwarmEngine
 from swarm_engine.services import voice as voice_svc
@@ -44,7 +76,7 @@ MAX_BODY = 256 * 1024
 
 
 class _Handler(BaseHTTPRequestHandler):
-    server_version = "REMOR-Track2/1.0"
+    server_version = "REMOR/1.0"
 
     # -- plumbing ---------------------------------------------------------
     def _send(self, code: int, obj: Any):
@@ -71,13 +103,21 @@ class _Handler(BaseHTTPRequestHandler):
             raise ValueError("top-level JSON must be an object")
         return obj
 
+    def _result(self, res: Dict[str, Any], ok_status: int = 200):
+        """Map a service result dict to an HTTP response (FF _status_for)."""
+        if res.get("ok"):
+            return self._send(ok_status, res)
+        return self._send(_status_for(res), res)
+
     def log_message(self, fmt, *args):  # keep stderr quiet in tests
         pass
 
     # -- routing ----------------------------------------------------------
     def do_GET(self):
-        path = urllib.parse.urlparse(self.path).path
+        parsed = urllib.parse.urlparse(self.path)
+        path, qs = parsed.path, urllib.parse.parse_qs(parsed.query)
         svc: "_Service" = self.server.svc  # type: ignore
+        # --- engine front (Track 2B/3) ---
         if path == "/api/health":
             return self._send(200, {"ok": True})
         if path == "/api/capabilities":
@@ -91,6 +131,53 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, voice_svc.status())
         if path == "/api/media/status":
             return self._send(200, media_svc.status())
+        # --- third-track services (FF group, proven order) ---
+        try:
+            ff = svc.ff
+            scheduler = ff["scheduler"]
+            projects = ff["projects"]
+            files = ff["files"]
+            artifacts = ff["artifacts"]
+            if path == "/api/runs":
+                return self._send(200, scheduler.list_runs(
+                    limit=int((qs.get("limit") or ["50"])[0])))
+            if path.startswith("/api/runs/") and path.endswith("/events"):
+                rid = path.split("/")[3]
+                evs = scheduler.events(rid)
+                if evs is None:
+                    return self._send(404, {"error": "run not found"})
+                return self._send(200, evs)
+            if path.startswith("/api/runs/"):
+                rec = scheduler.get_run(path.split("/")[3])
+                if rec is None:
+                    return self._send(404, {"error": "run not found"})
+                return self._send(200, rec)
+            if path == "/api/projects":
+                return self._send(200, projects.list_projects())
+            if "/loop/" in path and path.startswith("/api/projects/"):
+                parts = path.split("/")
+                pid, job_id = parts[3], parts[5]
+                return self._result(projects.loop_status(job_id))
+            if path.startswith("/api/projects/"):
+                return self._result(projects.get_project(path.split("/")[3]))
+            if path == "/api/files":
+                return self._result(
+                    files.list_dir((qs.get("path") or [""])[0]))
+            if path == "/api/files/content":
+                return self._result(
+                    files.read_text((qs.get("path") or [""])[0]))
+            if path == "/api/artifacts":
+                return self._send(200, artifacts.list_artifacts())
+            if path.startswith("/api/artifacts/") and path.endswith("/revisions"):
+                return self._result(artifacts.revisions(
+                    _aid(path.split("/")[3])))
+            if path.startswith("/api/artifacts/"):
+                rev = (qs.get("revision") or [None])[0]
+                rev = int(rev) if rev is not None else None
+                return self._result(artifacts.get(_aid(path.split("/")[3]),
+                                                  revision=rev))
+        except Exception as exc:  # honest 500, never silent
+            return self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -100,6 +187,7 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._read_json()
         except ValueError as exc:
             return self._send(400, {"error": str(exc)})
+        # --- engine front (Track 2B/3) ---
         if path == "/api/intent/dispatch":
             code, obj = svc.intent_dispatch(body)
             return self._send(code, obj)
@@ -118,16 +206,91 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/media/video":
             return self._send(*svc.unavailable(
                 lambda: media_svc.generate_video(body.get("prompt", ""))))
+        # --- third-track services (FF group, proven order) ---
+        try:
+            ff = svc.ff
+            scheduler = ff["scheduler"]
+            projects = ff["projects"]
+            files = ff["files"]
+            artifacts = ff["artifacts"]
+            if path == "/api/runs":
+                return self._result(scheduler.submit(
+                    body.get("goal", ""), examples=body.get("examples"),
+                    metadata=body.get("metadata"),
+                    conversation_id=body.get("conversation_id")))
+            if path.startswith("/api/runs/"):
+                parts = path.split("/")
+                rid, action = parts[3], parts[4] if len(parts) > 4 else ""
+                fn = {"pause": scheduler.pause_run,
+                      "resume": scheduler.resume_run,
+                      "stop": scheduler.stop_run,
+                      "cancel": scheduler.cancel_run}.get(action)
+                if fn is None:
+                    return self._send(404, {"error": "not found"})
+                return self._result(fn(rid))
+            if path == "/api/projects":
+                return self._result(projects.create(body))
+            if path.startswith("/api/projects/") and path.endswith("/transition"):
+                return self._result(projects.transition(
+                    path.split("/")[3], body.get("to_state", ""),
+                    reason=body.get("reason", "")))
+            if path.startswith("/api/projects/") and path.endswith("/run_loop"):
+                return self._result(projects.run_loop(
+                    path.split("/")[3],
+                    max_rounds=int(body.get("max_rounds", 4))))
+            if "/loop/" in path and path.endswith("/stop") \
+                    and path.startswith("/api/projects/"):
+                parts = path.split("/")
+                return self._result(projects.stop_loop(parts[5]))
+            if path == "/api/files/write":
+                return self._result(files.write_text(
+                    body.get("path", ""), body.get("content", "")))
+            if path == "/api/artifacts":
+                return self._result(artifacts.save(
+                    body.get("name", ""), body.get("language", ""),
+                    body.get("code", ""), metadata=body.get("metadata")))
+            if path.startswith("/api/artifacts/") and path.endswith("/run"):
+                res = artifacts.run(
+                    _aid(path.split("/")[3]),
+                    revision=body.get("revision"),
+                    timeout=float(body.get("timeout", 30)))
+                return self._result(res)
+        except Exception as exc:  # honest 500, never silent
+            return self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
         return self._send(404, {"error": "not found"})
+
+    def do_DELETE(self):
+        path = urllib.parse.urlparse(self.path).path
+        svc: "_Service" = self.server.svc  # type: ignore
+        try:
+            if path.startswith("/api/artifacts/"):
+                return self._result(svc.ff["artifacts"].delete(
+                    _aid(path.split("/")[3])))
+            return self._send(404, {"error": "not found"})
+        except Exception as exc:
+            return self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
 
 
 class _Service:
-    """The engine-bound service object the handler delegates to."""
+    """The engine-bound service object the handler delegates to.
 
-    def __init__(self, db_path: str):
+    Builds BOTH fronts: the Track 2B/3 engine front (SwarmEngine +
+    IntentRouter + NLToolDispatcher, booting on the constructing thread —
+    the serving thread — per the KD-2 thread-affinity discipline) and the
+    third-track service dict (scheduler, projects, files, artifacts).
+    """
+
+    def __init__(self, db_path: str, base_dir: Optional[str] = None):
+        db_path = os.path.abspath(db_path)
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.engine = SwarmEngine(db_path=db_path)
         self.router = IntentRouter(self.engine)
         self.dispatcher = NLToolDispatcher(self.engine, self.router)
+        if base_dir is None:
+            base_dir = os.path.join(
+                os.path.dirname(os.path.abspath(db_path)), "service_data")
+        self.base_dir = base_dir
+        self.ff = build_services(base_dir)
 
     # -- capability inventory --------------------------------------------
     def capabilities(self):
@@ -226,29 +389,156 @@ class _Service:
         return 200, {"ok": True}
 
 
-def run(db_path: str, host: str = "127.0.0.1", port: int = 8471):
+def _status_for(result: Dict[str, Any]) -> int:
+    if result.get("ok"):
+        return 200
+    err = str(result.get("error", "")).lower()
+    if "not found" in err or "unknown " in err:
+        return 404
+    if "not legal" in err or "illegal" in err:
+        return 409
+    return 400
+
+
+def _aid(s: str) -> int:
+    try:
+        return int(s)
+    except ValueError:
+        raise ValueError(f"bad artifact id: {s!r}")
+
+
+def build_services(base_dir: str) -> Dict[str, Any]:
+    """Create all third-track services on scratch dirs.
+
+    Returns the service dict (scheduler/projects/files/artifacts/base_dir).
+    No engine boots here: the scheduler boots its engine on its own worker
+    thread, and the projects engine proxy boots on first touch (the project
+    loop worker), preserving the KD-2 thread-affinity discipline.
+    """
+    from swarm_engine.services.scheduler import RunScheduler
+    from swarm_engine.services.projects import ProjectService
+    from swarm_engine.services.files import ScopedFileService
+    from swarm_engine.services.artifacts import ArtifactStore
+
+    os.makedirs(base_dir, exist_ok=True)
+    sched_db = os.path.join(base_dir, "scheduler.db")
+    runtime_db = os.path.join(base_dir, "runtime.db")
+    projects_db = os.path.join(base_dir, "projects.db")
+    projects_root = os.path.join(base_dir, "projects")
+    browser_root = os.path.join(base_dir, "browser")
+    sandbox_dir = os.path.join(base_dir, "artifact_sandbox")
+    artifacts_db = os.path.join(base_dir, "artifacts.db")
+    for d in (projects_root, browser_root, sandbox_dir):
+        os.makedirs(d, exist_ok=True)
+
+    scheduler = RunScheduler(db_path=sched_db, runtime_db_path=runtime_db)
+    projects = ProjectService(
+        db_path=projects_db,
+        projects_root=projects_root,
+        engine=_lazy_engine(os.path.join(base_dir, "projects_runtime.db")),
+    )
+    files = ScopedFileService(root=browser_root, writable=True)
+    artifacts = ArtifactStore(db_path=artifacts_db, sandbox_dir=sandbox_dir)
+    return {
+        "scheduler": scheduler, "projects": projects,
+        "files": files, "artifacts": artifacts,
+        "base_dir": base_dir,
+    }
+
+
+def _lazy_engine(db_path: str):
+    """Engine proxy that boots on first attribute use (i.e. on the thread
+    that first touches it — the project loop worker — satisfying the
+    engine's thread-affinity for its sqlite connections)."""
+
+    class _Proxy:
+        _engine = None
+
+        def _boot(self):
+            if self._engine is None:
+                from swarm_engine.core.engine import SwarmEngine
+                self._engine = SwarmEngine(db_path=db_path)
+            return self._engine
+
+        def __getattr__(self, name):
+            return getattr(self._boot(), name)
+
+    return _Proxy()
+
+
+def close_services(svc: Dict[str, Any]) -> None:
+    """Best-effort shutdown of the third-track service dict."""
+    try:
+        svc["scheduler"].close()
+    except Exception:
+        pass
+
+
+def run(db_path: str, host: str = "127.0.0.1", port: int = 8471,
+        base_dir: Optional[str] = None) -> Tuple[HTTPServer, "_Service"]:
     """Create the service and its server. Single-threaded BY DESIGN: the
     engine is thread-affine (OracleRegistry holds a thread-bound sqlite
     connection -- known pre-existing limitation), so all requests are
     handled in the serving thread, the same thread that constructs the
     engine here. Call run() and serve_forever() in the same thread
-    (main() does). Do not wrap this in a ThreadingHTTPServer."""
-    svc = _Service(db_path)
+    (main() does; the track2b/track2_new tests do). Do not wrap this in a
+    ThreadingHTTPServer."""
+    svc = _Service(db_path, base_dir)
     server = HTTPServer((host, port), _Handler)
     server.svc = svc  # type: ignore
     return server, svc
 
 
+def serve(base_dir: str, host: str = "127.0.0.1", port: int = 0):
+    """Start the unified adapter in a background thread.
+
+    The background thread IS the serving thread: it constructs the
+    _Service (the SwarmEngine boots there, satisfying thread-affinity) and
+    then serves single-threaded. Returns
+    (server, services_dict, thread, base_url); services_dict is the
+    third-track service dict for close_services().
+    """
+    db_path = os.path.join(os.path.abspath(base_dir), "engine.db")
+    server = HTTPServer((host, port), _Handler)
+    ready = threading.Event()
+    box: Dict[str, Any] = {}
+
+    def target():
+        svc = _Service(db_path, base_dir)
+        server.svc = svc  # type: ignore
+        box["svc"] = svc
+        ready.set()
+        server.serve_forever()
+
+    thread = threading.Thread(target=target, daemon=True, name="remor-adapter")
+    thread.start()
+    if not ready.wait(timeout=180):
+        raise RuntimeError("unified adapter: service failed to start")
+    svc = box["svc"]
+    return server, svc.ff, thread, f"http://{host}:{server.server_address[1]}"
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--db", required=True)
+    ap = argparse.ArgumentParser(
+        description="REMOR unified HTTP API (engine front + third-track services)")
+    ap.add_argument("--db", default=None,
+                    help="engine DB path (default: <dir>/engine.db)")
+    ap.add_argument("--dir", default=os.path.join(os.getcwd(), "remor_service_data"),
+                    help="third-track service data dir")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8471)
     args = ap.parse_args()
-    server, _ = run(args.db, args.host, args.port)
-    print(f"REMOR Track2 API on http://{args.host}:{args.port} db={args.db}",
-          flush=True)
-    server.serve_forever()
+    base_dir = os.path.abspath(args.dir)
+    db_path = args.db or os.path.join(base_dir, "engine.db")
+    server, svc = run(db_path, args.host, args.port, base_dir=base_dir)
+    print(f"REMOR API on http://{args.host}:{args.port} "
+          f"db={db_path} dir={base_dir}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        close_services(svc.ff)
 
 
 if __name__ == "__main__":
