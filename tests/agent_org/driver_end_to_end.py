@@ -381,7 +381,7 @@ if __name__ == "__main__":
     ap.add_argument("--phase", default="phase1", choices=["phase1", "rehydrate"])
     args = ap.parse_args()
     if args.phase == "phase1":
-        wd = args.workdir or tempfile.mkdtemp(prefix="ao_e2e_")
+        wd = args.workdir or fresh_workdir("ao_e2e_")
         ok = phase1(wd)
     else:
         ok = phase2(args.workdir)
