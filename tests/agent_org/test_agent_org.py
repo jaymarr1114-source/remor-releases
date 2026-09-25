@@ -259,8 +259,6 @@ l3 = org.experience.record_l3(
     problem_class="byte_codec", tags=["chunk-repeat", "byte-run", "lossless"],
     io_contract={"input": "bytes", "output": "bytes"},
     derived_from=[rel.x_exp_id, rel.y_exp_id],
-    validation_evidence={"verdict": "admitted (driver)",
-                         "params": z_ev["z_params"]},
     engine=org.engine)
 check("L3 recorded", l3.level == "L3" and l3.derived_from == [rel.x_exp_id,
                                                              rel.y_exp_id])
