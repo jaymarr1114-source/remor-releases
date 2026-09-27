@@ -309,6 +309,13 @@ class VerdictPromotionBridge:
 
         self.reg.register(prim, overwrite=overwrite)
 
+        # The mark is the trust record: only a verdict-bound promotion may
+        # ever claim it (mark_promoted's contract). retire() calls
+        # unregister, which clears the mark -- no change needed there.
+        self.reg.mark_promoted(prim_name, execution_id=execution_id,
+                               code_digest=code_digest,
+                               artifact_ref=artifact_ref)
+
         self.records[prim_name] = VerdictPromotionRecord(
             name=prim_name, code_digest=code_digest,
             execution_id=execution_id, verifier=verifier,

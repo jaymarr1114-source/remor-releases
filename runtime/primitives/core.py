@@ -485,6 +485,7 @@ class PrimitiveRegistry:
         self.governor = governor or Governor()
         self._prims: Dict[str, Primitive] = {}
         self._by_family: Dict[str, List[str]] = {}
+        self._promoted: Dict[str, Dict[str, str]] = {}
 
     # -- registration -------------------------------------------------------
     def register(self, prim: Primitive, overwrite: bool = False) -> Primitive:
@@ -525,7 +526,40 @@ class PrimitiveRegistry:
             fam.remove(name)
             if not fam:
                 del self._by_family[prim.family]
+        # Retirement/removal drops promotion provenance too: a removed
+        # primitive must not keep discovery priority if ever re-registered.
+        self._promoted.pop(name, None)
         return True
+
+    # -- promotion provenance -------------------------------------------------
+    def mark_promoted(self, name: str, *, execution_id: str,
+                      code_digest: str, artifact_ref: str) -> None:
+        """Record promotion provenance for a registered primitive name.
+
+        Trust contract: the ONLY production writer of this mark is
+        VerdictPromotionBridge.promote, which is gated on a live admitted
+        verdict re-derived every call (require_admitted_verdict). A raw
+        register() never marks -- promotion stays the gate, and discovery
+        (planner tie-breaking) only orders among the trusted.
+
+        Raises KeyError if the name is not registered.
+        """
+        if name not in self._prims:
+            raise KeyError(f"mark_promoted: {name!r} is not registered")
+        self._promoted[name] = {
+            "execution_id": execution_id,
+            "code_digest": code_digest,
+            "artifact_ref": artifact_ref,
+        }
+
+    def is_promoted(self, name: str) -> bool:
+        """True when `name` carries promotion provenance (verdict-bound)."""
+        return name in self._promoted
+
+    def promoted_provenance(self, name: str) -> Optional[Dict[str, str]]:
+        """Promotion provenance for `name`, or None when not promoted."""
+        prov = self._promoted.get(name)
+        return dict(prov) if prov is not None else None
 
     # -- lookup -------------------------------------------------------------
     def resolve(self, name: str) -> Optional[str]:

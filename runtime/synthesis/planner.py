@@ -879,9 +879,27 @@ class BackwardPlanner:
         # tokens are whole tokens of the primitive's name, never on a raw
         # substring. Steering is ordering-only, never filtering.
         hint_toksets = _hint_toksets(hint_words)
+        # TIE-BREAKING RULE: promotion is the FINAL tie-breaker. It reorders
+        # only candidates already tied on hint-steering AND arity; it never
+        # overrides hint-steering or the simplicity (fewer-inputs)
+        # preference. A promoted (ReviewBoard-admitted, verdict-bound)
+        # primitive earns priority over a built-in in ties; an unpromoted
+        # capability never gains priority. Promotion stays the gate --
+        # discovery only orders among the trusted. DEFECT-2's name-first
+        # _bind is untouched.
+        reg = self.reg
+
+        def _promoted_rank(p) -> int:
+            is_prom = getattr(reg, "is_promoted", None)
+            try:
+                return 0 if (is_prom is not None and is_prom(p.name)) else 1
+            except Exception:
+                return 1  # fail closed: no priority on any doubt
+
         candidates.sort(key=lambda p: (
             0 if _hint_steers(hint_toksets, p.name) else 1,
             len(p.inputs),
+            _promoted_rank(p),
         ))
 
         for prim in candidates[: self.max_branch]:
