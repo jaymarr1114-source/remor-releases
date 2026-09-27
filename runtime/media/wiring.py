@@ -610,3 +610,57 @@ def admit_image_spec_capability(engine, media_out_dir: str,
         "phrasings_bound": len(IMAGE_SPEC_PHRASINGS) if bind_phrasings else 0,
         "plan": image_spec_plan(),
     }
+
+
+def boot_media_for_dispatcher(engine, dispatcher, base_dir: str
+                              ) -> Dict[str, Any]:
+    """Boot media wiring for the SHIPPED serving path.
+
+    The shipped GUI app (app/server.py's ``_EngineFront._boot``) never
+    constructs the bench-only ``ServiceAdapter`` (runtime/services/
+    http_adapter.py is not served by the app), so this function replays
+    the verified wiring sequence from ``ServiceAdapter._wire_media``
+    directly against an ``NLToolDispatcher``:
+
+      1. ``<base_dir>/media`` makedirs (base_dir MUST be the writable app
+         data dir -- never the read-only payload);
+      2. ``dispatcher.media_out_dir`` set (without this, NL media
+         requests with no caller args raise
+         ``RuntimeError("media_out_dir not configured")``);
+      3. ``register_media_primitives`` + ``ensure_media_write_grant``;
+      4. ``admit_media_capabilities`` -- the four media capabilities
+         through the REAL admission path;
+      5. ``admit_image_spec_capability`` -- the deterministic PIL
+         spec-renderer through the REAL admission path.
+
+    Fail-closed per medium, exactly like ``_wire_media``: a medium whose
+    admission refuses (e.g. its substrate is absent in this environment)
+    is left UNADMITTED -- never half-wired -- and the app boots with the
+    media that did admit. Requests for unadmitted media are refused
+    honestly downstream (unknown_intent / medium-level refusal), never
+    fabricated. Returns the per-medium admission report (the same shape
+    as ``admit_media_capabilities'`` plus an ``"image_spec"`` entry).
+
+    (2026-09-27: restored to canonical -- the v8 lineage carried this
+    function in its own runtime tree; convergence dropped it while the
+    shipped app still imported it, so the engine front fail-closed on
+    every boot with ImportError and the orphaned D11 ownership then
+    killed scheduler runs with DuplicateEngineError. The repair lands
+    here, once, in canonical.)
+    """
+    media_dir = os.path.abspath(os.path.join(base_dir, "media"))
+    os.makedirs(media_dir, exist_ok=True)
+    # Governed output dir for the NL dispatcher's media arg synthesis.
+    dispatcher.media_out_dir = media_dir
+    register_media_primitives(engine)
+    ensure_media_write_grant(engine, media_dir)
+    report = admit_media_capabilities(
+        engine, media_dir, attempt_smoke=True)
+    spec_report = admit_image_spec_capability(
+        engine, media_dir, attempt_smoke=True)
+    report["image_spec"] = spec_report
+    admitted = sorted(m for m, e in report.items() if e.get("admitted"))
+    refused = sorted(m for m in report if m not in admitted)
+    print(f"[media] shipped-path boot: admitted={admitted} "
+          f"refused={refused} media_out_dir={media_dir}", flush=True)
+    return report
