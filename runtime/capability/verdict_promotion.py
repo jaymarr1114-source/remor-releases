@@ -39,10 +39,18 @@ value -- e.g. a spec dict to a genuine callable. Both stages are fixed
 wiring over admitted bytes, not invented behaviour; the wiring itself is
 covered by the bridge's own tests.
 
-Execution-trust note: the code runs in-process. Isolation was the
-ReviewBoard's job at verification time (real subprocess); what this
-bridge adds is *binding* -- the bytes executed are provably the bytes
-the verdict admitted. It does not sandbox, and does not claim to.
+Execution-trust note (W4-R1): the code runs in-process, and the process
+is the boundary the old bridge lacked. The admitted bytes execute under
+the capability sandbox (swarm_engine/capability/effect_sandbox.py):
+PURE-claimed code runs with PURE_POLICY -- no `open`, no effectful
+imports, every audit-hooked effect an observed violation -- and
+non-PURE code runs under the policy its declared effects request, with
+no explicit grant scope meaning zero granted capabilities (declarations
+never grant authority; grant-scope plumbing for production effectful
+capabilities is the named next boundary). Binding is still what this
+bridge adds -- the bytes executed are provably the bytes the verdict
+admitted -- but the execution environment, not source text, is now the
+authority that makes PURE code safe.
 
 Two further gates (both fail-closed, before anything is registered):
 
@@ -55,26 +63,37 @@ Two further gates (both fail-closed, before anything is registered):
   actually returning a spec dict) is refused rather than registered as
   a type-lie the planner would trust.
 
-* PURE-claim screen: a PURE effects declaration is caller-asserted, and
-  the ReviewBoard does not check purity (an artifact that reads the
-  filesystem can be admitted for behavioural correctness). Promoting an
-  impure artifact as PURE would bypass the planner's effect gate, so a
-  PURE claim is screened by AST against effectful markers (imports of
-  effectful modules, open/exec/eval/compile/__import__/input calls).
-  The screen is heuristic -- it catches accidental misdeclaration and
-  low-effort malice, not obfuscation -- and it is labelled as such.
-  Declaring the real (non-pure) effects always passes the screen; the
-  planner's Governor then governs use.
+* PURE-claim screen (ADVISORY PRE-SCREEN -- W4-R1 Rule 1): a PURE
+  effects declaration is caller-asserted, and the ReviewBoard does not
+  check purity (an artifact that reads the filesystem can be admitted
+  for behavioural correctness). Promoting an impure artifact as PURE
+  would bypass the planner's effect gate, so a PURE claim is screened
+  by AST against effectful markers (imports of effectful modules,
+  open/exec/eval/compile/__import__/input calls). The screen is an
+  ADVISORY pre-screen only: it reports "no statically detected
+  effects", never a grant of safety. It may REFUSE on markers -- a
+  pre-screen can say no -- but it can never say yes: PURE is granted
+  solely on execution evidence (verdict recorded under the PURE effect
+  policy with zero observed effects; see promote()). It catches
+  accidental misdeclaration and low-effort malice, not obfuscation --
+  the W4-R1 `__builtins__["op" + "en"]` bypass defeated exactly this
+  screen. Declaring the real (non-pure) effects always passes the
+  screen; the planner's Governor then governs use.
 """
 from __future__ import annotations
 
 import ast
+import json
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from swarm_engine.agent_org.store import digest
+from swarm_engine.agent_org.exceptions import VerificationFailed
+from swarm_engine.capability.effect_sandbox import (
+    PURE_POLICY, build_namespace, policy_for_effects,
+)
 from swarm_engine.primitives.core import Effect, Primitive, TypeSpec
 
 #: The artifact kind this bridge accepts verdicts for. Kind-scoped, like
@@ -207,9 +226,10 @@ class VerdictPromotionBridge:
         """Promote admitted artifact bytes to a registered Primitive.
 
         Returns the registered primitive name. Raises VerificationFailed
-        (from require_admitted_verdict) on any trust failure, ValueError
-        on a miswired promotion (examples supplied and not satisfied),
-        on an effectful PURE claim, or on a name collision without
+        (from require_admitted_verdict, or from the W4-R1 PURE execution-
+        evidence gate) on any trust failure; ValueError on a miswired
+        promotion (examples supplied and not satisfied), on an advisory
+        pre-screen refusal of a PURE claim, or on a name collision without
         overwrite=True -- all before anything is registered.
         """
         if not code:
@@ -224,15 +244,46 @@ class VerdictPromotionBridge:
         execution_id = row["execution_id"]
         verifier = row["verifier"]
 
-        # ---- PURE-claim screen (heuristic; see module docstring) ----
+        # ---- PURE-claim advisory pre-screen (W4-R1 Rule 1). It may
+        # refuse on markers; it can never grant. The grant is the
+        # execution-evidence gate below. ----
         pure_claim = all(e == Effect.PURE for e in effects)
         if pure_claim:
             markers = _pure_claim_markers(code)
             if markers:
                 raise ValueError(
-                    "promote: artifact claims PURE effects but shows "
-                    f"effect markers {markers}; declare the real effects "
-                    f"instead")
+                    "promote: advisory pre-screen refused: artifact claims "
+                    "PURE effects but shows effect markers "
+                    f"{markers}; declare the real effects instead "
+                    "(the screen is advisory only -- it reports 'no "
+                    "statically detected effects', never a grant of safety)")
+
+        # ---- W4-R1 Rule 3: PURE requires execution evidence. The PURE
+        # label is granted solely when the verdict row shows the artifact
+        # ran under the PURE effect policy with zero observed effects.
+        # Missing evidence (pre-W4-R1 rows) FAILS CLOSED -- a trust
+        # failure, so VerificationFailed, not ValueError. ----
+        if pure_claim:
+            try:
+                bindings_json = json.loads(row.get("bindings") or "{}")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                bindings_json = {}
+            effect_evidence = bindings_json.get("effect_evidence") or {}
+            profile = effect_evidence.get("profile")
+            observed = effect_evidence.get("observed_effects") or []
+            if profile != "pure":
+                raise VerificationFailed(
+                    "promote: PURE requires verdict execution under the "
+                    "PURE effect policy with zero observed effects; "
+                    f"verdict effect evidence has profile {profile!r} "
+                    "(missing or non-pure evidence fails closed)")
+            if observed:
+                raise VerificationFailed(
+                    "promote: PURE requires verdict execution under the "
+                    "PURE effect policy with zero observed effects; "
+                    f"verdict records {len(observed)} observed effect(s) "
+                    "-- an observed effect under PURE is a hard trust "
+                    "failure")
 
         prim_name = name or self.default_name(artifact_ref, code_digest)
         if prim_name in self.reg and not overwrite:
@@ -252,7 +303,19 @@ class VerdictPromotionBridge:
                 raise RuntimeError(
                     "verdict promotion: admitted bytes failed integrity "
                     "re-check at call time -- refusing to execute")
-            ns: Dict[str, Any] = {}
+            # W4-R1: the execution environment is the trust authority. The
+            # admitted bytes run under the capability sandbox -- PURE
+            # claims get PURE_POLICY (zero granted effect capabilities;
+            # `open` under any spelling raises), and non-PURE declarations
+            # get the policy their effects request with NO explicit grant
+            # scope, i.e. zero capabilities as well: per Rule 5 a
+            # declaration alone grants nothing (grant-scope plumbing for
+            # production effectful capabilities is the named next
+            # boundary).
+            policy = (PURE_POLICY if pure_claim
+                      else policy_for_effects(
+                          [e.value for e in effects], grant_scope=None))
+            ns = build_namespace(policy)
             exec(compile(admitted_code, "<admitted-capability>", "exec"), ns)
             return ns
 

@@ -33,6 +33,7 @@ from swarm_engine.acquisition.semantic import Case  # noqa: E402
 from swarm_engine.project.modification import (  # noqa: E402
     ProjectModificationGuard)
 from swarm_engine.agent_org.subprocess_runner import run_code  # noqa: E402
+from swarm_engine.capability.effect_sandbox import TRUSTED_POLICY  # noqa: E402
 
 PHASE = os.path.join(WORK, "phase2")
 os.makedirs(PHASE, exist_ok=True)
@@ -136,11 +137,28 @@ check("no private state in retrieved knowledge",
 t1_code = exp1.code
 check("T1 code retrieved", "def repair_procedure" in t1_code)
 
+# TRUSTED gate (W4-R1): the retrieved technique bytes must be byte-identical
+# to the reviewed in-tree procedure file -- the inviolable rule permits
+# TRUSTED only for fixed tree bytes, never for synthesized/admitted
+# candidate bytes. Fail closed here if they ever diverge.
+T1_PATH = os.path.join(TRACK1, "technique_v1.py")
+with open(T1_PATH, "r", encoding="utf-8") as fh:
+    T1_TREE_SRC = fh.read()
+check("T1 retrieved bytes are the fixed in-tree procedure",
+      digest(t1_code) == digest(T1_TREE_SRC))
+
 # ---------------------------------------------------------------- step 6
 # B tries T1 on D2: honest failure (replay is not adaptation).
+# TRUSTED justification (W4-R1): t1_code is the fixed, reviewed repair
+# technique procedure (byte-identical to the in-tree technique_v1.py,
+# admitted through independent held-out review) -- NOT candidate data.
+# The technique legitimately needs the `exec` builtin: its own inner
+# candidate testing runs with {"__builtins__": {}}. Candidate/defect
+# bytes (D2_SRC/D2_TEST) travel only as *arguments*, never as code.
 rr = run_code(t1_code, "repair_procedure",
               [{"source_text": defects.D2_SRC,
-                "test_text": defects.D2_TEST}])
+                "test_text": defects.D2_TEST}],
+              effect_policy=TRUSTED_POLICY)
 check("T1 executes on D2", rr.ok)
 t1_report = json.loads(rr.value[0]["value"])
 check("T1 honestly refuses D2 (not silently wrong)",
@@ -172,9 +190,14 @@ print(f"   B diagnosis: {DIAGNOSIS_B}", flush=True)
 # B ADAPTS: applies T2 (the adapted technique) to D2.
 t2_src = open(T2_PATH).read()
 check("T2 genuinely differs from T1", digest(t2_src) != digest(t1_code))
+# TRUSTED justification (W4-R1): t2_src is read directly from the reviewed
+# in-tree procedure file technique_v2.py (fixed test-procedure bytes) --
+# NOT candidate data. Same `exec`-builtin need as T1 (its own
+# empty-builtins inner candidate sandbox).
 rr2 = run_code(t2_src, "repair_procedure",
                [{"source_text": defects.D2_SRC,
-                 "test_text": defects.D2_TEST}])
+                 "test_text": defects.D2_TEST}],
+               effect_policy=TRUSTED_POLICY)
 check("T2 executes", rr2.ok)
 rep2 = json.loads(rr2.value[0]["value"])
 check("T2 repairs D2", rep2.get("target") == "power"
@@ -331,7 +354,13 @@ t2_case = Case(
     predicate=make_t2_predicate(defects.R2_TEST, defects.R2_TARGET,
                                  defects.R2_PRESERVE),
     label="r2")
-tverdict2 = org.review.review(wp_b, TechniqueSpec(), [t2_case])
+# EXEC_POLICY justification (W4-R1): T2 is a repair *procedure* under
+# review -- it must execute generated candidate bytes to judge them
+# (empty-builtins exec internally, so candidates get no capabilities).
+# Explicit, narrow (exec only), recorded in the verdict's effect evidence.
+from swarm_engine.capability.effect_sandbox import EXEC_POLICY  # noqa: E402
+tverdict2 = org.review.review(wp_b, TechniqueSpec(), [t2_case],
+                              effect_policy=EXEC_POLICY)
 check("T2 independent verdict admitted", tverdict2.admitted)
 
 # ---------------------------------------------------------------- step 12
@@ -344,7 +373,8 @@ h3_case = Case(
                                  defects.H3_PRESERVE),
     label="h3")
 promoted_b, info_b = org.experience.promote(
-    cand_b, [h3_case], derived_from=[EXP1_ID])
+    cand_b, [h3_case], derived_from=[EXP1_ID],
+    effect_policy=EXEC_POLICY)  # T2 is a repair procedure; see step 11 note
 check("T2 promoted to L2", promoted_b)
 exp2 = org.experience.get_experience(info_b)
 check("exp2 distinct from exp1", exp2.exp_id != EXP1_ID)

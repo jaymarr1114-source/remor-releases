@@ -90,6 +90,56 @@ _SPEC_COLORS = {
 _SPEC_SHAPES = ("circle", "square", "rectangle", "triangle")
 
 
+# -- cross-capability composition (M4) --------------------------------------
+# A composition request is an empty-args NL request that decomposes into
+# >=2 fragments, each routing to a media capability. Decomposition is
+# deliberately conservative: fragments are split on conjunctions, each
+# fragment is routed through the SAME IntentRouter (routing rules are
+# unchanged), and only fragments that route to a media capability (one
+# with a governed arg synthesizer) become legs. Anything else is either
+# connective tissue (ignored) or an honest problem (named in the
+# refusal, never silently dropped).
+_COMPOSE_SPLIT_RE = re.compile(
+    r"\s+(?:and then|then|and|plus)\s+|;\s*", re.IGNORECASE)
+
+# A fragment counts as a leg-shaped request only when it opens with an
+# imperative work verb ("generate an image of a sunset", "create a short
+# video of ocean waves"). This keeps adjective-joins ("a dog with brown
+# fur and white spots") on the single-dispatch path: "white spots" is
+# not an imperative request, so the whole text is not composition-shaped
+# and falls through unchanged.
+_COMPOSE_VERBS = frozenset(
+    "make makes making made "
+    "create creates creating created "
+    "generate generates generating generated "
+    "draw draws drawing drew drawn "
+    "paint paints painting painted "
+    "synthesize synthesizes synthesizing synthesized "
+    "produce produces producing produced "
+    "compose composes composing composed "
+    "render renders rendering rendered "
+    "animate animates animating animated".split())
+
+_COMPOSE_VERB_RE = re.compile(r"^([a-z]+)\b")
+
+
+def _is_imperative(fragment: str) -> bool:
+    m = _COMPOSE_VERB_RE.match(fragment.strip().lower())
+    return bool(m) and m.group(1) in _COMPOSE_VERBS
+
+
+# Words marking a fragment as media-leg-shaped. A fragment that fails to
+# route AND carries none of these is connective tissue ("combine and mix
+# and match") and is ignored; one that carries them but fails to route
+# is a real problem (unknown intent, quarantined capability) and fails
+# the composition honestly.
+_MEDIA_LEG_WORDS = (
+    "song", "songs", "image", "images", "picture", "pictures", "photo",
+    "photos", "video", "videos", "voice", "speech", "voiceover", "draw",
+    "paint", "movie", "movies", "sing", "music", "render",
+)
+
+
 def _spec_from_shape_words(prompt: str, text: str, seed: int):
     """Synthesize an image spec ONLY from explicit color+shape words.
 
@@ -286,6 +336,175 @@ class NLToolDispatcher:
                     "path": _path("voice", "wav")}, None
         return None, f"no arg synthesizer for plan op {op!r}"
 
+    # -- cross-capability composition (M4) ----------------------------------
+    _MEDIUM_WORDS = {
+        "image": ("image", "images", "picture", "pictures", "photo", "photos",
+                  "draw", "paint", "render"),
+        "video": ("video", "videos", "movie", "movies"),
+        "song": ("song", "songs", "sing", "music"),
+        "voice": ("voice", "speech", "voiceover"),
+    }
+
+    def _inactive_media_note(self, frag: str) -> str:
+        """Name non-effectively-active media capabilities matching the
+        fragment's medium.
+
+        Used when a leg-shaped fragment fails to route: the router's
+        refusal alone (e.g. unknown_intent) would hide a quarantine, so
+        the reason names the quarantined capability for that medium
+        explicitly. Only the frozen effective_status is read here.
+        """
+        lowered = frag.lower()
+        media = [m for m, words in self._MEDIUM_WORDS.items()
+                 if any(w in lowered for w in words)]
+        if not media:
+            return ""
+        notes = []
+        seen = set()
+        for status in ("quarantined", "deprecated", "superseded"):
+            try:
+                recs = self.engine.capabilities.list(status=status)
+            except Exception:
+                continue
+            for rec in recs:
+                cid = getattr(rec, "capability_id", None)
+                name = str(getattr(rec, "name", "") or "")
+                if not cid or cid in seen or not self._media_plan(rec):
+                    continue
+                if not any(m in name.lower() for m in media):
+                    continue
+                seen.add(cid)
+                try:
+                    state = effective_status(
+                        self.engine, cid).get("effective")
+                except Exception:
+                    state = "unknown"
+                notes.append(f"media capability {name[:32]} "
+                             f"({cid[:12]}...) is {state}")
+        return "; ".join(notes)
+
+    def _detect_composition(self, text: str):
+        """Decompose a possible multi-leg request.
+
+        Returns None when this is not a composition request (the caller
+        falls through to single dispatch), ("unroutable", problems) when
+        a leg-shaped fragment cannot be routed -- problems is a list of
+        (fragment, reason) -- or ("ok", legs) with >= 2
+        (fragment, route) legs, each routed to a media capability.
+        """
+        if not isinstance(text, str):
+            return None
+        fragments = [f.strip() for f in _COMPOSE_SPLIT_RE.split(text.strip())
+                     if f and f.strip()]
+        if len(fragments) < 2:
+            return None
+        # Every fragment must be a complete imperative request ("generate
+        # an image of a sunset", "create a short video of ocean waves").
+        # Adjective-joins ("a dog with brown fur and white spots") are
+        # not composition-shaped: the non-imperative fragment means the
+        # whole text falls through to single dispatch unchanged.
+        if not all(_is_imperative(f) for f in fragments):
+            return None
+        legs = []
+        problems = []
+        for frag in fragments:
+            route = self.router.route(frag)
+            if not route.ok:
+                if any(w in frag.lower() for w in _MEDIA_LEG_WORDS):
+                    why = route.refusal or "unroutable"
+                    note = self._inactive_media_note(frag)
+                    if note:
+                        why = f"{why}; {note}"
+                    problems.append((frag, why))
+                continue
+            rec = self.engine.capabilities.get(route.capability_id)
+            if rec is not None and self._media_plan(rec):
+                legs.append((frag, route))
+            else:
+                problems.append(
+                    (frag, "routes to a non-media capability: composition "
+                           "has no argument synthesizer for it"))
+        if problems:
+            return ("unroutable", problems)
+        if len(legs) < 2:
+            return None
+        return ("ok", legs)
+
+    def _dispatch_composition(self, text: str, legs, producer: Optional[str]
+                              ) -> DispatchResult:
+        """Execute each leg through the governed single-dispatch core and
+        compose the results into one artifact.
+
+        Every leg honors the same gates as a routed dispatch: the record
+        must still exist, its plan must fingerprint to its id, its
+        effective status must be active (a leg quarantined between
+        routing and execution is refused -- composition never routes
+        around quarantine), args are validated against the declared
+        params, execution goes through the real Composer path, and each
+        leg persists its own dispatch record (route_via
+        "composition:leg<i>"). A leg failure fails the composition
+        honestly, naming the leg -- there are no partial-fake results.
+        """
+        leg_traces = []
+        for i, (frag, route) in enumerate(legs):
+            cap_id = route.capability_id
+            label = (f"leg {i} ({frag[:60]!r} -> "
+                     f"{route.capability_name or cap_id[:12]}...)")
+            rec = self.engine.capabilities.get(cap_id)
+            if rec is None:
+                # Vanished between detection and execution: let the
+                # governed core name it (capability_vanished).
+                leg_res = self._dispatch_validated(
+                    frag, cap_id, {}, producer,
+                    route_via=f"composition:leg{i}", route_score=route.score)
+                return DispatchResult(
+                    ok=False, refusal="composition_leg_failed",
+                    route_via="composition",
+                    reasons=[f"{label}: {leg_res.refusal}: "
+                             f"{'; '.join(leg_res.reasons)}"])
+            synth, why = self._synthesize_media_args(frag, rec)
+            if synth is None:
+                return DispatchResult(
+                    ok=False, refusal="composition_leg_failed",
+                    route_via="composition",
+                    reasons=[f"{label}: media args could not be "
+                             f"synthesized: {why}"])
+            leg_res = self._dispatch_validated(
+                frag, cap_id, synth, producer,
+                route_via=f"composition:leg{i}", route_score=route.score)
+            if not leg_res.ok:
+                return DispatchResult(
+                    ok=False, refusal="composition_leg_failed",
+                    route_via="composition",
+                    reasons=[f"{label}: {leg_res.refusal}: "
+                             f"{'; '.join(leg_res.reasons)}"])
+            leg_traces.append({
+                "leg": i,
+                "fragment": frag,
+                "capability_id": cap_id,
+                "capability_name": route.capability_name,
+                "dispatch_id": leg_res.dispatch_id,
+                "result": leg_res.result,
+            })
+        artifacts = []
+        for lt in leg_traces:
+            res = lt["result"]
+            if isinstance(res, dict):
+                p = res.get("out_path") or res.get("path")
+                if isinstance(p, str):
+                    artifacts.append({"leg": lt["leg"], "path": p})
+        composed = {
+            "composition": True,
+            "request": text,
+            "legs": leg_traces,
+            "artifacts": artifacts,
+        }
+        return DispatchResult(
+            ok=True, result=composed, route_via="composition",
+            reasons=[f"composition of {len(leg_traces)} legs"] +
+                    [f"leg{lt['leg']} dispatch_id={lt['dispatch_id']}"
+                     for lt in leg_traces])
+
     # -- argument validation ------------------------------------------------
     def _check_json_value(self, v: Any, depth: int, path: str) -> Optional[str]:
         """Return an error string, or None if the value is acceptable."""
@@ -378,6 +597,26 @@ class NLToolDispatcher:
 
     def dispatch(self, text: str, args: Optional[Dict[str, Any]] = None,
                  producer: Optional[str] = None) -> DispatchResult:
+        # M4 composition: an empty-args NL request that decomposes into
+        # multiple routable media legs executes as ONE composed dispatch;
+        # each leg runs the governed single-dispatch core (existence,
+        # plan fingerprint, effective_status, arg validation, real
+        # Composer execution, persisted record). Explicit args keep the
+        # single-capability strict contract -- composition never engages
+        # when the caller supplied an arg set.
+        if not args:
+            comp = self._detect_composition(text)
+            if comp is not None:
+                kind, payload = comp
+                if kind == "ok":
+                    return self._dispatch_composition(text, payload,
+                                                      producer)
+                reasons = []
+                for frag, why in payload:
+                    reasons.append(f"leg {frag[:60]!r}: {why}")
+                return DispatchResult(
+                    ok=False, refusal="composition_leg_unroutable",
+                    route_via="composition", reasons=reasons)
         # 1. route
         route = self.router.route(text)
         if not route.ok:
@@ -388,10 +627,13 @@ class NLToolDispatcher:
         # 1b. argument synthesis for pure-NL media requests: when the
         # caller supplied no args at all and the parser understood the
         # request, complete the args from the frame + sane defaults
-        # (mirrors task_interface._understand_create_media). A caller
-        # that supplies explicit args keeps the strict contract:
-        # missing/unknown args are still bad_arguments.
-        if args is None:
+        # (mirrors task_interface._understand_create_media). An empty
+        # args dict means the same as absent: the GUI dispatch view
+        # always sends "args": {}, so {} must not be mistaken for
+        # caller-supplied args. A caller that supplies a NON-EMPTY arg
+        # set keeps the strict contract: missing/unknown args are still
+        # bad_arguments.
+        if not args:
             rec0 = self.engine.capabilities.get(cap_id)
             if rec0 is not None and self._media_plan(rec0):
                 synth, why = self._synthesize_media_args(text, rec0)

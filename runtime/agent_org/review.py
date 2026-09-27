@@ -30,10 +30,12 @@ artifact_kind never authorizes an admission scoped to another kind
 """
 from __future__ import annotations
 
+import functools
 import json
 from typing import Any, Dict, List, Optional, Sequence
 
 from swarm_engine.acquisition.semantic import Case
+from swarm_engine.capability.effect_sandbox import TRUSTED_POLICY
 from swarm_engine.agent_org.exceptions import (
     AuthorityError,
     LifecycleError,
@@ -165,11 +167,24 @@ class ReviewBoard:
 
     # -- verification execution -----------------------------------------
     def _run_validator(self, code: str, entrypoint: str, spec: Any,
-                       cases: Sequence[Case]) -> Verdict:
+                       cases: Sequence[Case],
+                       effect_policy: Any = None) -> Verdict:
         """Execute the real independent validator. The ONLY path that
-        produces verdicts admission trusts."""
+        produces verdicts admission trusts.
+
+        effect_policy selects the sandbox profile for the executed code.
+        The default (None) is the PURE profile: zero granted effect
+        capabilities, for untrusted candidate bytes. TRUSTED_POLICY is
+        reserved for fixed review-procedure bytes (never synthesized or
+        admitted candidate bytes); the single authorized call site is
+        the dispatch-evidence re-execution harness below, whose
+        docstring already declares it procedure, not artifact.
+        """
+        runner = (run_code if effect_policy is None
+                  else functools.partial(run_code,
+                                         effect_policy=effect_policy))
         validator = IndependentValidator(
-            run_code,
+            runner,
             Arbiter(oracle_registry=self.oregistry, require_binding=True),
             seed=0,
             oracle_registry=self.oregistry,
@@ -194,6 +209,20 @@ class ReviewBoard:
         execution_id = "vex_" + digest(
             digest(code) + artifact_kind + artifact_ref + now())[:16]
         evd = verdict.evidence or {}
+        # W4-R1: persist the observed-effects evidence the verdict carries.
+        # "profile" is the sandbox effect policy in force during
+        # verification ("pure" / "granted" / "unknown" when the run predates
+        # the W4-R1 runner contract or the runner reported none); "grants"
+        # the granted capabilities; "observed_effects" the audit-recorded
+        # events. Additive: existing keys are untouched.
+        _effect_policy = evd.get("effect_policy") or {}
+        if not isinstance(_effect_policy, dict):
+            _effect_policy = {}
+        _effect_evidence = {
+            "profile": _effect_policy.get("profile", "unknown"),
+            "grants": list(_effect_policy.get("grants", [])),
+            "observed_effects": list(evd.get("observed_effects", []) or []),
+        }
         # Anchor pre-write check (F1-F3 repair): the journal commits us
         # to its heads BEFORE this insert lands. If a journal exists, the
         # current live heads must already match its tip -- a mismatch
@@ -223,7 +252,8 @@ class ReviewBoard:
                 "n_findings": len(evd.get("findings", [])),
                 "cases": evd.get("cases"),
                 "adversarial": evd.get("adversarial"),
-                "failed_levels": evd.get("failed_levels")}, sort_keys=True,
+                "failed_levels": evd.get("failed_levels"),
+                "effect_evidence": _effect_evidence}, sort_keys=True,
                 default=str),
             "code_digest": digest(code),
             "artifact_kind": artifact_kind,
@@ -307,7 +337,8 @@ class ReviewBoard:
 
     def verify_generality(self, code: str, entrypoint: str, spec: Any,
                           cases: Sequence[Case],
-                          candidate_id: str) -> Verdict:
+                          candidate_id: str,
+                          effect_policy: Any = None) -> Verdict:
         """Independently verify an L1 candidate's generality on held-out
         cases.
 
@@ -318,23 +349,33 @@ class ReviewBoard:
         via ExperienceStore.promote(): a generality verdict never
         authorizes L3 synthesis admission, and a synthesis verdict never
         authorizes promotion (kind-scoped).
+
+        effect_policy selects the sandbox profile (default PURE); a caller
+        promoting a tester/repair procedure may pass EXEC_POLICY explicitly.
         """
         if not code:
             raise VerificationFailed("verify_generality: empty code")
         verdict = self._run_validator(code, entrypoint or "selftest",
-                                      spec, list(cases))
+                                      spec, list(cases),
+                                      effect_policy=effect_policy)
         self._store_verdict(verdict, code, spec, list(cases),
                             artifact_kind="generality",
                             artifact_ref=candidate_id)
         return verdict
 
     def review(self, wp_id: str, spec: Any,
-               cases: Sequence[Case]) -> Verdict:
+               cases: Sequence[Case],
+               effect_policy: Any = None) -> Verdict:
         """Independently verify the work product's implementation.
 
         NOTE: self_reported_success is never read here. The verdict comes
         only from measured behaviour under isolation plus oracle-bound
         evidence.
+
+        effect_policy selects the sandbox profile (default PURE). A caller
+        that knows the work product is a tester/repair procedure with a
+        legitimate need for dynamic code execution may pass EXEC_POLICY
+        explicitly; the grant is recorded in the verdict's effect evidence.
         """
         wp = self.get_work_product(wp_id)
         if not wp.artifacts:
@@ -345,7 +386,8 @@ class ReviewBoard:
             raise VerificationFailed(
                 f"work product {wp_id}: empty implementation artifact")
         entrypoint = wp.entrypoint or "selftest"
-        verdict = self._run_validator(code, entrypoint, spec, list(cases))
+        verdict = self._run_validator(code, entrypoint, spec, list(cases),
+                                      effect_policy=effect_policy)
         # Bind the verdict to the work product AND the exact code verified:
         # accept() later requires this row to show an admitted verdict for
         # the current artifact bytes, so review can never be silently
@@ -676,8 +718,17 @@ class ReviewBoard:
                   "closure_json": closure_json},
             expect=expected, label=f"re-execute {evidence_id}")
         spec = _DispatchEvidenceSpec(evidence_id, case.args, expected)
+        # TRUSTED profile justification (W4-R1): the executed bytes are the
+        # FIXED review-procedure re-execution harness
+        # (dispatch_learning._DISPATCH_REEXEC_HARNESS) -- checked-in,
+        # reviewed, never synthesized or admitted candidate bytes. It must
+        # import hashlib and swarm_engine to rebuild the primitive
+        # vocabulary, which the PURE profile denies. The artifact under
+        # review is the evidence document (its digest is what the verdict
+        # binds), not the harness. Audit hook still records.
         verdict = self._run_validator(_DISPATCH_REEXEC_HARNESS,
-                                      "verify_dispatch", spec, [case])
+                                      "verify_dispatch", spec, [case],
+                                      effect_policy=TRUSTED_POLICY)
         self._store_verdict(verdict, ev.evidence_json, spec, [case],
                             artifact_kind=DISPATCH_EVIDENCE_KIND,
                             artifact_ref=evidence_id)

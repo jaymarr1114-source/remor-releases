@@ -40,8 +40,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -883,8 +887,1171 @@ def seal_capability(engine, cap: CapabilityRecord) -> str:
 
 
 # --------------------------------------------------------------------------
-# epistemic chain: seal the behavioral loop's artifacts + link the lineage
+# quarantine reason API + self-diagnosis / self-repair drivers (M5)
+#
+# Frozen cross-loop interface: get_quarantine_reason(capability_id) ->
+# {reason, since, system}. M3 consumes it. The single-argument form works
+# against the default engine DB (SWARM_ENGINE_DB env or swarm_engine.db);
+# pass engine= explicitly when a live engine is in hand.
+#
+# This section ADDS to integrity.py; the frozen functions above
+# (effective_status, quarantine_everywhere, restore_everywhere,
+# rollback_with_lineage, verify_capability, seal_capability) are untouched.
 # --------------------------------------------------------------------------
+
+#: Canonical reason-label vocabulary (frozen). Free-text reasons recorded by
+#: the three status systems are preserved verbatim in `reason`; `label`
+#: carries the canonical classification where one applies.
+QUARANTINE_REASON_VOCABULARY = (
+    "not-applicable",
+    "needs-improvement",
+    "not-functional",
+    "missing-dependency",
+    "missing-substrate",
+    "tampered",
+    "verification-failed",
+    "revoked",
+)
+
+#: The three status systems the reason API reads, in priority order.
+QUARANTINE_SYSTEMS = ("store", "provenance", "lifecycle")
+
+#: Store events that record a quarantine (newest-first scan).
+_STORE_QUARANTINE_EVENTS = (
+    "quarantined_everywhere",
+    "quarantined",
+    "corruption_detected",
+)
+
+#: Lifecycle states that count as quarantined for the reason API.
+_LIFECYCLE_QUARANTINED = ("quarantined",)
+
+
+def _quarantine_stores(engine=None, db_path=None):
+    """Resolve the three status systems without booting an engine.
+
+    A live engine wins (its stores may carry oracle bindings). Otherwise
+    the three stores are constructed directly on the DB path -- read-only
+    usage here; their constructors only ensure tables exist.
+    """
+    if engine is not None:
+        return (engine.capabilities, engine.provenance, engine.lifecycle)
+    from swarm_engine.governance.lifecycle import CapabilityLifecycle
+    from swarm_engine.governance.provenance import ProvenanceStore
+    from swarm_engine.synthesis.capability_store import CapabilityStore
+    path = db_path or os.environ.get("SWARM_ENGINE_DB", "swarm_engine.db")
+    return CapabilityStore(path), ProvenanceStore(path), CapabilityLifecycle(path)
+
+
+def _latest_named_event(events, names):
+    """Newest event whose name is in `names`; events carry 'at'."""
+    best = None
+    for ev in events or []:
+        if ev.get("event") in names:
+            if best is None or (ev.get("at") or 0) > (best.get("at") or 0):
+                best = ev
+    return best
+
+
+def _parse_trust_reason(detail: str) -> Optional[str]:
+    """Provenance logs trust changes as 'QUARANTINED: <reason> [...]'."""
+    if not detail:
+        return None
+    d = detail.strip()
+    if d.startswith("QUARANTINED:"):
+        d = d[len("QUARANTINED:"):].strip()
+    # strip trailing "[transition=...]" attribution
+    cut = d.find(" [transition=")
+    if cut != -1:
+        d = d[:cut].strip()
+    return d or None
+
+
+def get_quarantine_reason(capability_id: str, engine=None,
+                          db_path: Optional[str] = None) -> Dict[str, Any]:
+    """Frozen cross-loop interface: WHY is this capability quarantined?
+
+    Reads all three status systems:
+      store      -- plan_capabilities.status + capability_events
+                    (quarantined_everywhere / quarantined / corruption_detected)
+      provenance -- trust level + provenance_events trust_changed to QUARANTINED
+      lifecycle  -- CapabilityLifecycle.history, last transition to QUARANTINED
+
+    Returns {"reason", "since", "system", "quarantined", "systems"} where
+    `reason` is the actionable (most recent) quarantine reason, `since` its
+    timestamp, and `system` is one of "store" | "provenance" | "lifecycle" |
+    "all" (every reporting system agrees) | "none" (not quarantined
+    anywhere). `systems` carries the per-system detail; a system that says
+    quarantined but recorded no reason reports that gap honestly instead of
+    inventing one.
+    """
+    store, prov, lc = _quarantine_stores(engine, db_path)
+    per: Dict[str, Dict[str, Any]] = {}
+
+    # -- store -----------------------------------------------------------
+    store_q = False
+    store_reason = None
+    store_since = None
+    try:
+        rec = store.get(capability_id)
+        store_q = rec is not None and rec.status == "quarantined"
+        ev = _latest_named_event(store.events(capability_id, limit=100),
+                                 _STORE_QUARANTINE_EVENTS)
+        if ev is not None:
+            store_reason = ev.get("detail") or None
+            store_since = ev.get("at")
+    except Exception as e:
+        per["store"] = {"quarantined": None, "reason": None, "since": None,
+                        "error": str(e)}
+    if "store" not in per:
+        per["store"] = {"quarantined": store_q, "reason": store_reason,
+                        "since": store_since}
+
+    # -- provenance ------------------------------------------------------
+    prov_q = False
+    prov_reason = None
+    prov_since = None
+    try:
+        from swarm_engine.governance.provenance import TrustLevel
+        prec = prov.get(capability_id)
+        prov_q = prec is not None and prec.trust == TrustLevel.QUARANTINED
+        ev = _latest_named_event(prov.events(capability_id, limit=100),
+                                 ("trust_changed",))
+        if ev is not None and (ev.get("detail") or "").startswith("QUARANTINED"):
+            prov_reason = _parse_trust_reason(ev.get("detail"))
+            prov_since = ev.get("at")
+    except Exception as e:
+        per["provenance"] = {"quarantined": None, "reason": None,
+                             "since": None, "error": str(e)}
+    if "provenance" not in per:
+        per["provenance"] = {"quarantined": prov_q, "reason": prov_reason,
+                             "since": prov_since}
+
+    # -- lifecycle -------------------------------------------------------
+    # Quarantined-ness is the CURRENT lifecycle state, not "was ever
+    # quarantined": a capability restored through the legal walk is
+    # DEPLOYED now, and reporting it quarantined here would disagree with
+    # effective_status and send repair into a doomed restore_everywhere
+    # (which correctly refuses: it only inverts a quarantine). History is
+    # still mined for the most recent quarantine reason/since.
+    lc_q = False
+    lc_reason = None
+    lc_since = None
+    try:
+        from swarm_engine.governance.lifecycle import LifecycleState
+        try:
+            lc_q = (lc.state_of(capability_id)
+                    == LifecycleState.QUARANTINED)
+        except Exception:
+            lc_q = False
+        try:
+            hist = lc.history(capability_id)
+        except Exception:
+            hist = []
+        last_q = None
+        for t in hist:
+            if t.to_state == LifecycleState.QUARANTINED:
+                if last_q is None or t.at > last_q.at:
+                    last_q = t
+        if last_q is not None:
+            lc_reason = last_q.reason or None
+            lc_since = last_q.at
+    except Exception as e:
+        per["lifecycle"] = {"quarantined": None, "reason": None,
+                            "since": None, "error": str(e)}
+    if "lifecycle" not in per:
+        per["lifecycle"] = {"quarantined": lc_q, "reason": lc_reason,
+                            "since": lc_since}
+
+    quarantined_systems = [s for s in QUARANTINE_SYSTEMS
+                           if per[s]["quarantined"] is True]
+    if not quarantined_systems:
+        return {"reason": None, "since": None, "system": "none",
+                "quarantined": False, "systems": per}
+
+    # The actionable reason is the most recent quarantine record; every
+    # system's record stays visible in `systems`.
+    candidates = [(per[s]["since"] or 0, s) for s in quarantined_systems]
+    candidates.sort()
+    _, newest = candidates[-1]
+    reason = per[newest]["reason"]
+    since = per[newest]["since"]
+    if reason is None:
+        # Quarantined but no system recorded why: report the gap, don't
+        # invent a reason.
+        reason = ("quarantined with no recorded reason in any status "
+                  "system (provenance gap)")
+    if len(quarantined_systems) == len(QUARANTINE_SYSTEMS):
+        system = "all"
+    else:
+        system = "+".join(sorted(quarantined_systems))
+    return {"reason": reason, "since": since, "system": system,
+            "quarantined": True, "systems": per}
+
+
+# --------------------------------------------------------------------------
+# diagnostic driver: is the recorded reason still true?
+# --------------------------------------------------------------------------
+
+@dataclass
+class QuarantineDiagnosis:
+    capability_id: str
+    quarantined: bool
+    reason: Optional[str]
+    since: Optional[float]
+    system: str
+    reason_still_holds: Optional[bool]  # None: not quarantined / indeterminate
+    verdict: str  # not_quarantined | reason_holds | reason_cleared | indeterminate
+    checks: List[Dict[str, Any]] = field(default_factory=list)
+    label: Optional[str] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"capability_id": self.capability_id,
+                "quarantined": self.quarantined,
+                "reason": self.reason, "since": self.since,
+                "system": self.system,
+                "reason_still_holds": self.reason_still_holds,
+                "verdict": self.verdict, "label": self.label,
+                "checks": self.checks}
+
+
+_MISSING_HINTS = ("missing", "not installed", "not importable", "no module",
+                  "substrate", "dependency", "unavailable", "absent")
+_TAMPER_HINTS = ("tamper", "corrupt", "fingerprint", "mismatch", "seal")
+_SMOKE_HINTS = ("smoke", "verification failed", "re-verification",
+                "admission refused")
+
+
+def _candidate_modules(reason: str) -> List[str]:
+    """Module names a quarantine reason plausibly names: quoted tokens
+    plus known substrate names mentioned in the text."""
+    import re
+    cands: List[str] = []
+    for tok in re.findall(r"'([^']+)'|\"([^\"]+)\"|`([^`]+)`", reason or ""):
+        name = next(t for t in tok if t)
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name):
+            cands.append(name.split(".")[0])
+    known = ("piper", "PIL", "pillow", "numpy", "scipy", "onnx",
+             "torch", "cv2", "ffmpeg")
+    low = (reason or "").lower()
+    for k in known:
+        if k.lower() in low and k not in cands and k.lower() not in cands:
+            cands.append(k)
+    seen = set()
+    out = []
+    for c in cands:
+        if c.lower() not in seen:
+            seen.add(c.lower())
+            out.append(c)
+    return out
+
+
+def _importable(module: str) -> Tuple[bool, str]:
+    import importlib.util
+    try:
+        spec = importlib.util.find_spec(module)
+    except Exception as e:
+        return False, f"find_spec raised: {e}"
+    if spec is None:
+        return False, "find_spec -> None (not installed)"
+    return True, f"found at {spec.origin}"
+
+
+def _reason_class(reason: Optional[str]) -> str:
+    r = (reason or "").lower()
+    if any(h in r for h in _MISSING_HINTS):
+        return "missing_substrate"
+    if any(h in r for h in _TAMPER_HINTS):
+        return "tampered"
+    if any(h in r for h in _SMOKE_HINTS):
+        return "verification"
+    if "superseded" in r or "not-applicable" in r or "not applicable" in r:
+        return "not_applicable"
+    if "revoked" in r:
+        return "revoked"
+    return "unknown"
+
+
+def _stay_label(reason: Optional[str], reason_class: str) -> str:
+    """Honest vocabulary for a capability that stays quarantined."""
+    if reason_class == "not_applicable":
+        return "not-applicable"
+    if reason_class == "missing_substrate":
+        return "not-functional"  # cannot run in this environment
+    if reason_class == "tampered":
+        return "needs-improvement"  # needs a repair action, not just time
+    return "needs-improvement"
+
+
+def diagnose_quarantine(engine, capability_id: str) -> QuarantineDiagnosis:
+    """Determine whether the recorded quarantine reason still holds.
+
+    Checks, in order:
+      1. the frozen reason API (what was recorded, where, when);
+      2. baseline integrity: plan fingerprint + dependency existence
+         (re-runs the read-only parts of verify_capability);
+      3. class-specific re-check:
+           missing_substrate -> substrate import re-check;
+           tampered          -> fingerprint/seal re-verification;
+           verification/smoke, revoked, unknown -> indeterminate (fail
+             closed: only a positive "cleared" signal repairs).
+    """
+    qr = get_quarantine_reason(capability_id, engine=engine)
+    checks: List[Dict[str, Any]] = [
+        {"name": "quarantine_reason", "outcome": "recorded"
+         if qr["quarantined"] else "absent",
+         "detail": f"system={qr['system']} reason={qr['reason']!r}"}]
+    if not qr["quarantined"]:
+        return QuarantineDiagnosis(
+            capability_id, False, None, None, "none", None,
+            "not_quarantined", checks)
+
+    reason = qr["reason"]
+    rclass = _reason_class(reason)
+    checks.append({"name": "reason_class", "outcome": rclass,
+                   "detail": f"classified from {reason!r}"})
+
+    # Baseline: plan integrity + dependency existence (read-only).
+    rec = engine.capabilities.get(capability_id)
+    if rec is None:
+        checks.append({"name": "plan_integrity", "outcome": "unknown",
+                       "detail": "record not found in store"})
+        fp_ok = None
+    else:
+        try:
+            fp_ok = plan_fingerprint(rec.plan) == capability_id
+        except Exception as e:
+            fp_ok = False
+            checks.append({"name": "plan_integrity", "outcome": "error",
+                           "detail": str(e)[:200]})
+        if fp_ok is not None and not any(
+                c["name"] == "plan_integrity" for c in checks):
+            checks.append({"name": "plan_integrity",
+                           "outcome": "pass" if fp_ok else "fail",
+                           "detail": "plan fingerprints to its id"
+                           if fp_ok else "plan content != id (tampered)"})
+        ops = _walk_ops(rec.plan) if isinstance(rec.plan, dict) else []
+        missing = [op for op in set(ops) if op not in engine.primitives]
+        checks.append({"name": "deps_exist",
+                       "outcome": "pass" if not missing else "fail",
+                       "detail": ("all ops resolve" if not missing
+                                  else "missing: " + ", ".join(sorted(missing)))})
+
+    # Class-specific re-check.
+    if rclass == "missing_substrate":
+        mods = _candidate_modules(reason)
+        checks.append({"name": "substrate_candidates", "outcome": "listed",
+                       "detail": f"modules named by reason: {mods}"})
+        if not mods:
+            return QuarantineDiagnosis(
+                capability_id, True, reason, qr["since"], qr["system"],
+                None, "indeterminate", checks,
+                _stay_label(reason, rclass))
+        still_missing = []
+        for m in mods:
+            ok, detail = _importable(m)
+            checks.append({"name": f"substrate_import:{m}",
+                           "outcome": "pass" if ok else "fail",
+                           "detail": detail})
+            if not ok:
+                still_missing.append(m)
+        if still_missing:
+            return QuarantineDiagnosis(
+                capability_id, True, reason, qr["since"], qr["system"],
+                True, "reason_holds", checks,
+                _stay_label(reason, rclass))
+        return QuarantineDiagnosis(
+            capability_id, True, reason, qr["since"], qr["system"],
+            False, "reason_cleared", checks, None)
+
+    if rclass == "tampered":
+        # Re-verify: fingerprint (above) plus the record seal.
+        integ = IntegrityStore(engine.capabilities.db_path)
+        if rec is not None:
+            seal_ok, seal_msg = integ.verify_seal("capability",
+                                                  capability_id,
+                                                  rec.as_dict())
+            checks.append({"name": "record_seal",
+                           "outcome": ("pass" if seal_ok else "fail")
+                           if seal_msg != "not_sealed" else "unknown",
+                           "detail": seal_msg})
+        else:
+            seal_ok, seal_msg = False, "no record"
+        holds = (fp_ok is False) or (seal_msg not in ("match", "not_sealed")
+                                     and not seal_ok)
+        if holds:
+            return QuarantineDiagnosis(
+                capability_id, True, reason, qr["since"], qr["system"],
+                True, "reason_holds", checks,
+                _stay_label(reason, rclass))
+        if fp_ok and seal_msg in ("match", "not_sealed"):
+            return QuarantineDiagnosis(
+                capability_id, True, reason, qr["since"], qr["system"],
+                False, "reason_cleared", checks, None)
+        return QuarantineDiagnosis(
+            capability_id, True, reason, qr["since"], qr["system"],
+            None, "indeterminate", checks,
+            _stay_label(reason, rclass))
+
+    # verification / revoked / not_applicable / unknown: no safe automatic
+    # re-check exists on this driver -- fail closed.
+    checks.append({"name": "recheck", "outcome": "skipped",
+                   "detail": f"no automatic re-check for class "
+                             f"{rclass!r}; refusing to guess"})
+    return QuarantineDiagnosis(
+        capability_id, True, reason, qr["since"], qr["system"],
+        None, "indeterminate", checks, _stay_label(reason, rclass))
+
+
+# --------------------------------------------------------------------------
+# repair driver: cleared -> legal lifecycle walk; holds -> honest label
+# --------------------------------------------------------------------------
+
+class RepairRefused(Exception):
+    """Raised when the repair driver cannot proceed. Fail closed."""
+
+
+def repair_quarantine(engine, capability_id: str, *,
+                      caller=None, reason: str = "",
+                      smoke=None) -> Dict[str, Any]:
+    """Idempotent quarantine self-repair driver.
+
+    1. diagnose_quarantine (reason API + re-checks);
+    2. not quarantined            -> no-op {"action": "none"} (idempotent:
+       re-running after a successful repair changes nothing);
+    3. reason holds / indeterminate -> stays quarantined with the honest
+       not-applicable / needs-improvement / not-functional label, logged;
+    4. reason cleared             -> restore_everywhere: the legal
+       QUARANTINED -> CANDIDATE -> ... -> DEPLOYED walk with full
+       re-verification through the real admission path (nothing skipped).
+
+    caller must hold 'agent:restore' + 'trust:transition' for step 4
+    (restore_everywhere's own gate); a missing caller refuses rather than
+    weakening the gate.
+    """
+    diag = diagnose_quarantine(engine, capability_id)
+    report: Dict[str, Any] = {"capability_id": capability_id,
+                              "diagnosis": diag.as_dict()}
+    if diag.verdict == "not_quarantined":
+        report["action"] = "none"
+        report["status"] = "not_quarantined"
+        return report
+
+    if diag.verdict in ("reason_holds", "indeterminate"):
+        engine.capabilities.log(
+            capability_id, "quarantine_diagnosed",
+            json.dumps({"verdict": diag.verdict, "label": diag.label,
+                        "reason": diag.reason, "system": diag.system}))
+        report["action"] = "none"
+        report["status"] = diag.verdict
+        report["label"] = diag.label
+        return report
+
+    # reason_cleared -> the legal walk. restore_everywhere re-verifies
+    # through the real admission path and walks the governed lifecycle
+    # chain; it refuses (fail closed) if anything is off.
+    if caller is None:
+        raise RepairRefused(
+            "diagnostic verdict is reason_cleared but no caller was "
+            "provided; restore_everywhere requires an authorized caller "
+            "('agent:restore' + 'trust:transition') -- refusing rather "
+            "than weakening the gate")
+    walk_reason = reason or (
+        "quarantine self-repair: diagnostic verdict reason_cleared "
+        f"(recorded reason no longer holds: {diag.reason!r})")
+    engine.capabilities.log(
+        capability_id, "quarantine_repair_started",
+        json.dumps({"old_reason": diag.reason, "system": diag.system,
+                    "reason": walk_reason}))
+    try:
+        actions = restore_everywhere(engine, capability_id, caller=caller,
+                                     reason=walk_reason, smoke=smoke)
+    except RestoreRefused as e:
+        engine.capabilities.log(capability_id, "quarantine_repair_refused",
+                                str(e)[:500])
+        report["action"] = "restore_refused"
+        report["status"] = "restore_refused"
+        report["error"] = str(e)[:500]
+        return report
+    report["action"] = "restored"
+    report["status"] = "restored"
+    report["restore"] = actions
+    return report
+
+
+def repair_all_quarantined(engine, *, caller=None,
+                           reason: str = "") -> Dict[str, Any]:
+    """Run the repair driver over every quarantined capability. Safe to
+    run repeatedly: each capability is diagnosed first, and capabilities
+    that are no longer quarantined are no-ops."""
+    results: Dict[str, Any] = {}
+    seen = set()
+    for rec in engine.capabilities.list(status="quarantined", limit=10000):
+        cid = rec.capability_id
+        if cid in seen:
+            continue
+        seen.add(cid)
+        try:
+            results[cid] = repair_quarantine(engine, cid, caller=caller,
+                                             reason=reason)
+        except RepairRefused as e:
+            results[cid] = {"action": "refused", "status": "refused",
+                            "error": str(e)[:500]}
+        except Exception as e:
+            results[cid] = {"action": "error", "status": "error",
+                            "error": f"{type(e).__name__}: {e}"[:500]}
+    return {"count": len(results), "results": results}
+
+
+# --------------------------------------------------------------------------
+# Q4: schedule-ready quarantine sweep driver (unattended execution)
+#
+# M5's repair_all_quarantined is safe to run repeatedly but not hardened for
+# unattended scheduled execution: no runtime bounds, no sweep-level audit
+# trail, and a hard crash inside one capability's repair would kill the
+# whole sweep process. This section adds:
+#
+#   run_quarantine_sweep(...)   -- the SCHEDULING INLET (see its docstring
+#                                  for the nominated call site; documented,
+#                                  not built -- scheduler.py has no periodic
+#                                  facility and this mission does not add one)
+#   SweepAuditLog               -- persistent per-run audit trail
+#                                  (sweep_runs / sweep_actions tables)
+#   report_quarantine_repair_evidence -- the single, clearly-marked call
+#                                  site where verified repair evidence is
+#                                  recorded for M7's registry to consume
+#                                  (a closure CANDIDATE -- M7 closes only
+#                                  after verified utilization)
+#   get_latest_sweep_report / list_sweep_runs -- retrieval for the
+#                                  capabilities-view path
+#
+# Design notes (unattended safety):
+#   * Per-capability isolation: each capability is repaired in a FRESH CHILD
+#     PROCESS with a hard kill timeout. A hung diagnosis, an unexpected
+#     exception, or a hard crash in one capability cannot abort or corrupt
+#     the sweep of the others. The child boots its own SwarmEngine against
+#     the same DB and repairs as the engine itself (engine.oracle -- the
+#     same authorization M5's proof used); no credentials cross the
+#     process boundary.
+#   * Total runtime bound: no NEW capability starts after the total deadline;
+#     unstarted capabilities are recorded as "skipped", never silently
+#     dropped. The in-flight capability is additionally capped by the
+#     remaining budget, so observed wall time <= total_timeout_s (+epsilon).
+#   * No interactive prompts exist anywhere in the diagnose->repair path
+#     (verified: no input() in integrity/admission/capability_store/
+#     lifecycle/provenance repair paths).
+# --------------------------------------------------------------------------
+
+_SWEEP_WORKER_FLAG = "--sweep-worker"
+# Test hook ONLY: the child worker sleeps this many seconds (from the parent's
+# environment) before repairing, so the per-capability timeout path can be
+# exercised causally. Never set in production; the sweep does not depend on it.
+_SWEEP_WORKER_TEST_DELAY_ENV = "REMOR_SWEEP_WORKER_DELAY_S"
+
+_SWEEP_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sweep_runs (
+    run_id       TEXT PRIMARY KEY,
+    started_at   REAL NOT NULL,
+    finished_at  REAL,
+    config_json  TEXT NOT NULL DEFAULT '{}',
+    summary_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS sweep_actions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    verdict       TEXT NOT NULL DEFAULT '',
+    action        TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT '',
+    elapsed_ms    REAL NOT NULL DEFAULT 0,
+    error         TEXT NOT NULL DEFAULT '',
+    detail_json   TEXT NOT NULL DEFAULT '{}',
+    at            REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sweep_actions_run
+    ON sweep_actions(run_id);
+CREATE TABLE IF NOT EXISTS quarantine_repair_evidence (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    at            REAL NOT NULL,
+    detail_json   TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_repair_evidence_cap
+    ON quarantine_repair_evidence(capability_id);
+"""
+
+
+def _resolve_sweep_db_path(engine=None, db_path=None) -> str:
+    if db_path:
+        return db_path
+    caps = getattr(engine, "capabilities", None)
+    p = getattr(caps, "db_path", None)
+    if p:
+        return p
+    return os.environ.get("SWARM_ENGINE_DB", "swarm_engine.db")
+
+
+class SweepAuditLog:
+    """Persistent audit trail for quarantine sweeps.
+
+    Every sweep run and every per-capability action/no-op/error/timeout/skip
+    is written to the engine DB (sweep_runs / sweep_actions), retrievable in
+    a fresh process via get_latest_sweep_report / list_sweep_runs -- the
+    capabilities-view path reads the same tables.
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        with self._conn() as c:
+            c.executescript(_SWEEP_SCHEMA)
+
+    def _conn(self):
+        c = sqlite3.connect(self.db_path)
+        c.execute("PRAGMA journal_mode=WAL")
+        return c
+
+    def begin_run(self, run_id: str, config: Dict[str, Any]) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO sweep_runs (run_id, started_at, config_json)"
+                " VALUES (?,?,?)",
+                (run_id, time.time(), json.dumps(config)))
+
+    def record_action(self, run_id: str, capability_id: str,
+                      row: Dict[str, Any]) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO sweep_actions (run_id, capability_id, verdict,"
+                " action, status, elapsed_ms, error, detail_json, at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (run_id, capability_id, str(row.get("verdict", "")),
+                 str(row.get("action", "")), str(row.get("status", "")),
+                 float(row.get("elapsed_ms", 0.0) or 0.0),
+                 str(row.get("error", ""))[:2000],
+                 json.dumps(row.get("detail") or {}), time.time()))
+
+    def finish_run(self, run_id: str, summary: Dict[str, Any]) -> None:
+        with self._conn() as c:
+            c.execute(
+                "UPDATE sweep_runs SET finished_at=?, summary_json=?"
+                " WHERE run_id=?",
+                (time.time(), json.dumps(summary), run_id))
+
+    def report_repair_evidence(self, run_id: str, capability_id: str,
+                               detail: Optional[Dict[str, Any]] = None
+                               ) -> Dict[str, Any]:
+        """Record verified quarantine-REPAIR evidence (a closure CANDIDATE).
+
+        Per M7's binding rule a gap closes only after verified UTILIZATION,
+        not repair/re-admission alone: restoration evidence is necessary but
+        NOT sufficient for registry closure. This row is persistent, audited
+        evidence for M7's unified gap registry to consume -- the registry
+        performs actual closure after utilization.
+
+        FUTURE M7 INTEGRATION POINT -- when M7's unified gap registry API is
+        available, replace the body of this function with the registry's
+        evidence-ingest call (e.g. gaps.report_repair_evidence(...)); the
+        call site in run_quarantine_sweep stays identical.
+        """
+        event = {"run_id": run_id, "capability_id": capability_id,
+                 "at": time.time(), "detail": detail or {}}
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO quarantine_repair_evidence (run_id,"
+                " capability_id, at, detail_json) VALUES (?,?,?,?)",
+                (run_id, capability_id, event["at"],
+                 json.dumps(event["detail"])))
+        return event
+
+    def latest_report(self) -> Optional[Dict[str, Any]]:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT run_id, started_at, finished_at, config_json,"
+                " summary_json FROM sweep_runs ORDER BY started_at DESC"
+                " LIMIT 1").fetchone()
+            if not row:
+                return None
+            actions = c.execute(
+                "SELECT capability_id, verdict, action, status, elapsed_ms,"
+                " error, at FROM sweep_actions WHERE run_id=? ORDER BY id",
+                (row[0],)).fetchall()
+        return {
+            "run_id": row[0], "started_at": row[1], "finished_at": row[2],
+            "config": json.loads(row[3] or "{}"),
+            "summary": json.loads(row[4] or "{}"),
+            "actions": [
+                {"capability_id": a[0], "verdict": a[1], "action": a[2],
+                 "status": a[3], "elapsed_ms": a[4], "error": a[5], "at": a[6]}
+                for a in actions],
+        }
+
+    def list_runs(self, limit: int = 20) -> List[Dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT run_id, started_at, finished_at, summary_json"
+                " FROM sweep_runs ORDER BY started_at DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [{"run_id": r[0], "started_at": r[1], "finished_at": r[2],
+                 "summary": json.loads(r[3] or "{}")} for r in rows]
+
+
+def _sweep_child_path_entries() -> List[str]:
+    """sys.path entries the child worker needs to import this tree."""
+    import swarm_engine as _se
+    # Namespace package: no __file__; use __path__.
+    pkg_dirs = list(getattr(_se, "__path__", []) or [])
+    roots = {os.path.dirname(os.path.abspath(p)) for p in pkg_dirs}
+    cands: List[str] = []
+    for root in sorted(roots):
+        # '<root>/pylib' when imported via the pylib symlink layout,
+        # '<root>' itself otherwise (installed / direct runtime layout).
+        cands.extend([os.path.join(root, "pylib"), root])
+    # Plus the canonical-layout fallback derived from this file's location.
+    here_file = os.path.abspath(__file__)  # .../runtime/synthesis/integrity.py
+    canon_root = os.path.dirname(os.path.dirname(os.path.dirname(here_file)))
+    cands.extend([os.path.join(canon_root, "pylib"), canon_root])
+    seen = set()
+    out = []
+    for c in cands:
+        if c not in seen and os.path.isdir(c):
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _sweep_worker_main(argv=None) -> None:
+    """Child-process entry point: repair ONE quarantined capability.
+
+    Invoked as: python -c "<bootstrap>" --sweep-worker '<json payload>'.
+    Boots a fresh SwarmEngine against the payload's db_path, runs
+    repair_quarantine as the engine itself (engine.oracle -- the same
+    authorization M5's proof used; no credential crosses the process
+    boundary), and prints exactly one JSON line to stdout:
+    {"ok": true, "result": {...}} or {"ok": false, "error": "..."}.
+    Exit 0 on ok, 2 on worker error.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    try:
+        i = args.index(_SWEEP_WORKER_FLAG)
+        payload = json.loads(args[i + 1])
+        db_path = payload["db_path"]
+        capability_id = payload["capability_id"]
+    except (ValueError, IndexError, KeyError,
+            json.JSONDecodeError) as e:
+        print(json.dumps({"ok": False,
+                          "error": f"bad worker args: {e}"}), flush=True)
+        raise SystemExit(2)
+    try:
+        delay = float(payload.get("delay_s") or 0)
+        if delay > 0:
+            # TEST HOOK ONLY (REMOR_SWEEP_WORKER_DELAY_S): sleep so the
+            # parent's per-capability timeout path can be exercised.
+            time.sleep(delay)
+        from swarm_engine.core.engine import SwarmEngine
+        eng = SwarmEngine(db_path=db_path)
+        # Service-equivalent vocabulary: the production boot path
+        # (services/http_adapter boot) registers the media primitive family
+        # on every boot; a bare engine does not have it, and both the boot
+        # audit and restore's re-verification type-check plan steps against
+        # the registry. Mirror the service boot here (CALL the public APIs;
+        # never edit wiring.py).
+        vocab_warnings = []
+        try:
+            from swarm_engine.media.wiring import (
+                register_image_spec_primitive, register_media_primitives)
+            register_media_primitives(eng)
+            register_image_spec_primitive(eng)
+        except Exception as e:
+            vocab_warnings.append(f"{type(e).__name__}: {e}"[:300])
+        # Vocabulary-then-audit ordering: the boot audit inside
+        # SwarmEngine.__init__ runs BEFORE the service registers the media
+        # family, so it derived-quarantines healthy capabilities for ops
+        # that are restorable in this same process (false positive).
+        # Re-run the audit's own recovery AFTER the vocabulary is complete:
+        # audit_all reactivates exactly the derived-only quarantines whose
+        # ops are present again; deliberate quarantines stay sticky (never
+        # silently reactivated). This is the architecture's own recovery
+        # path, not a bypass.
+        audit_report = None
+        try:
+            def _worker_reregister(rec):
+                fn = getattr(eng.admission,
+                             "_register_capability_as_primitive", None)
+                if fn is None:
+                    raise RuntimeError(
+                        "admission has no _register_capability_as_primitive")
+                fn(rec.capability_id, rec)
+
+            audit_report = eng.capabilities.audit_all(
+                eng.primitives, register_fn=_worker_reregister)
+        except Exception as e:
+            vocab_warnings.append(
+                f"audit_all: {type(e).__name__}: {e}"[:300])
+        result = repair_quarantine(
+            eng, capability_id, caller=eng.oracle,
+            reason=payload.get("reason", ""))
+        if vocab_warnings:
+            result["vocabulary_setup_warnings"] = vocab_warnings
+        if audit_report is not None:
+            result["vocabulary_audit"] = {
+                k: audit_report.get(k)
+                for k in ("checked", "healthy", "quarantined", "recovered")}
+        print(json.dumps({"ok": True, "result": result}), flush=True)
+    except Exception as e:
+        print(json.dumps(
+            {"ok": False,
+             "error": f"{type(e).__name__}: {e}"[:2000]}), flush=True)
+        raise SystemExit(2)
+
+
+def _run_capability_subprocess(db_path: str, capability_id: str,
+                               reason: str,
+                               timeout_s: float) -> Dict[str, Any]:
+    """Repair one capability in a fresh child process with a hard timeout."""
+    payload = json.dumps({
+        "db_path": db_path, "capability_id": capability_id,
+        "reason": reason,
+        "delay_s": float(os.environ.get(_SWEEP_WORKER_TEST_DELAY_ENV,
+                                        "0") or 0),
+    })
+    entries = _sweep_child_path_entries()
+    bootstrap = ("import sys\n" +
+                 "".join(f"sys.path.insert(0, {e!r})\n"
+                         for e in reversed(entries)) +
+                 "from swarm_engine.synthesis.integrity import"
+                 " _sweep_worker_main\n"
+                 "_sweep_worker_main()\n")
+    t_start = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", bootstrap,
+             _SWEEP_WORKER_FLAG, payload],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except Exception as e:
+        return {"capability_id": capability_id, "action": "error",
+                "status": "worker_spawn_failed",
+                "error": f"{type(e).__name__}: {e}"[:500],
+                "elapsed_ms": (time.monotonic() - t_start) * 1000.0}
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _, err = proc.communicate()
+        return {"capability_id": capability_id, "action": "error",
+                "status": "timed_out",
+                "error": ("per-capability timeout "
+                          f"({timeout_s:.1f}s) exceeded; worker killed"),
+                "elapsed_ms": (time.monotonic() - t_start) * 1000.0,
+                "stderr_tail": (err or "")[-500:]}
+    elapsed_ms = (time.monotonic() - t_start) * 1000.0
+    parsed = None
+    for line in reversed((out or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            cand = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(cand, dict) and "ok" in cand:
+            parsed = cand
+            break
+    if parsed is None:
+        return {"capability_id": capability_id, "action": "error",
+                "status": "worker_crashed",
+                "error": ("worker exited without a result envelope "
+                          f"(exit={proc.returncode})"),
+                "elapsed_ms": elapsed_ms,
+                "stderr_tail": (err or "")[-500:],
+                "stdout_tail": (out or "")[-500:]}
+    if not parsed.get("ok"):
+        return {"capability_id": capability_id, "action": "error",
+                "status": "worker_error",
+                "error": str(parsed.get("error", "unknown"))[:500],
+                "elapsed_ms": elapsed_ms}
+    result = parsed.get("result") or {}
+    result["elapsed_ms"] = elapsed_ms
+    return result
+
+
+def _run_capability_in_process(engine, capability_id: str, reason: str,
+                               caller) -> Dict[str, Any]:
+    """Repair one capability in-process (no hard timeout possible in this
+    mode -- documented; the total bound between capabilities still holds)."""
+    t_start = time.monotonic()
+    try:
+        result = repair_quarantine(engine, capability_id,
+                                   caller=caller, reason=reason)
+    except Exception as e:
+        return {"capability_id": capability_id, "action": "error",
+                "status": "error",
+                "error": f"{type(e).__name__}: {e}"[:500],
+                "elapsed_ms": (time.monotonic() - t_start) * 1000.0}
+    result = dict(result)
+    result["elapsed_ms"] = (time.monotonic() - t_start) * 1000.0
+    return result
+
+
+def _classify_sweep_result(result: Dict[str, Any]) -> str:
+    status = str(result.get("status", ""))
+    action = str(result.get("action", ""))
+    if status == "timed_out":
+        return "timed_out"
+    if action == "restored":
+        return "restored"
+    if status == "reason_holds":
+        return "held"
+    if status == "indeterminate":
+        return "indeterminate"
+    if status == "not_quarantined":
+        return "no_op"
+    if status in ("refused", "restore_refused"):
+        return "refused"
+    if status == "skipped":
+        return "skipped"
+    return "errors"
+
+
+def run_quarantine_sweep(engine=None, db_path=None, *, caller=None,
+                         per_capability_timeout_s: float = 600.0,
+                         total_timeout_s: float = 3600.0,
+                         reason: str = "",
+                         worker_mode: str = "subprocess",
+                         audit: bool = True) -> Dict[str, Any]:
+    """Schedule-ready quarantine sweep: full diagnose->repair cycle, bounded
+    and audited, safe for unattended execution.
+
+    SCHEDULING INLET (nominated, not built):
+      Function: swarm_engine.synthesis.integrity.run_quarantine_sweep
+      Signature: (engine=None, db_path=None, *, caller=None,
+                  per_capability_timeout_s=600.0, total_timeout_s=3600.0,
+                  reason="", worker_mode="subprocess", audit=True) -> dict
+      Call site: the periodic-job facility owned by whoever owns run-control
+        / scheduling (Backend Runtime track; scheduler.py's owner).
+        scheduler.py is dispatch run-control with NO periodic-job facility
+        (verified 2026-09-27) -- building that facility is the scheduling
+        owner's work, not this mission's. Until it exists, an OS-level cron
+        entry invoking this function (db_path=..., reason="scheduled sweep")
+        is the honest interim. Do NOT edit scheduler.py from here.
+
+    Two deployment shapes (both honest; the DB's single-owner rule decides):
+      * worker_mode="subprocess" (default): the sweep runs as a dedicated
+        process that never boots a parent engine. It lists quarantine
+        targets through the capability store directly (a plain SQLite
+        read -- no boot audit, so merely listing targets cannot
+        derived-quarantine healthy capabilities as a side effect), then
+        repairs each capability in a FRESH CHILD PROCESS with a hard kill
+        timeout. One capability's hang/crash/exception cannot abort or
+        corrupt the sweep of the others, and the single-owner invariant
+        holds at every instant (each child is the only engine alive while
+        it runs; split-brain is impossible by construction). Passing a
+        live engine with this mode is refused (fail closed): the child
+        workers each boot their own engine and the DB's single-owner rule
+        forbids a second owner while the caller's engine is live. Either
+        pass db_path=... or use worker_mode='in_process'.
+      * worker_mode="in_process": for invocation inside the live service
+        process (the likely scheduling-inlet shape -- a periodic facility
+        calling run_quarantine_sweep(engine=live_engine,
+        worker_mode="in_process")). Per-capability failures are isolated by
+        try/except (a crash-class failure cannot be contained in-process --
+        that is what subprocess mode is for). The total bound is enforced
+        between capabilities. A hard per-capability kill is NOT possible
+        in-process (documented, not pretended): elapsed_ms is recorded per
+        row so bound overruns are observable telemetry.
+
+    Behavior (both modes):
+      * caller=None -> the engine itself (engine.oracle), the system acting
+        on its own behalf -- the same authorization M5's proof used. An
+        explicit caller (e.g. an HTTP operator's own credentials) is honored
+        when supplied (in_process mode).
+      * Each quarantined capability is repaired in a FRESH CHILD PROCESS
+        (subprocess mode) with a hard per-capability kill timeout, or
+        in-process with per-capability error isolation (in_process mode).
+      * Total bound: no new capability starts after total_timeout_s; the
+        in-flight capability is additionally capped by the remaining budget,
+        so observed wall time <= total_timeout_s (+epsilon). Unstarted
+        capabilities are recorded as "skipped", never silently dropped.
+      * Every action, no-op, error, timeout, and skip is written to the
+        sweep audit tables (retrievable via get_latest_sweep_report /
+        list_sweep_runs, which the capabilities-view path can read).
+      * A capability restored by verified re-admission fires
+        report_quarantine_repair_evidence -- the single call site that
+        records a closure CANDIDATE for M7's registry (M7 closes only
+        after verified utilization).
+    """
+    if worker_mode not in ("subprocess", "in_process"):
+        raise ValueError(f"worker_mode must be 'subprocess' or 'in_process',"
+                         f" got {worker_mode!r}")
+    if per_capability_timeout_s <= 0 or total_timeout_s <= 0:
+        raise ValueError("timeouts must be positive")
+    db_path = _resolve_sweep_db_path(engine, db_path)
+    if engine is None and worker_mode == "subprocess":
+        # No engine boot in the parent: the target list is a plain store
+        # read, and booting a full engine here would run the boot audit
+        # against a not-yet-registered vocabulary (the service registers
+        # its media family post-boot), derived-quarantining healthy
+        # capabilities as a side effect of merely LISTING targets
+        # (observed 2026-09-27: sweep 2 re-targeted sweep 1's restored
+        # capabilities). CapabilityStore claims no DB ownership, so the
+        # single-owner invariant is trivially preserved; each child
+        # worker boots (and closes) the only engine.
+        from swarm_engine.synthesis.capability_store import CapabilityStore
+        list_store = CapabilityStore(db_path)
+        owned_engine = False
+    elif engine is None:
+        from swarm_engine.core.engine import SwarmEngine
+        engine = SwarmEngine(db_path=db_path)
+        list_store = engine.capabilities
+        owned_engine = True
+    else:
+        list_store = engine.capabilities
+        owned_engine = False
+        if worker_mode == "subprocess":
+            raise ValueError(
+                "run_quarantine_sweep: worker_mode='subprocess' cannot run"
+                " against a caller-supplied live engine -- the child"
+                " workers each boot their own engine and the DB's"
+                " single-owner rule forbids a second owner while the"
+                " caller's engine is live. Either pass db_path=... (the"
+                " sweep then never boots a parent engine: it lists"
+                " targets via the capability store and spawns workers)"
+                " or use worker_mode='in_process'.")
+    if caller is None and engine is not None:
+        caller = engine.oracle  # the system itself, on a schedule
+    # NOTE: in subprocess mode without a caller-supplied engine the parent
+    # needs no caller at all: each child boots its own engine and repairs
+    # as that engine's oracle (the same authorization M5's proof used; no
+    # credential crosses the process boundary).
+
+    run_id = uuid.uuid4().hex
+    t0 = time.monotonic()
+    deadline = t0 + total_timeout_s
+    config = {"per_capability_timeout_s": per_capability_timeout_s,
+              "total_timeout_s": total_timeout_s,
+              "worker_mode": worker_mode,
+              "reason": reason,
+              "db_path": db_path}
+    audit_log = SweepAuditLog(db_path) if audit else None
+    if audit_log is not None:
+        audit_log.begin_run(run_id, config)
+
+    seen = set()
+    targets: List[str] = []
+    for rec in list_store.list(status="quarantined", limit=10000):
+        cid = rec.capability_id
+        if cid not in seen:
+            seen.add(cid)
+            targets.append(cid)
+
+    summary: Dict[str, int] = {"swept": 0, "restored": 0, "held": 0,
+                               "indeterminate": 0, "no_op": 0, "refused": 0,
+                               "errors": 0, "timed_out": 0, "skipped": 0}
+    rows: List[Dict[str, Any]] = []
+    for cid in targets:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            row = {"capability_id": cid, "verdict": "", "action": "none",
+                   "status": "skipped", "elapsed_ms": 0.0,
+                   "error": "total time bound exceeded before start"}
+            summary["skipped"] += 1
+            rows.append(row)
+            if audit_log is not None:
+                audit_log.record_action(run_id, cid, row)
+            continue
+        cap_timeout = min(per_capability_timeout_s, remaining)
+        if worker_mode == "subprocess":
+            result = _run_capability_subprocess(db_path, cid, reason,
+                                                cap_timeout)
+        else:
+            result = _run_capability_in_process(engine, cid, reason, caller)
+            bound_ms = per_capability_timeout_s * 1000.0
+            if float(result.get("elapsed_ms", 0.0) or 0.0) > bound_ms:
+                # No hard kill is possible in-process; record the overrun
+                # honestly instead of pretending the bound was enforced.
+                result["per_capability_bound_exceeded"] = True
+        bucket = _classify_sweep_result(result)
+        summary["swept"] += 1
+        summary[bucket] += 1
+        diag = result.get("diagnosis") or {}
+        row = {"capability_id": cid,
+               "verdict": str(diag.get("verdict", "")),
+               "action": str(result.get("action", "")),
+               "status": str(result.get("status", "")),
+               "elapsed_ms": float(result.get("elapsed_ms", 0.0) or 0.0),
+               "error": str(result.get("error", ""))[:500],
+               "detail": result}
+        rows.append(row)
+        if audit_log is not None:
+            audit_log.record_action(run_id, cid, row)
+            if bucket == "restored":
+                # THE M7 call site: verified quarantine-repair evidence.
+                # Per M7's binding rule a gap closes only after verified
+                # UTILIZATION -- this row is a closure CANDIDATE for the
+                # registry, not a closure claim. Single, obvious,
+                # documented in SweepAuditLog.report_repair_evidence.
+                audit_log.report_repair_evidence(
+                    run_id, cid,
+                    {"verdict": row["verdict"], "status": row["status"],
+                     "elapsed_ms": row["elapsed_ms"]})
+
+    report = {"run_id": run_id,
+              "started_at": time.time() - (time.monotonic() - t0),
+              "finished_at": time.time(),
+              "elapsed_s": time.monotonic() - t0,
+              "config": config,
+              "targets": targets,
+              "summary": summary,
+              "capabilities": rows}
+    if audit_log is not None:
+        audit_log.finish_run(run_id, summary)
+    if owned_engine and engine is not None:
+        # The sweep booted this engine itself (in_process, no caller
+        # engine): close it so a later sweep in this process does not hit
+        # the DB's single-owner rule against our leftover claim.
+        try:
+            engine.close()
+        except Exception:
+            pass
+    return report
+
+
+def report_quarantine_repair_evidence(run_id: str, capability_id: str,
+                                       detail: Optional[Dict[str, Any]] = None,
+                                       *, engine=None,
+                                       db_path: Optional[str] = None
+                                       ) -> Dict[str, Any]:
+    """Record verified quarantine-repair evidence (a closure CANDIDATE).
+
+    This is the single, clearly-marked call site Felix/M7 asked to keep
+    clean: when M7's unified gap registry API exists, the body switches to
+    the registry's evidence-ingest call; the call site in
+    run_quarantine_sweep does not move. Per M7's binding rule a gap closes
+    only after verified utilization -- repair evidence alone does not close
+    it. Today the function writes a persistent, audited evidence row (no
+    tamper-evidence is claimed; the row is plain SQLite audit evidence).
+    """
+    db_path = _resolve_sweep_db_path(engine, db_path)
+    return SweepAuditLog(db_path).report_repair_evidence(run_id,
+                                                         capability_id,
+                                                         detail)
+
+
+def get_latest_sweep_report(engine=None,
+                            db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Latest sweep run + per-capability actions, readable with only a
+    db_path (fresh process; no engine boot) -- this is what the
+    capabilities-view path reads. The http_adapter landing (Felix,
+    coordinated) adds this to GET /api/capabilities."""
+    db_path = _resolve_sweep_db_path(engine, db_path)
+    return SweepAuditLog(db_path).latest_report()
+
+
+def list_sweep_runs(engine=None, db_path: Optional[str] = None,
+                    limit: int = 20) -> List[Dict[str, Any]]:
+    """Sweep run history (summaries), newest first -- evidence retrieval."""
+    db_path = _resolve_sweep_db_path(engine, db_path)
+    return SweepAuditLog(db_path).list_runs(limit=limit)
 
 def seal_epistemic_chain(engine, report: Dict[str, Any]) -> Dict[str, Any]:
     """After ``run_competition`` admits a program, seal every artifact

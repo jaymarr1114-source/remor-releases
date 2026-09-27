@@ -212,11 +212,19 @@ check("technique provenance: supplier is A",
 
 # ---------------------------------------------------------------- step 9
 # INDEPENDENT REVIEW of the technique on a HELD-OUT defect (R1).
+# EXEC_POLICY justification (W4-R1): the technique under review is a
+# repair *procedure* -- it must execute generated candidate bytes to
+# judge them (its _satisfies uses empty-builtins exec, so candidates get
+# no capabilities). The grant is explicit, narrow (exec only, no I/O),
+# and recorded in the verdict's effect evidence. The judge still
+# independently re-verifies the returned repair via run_code (PURE).
+from swarm_engine.capability.effect_sandbox import EXEC_POLICY  # noqa: E402
 org.review.submit_for_review(wp_id)
 tverdict = org.review.review(
     wp_id, TechniqueSpec(),
     [technique_case(defects.R1_SRC, defects.R1_TEST,
-                    defects.R1_FUNC, "r1")])
+                    defects.R1_FUNC, "r1")],
+    effect_policy=EXEC_POLICY)
 check("technique verdict admitted", tverdict.admitted)
 
 # ---------------------------------------------------------------- step 10
@@ -230,7 +238,8 @@ gen_cases = [
     technique_case(defects.H1_SRC, defects.H1_TEST, defects.H1_FUNC, "h1"),
     technique_case(defects.H2_SRC, defects.H2_TEST, defects.H2_FUNC, "h2"),
 ]
-promoted, info = org.experience.promote(cand_id, gen_cases)
+promoted, info = org.experience.promote(cand_id, gen_cases,
+                                            effect_policy=EXEC_POLICY)
 check("T1 promoted to L2", promoted)
 exp1 = org.experience.get_experience(info)
 check("L2 problem_class", exp1.problem_class == "repair:binary-operator")

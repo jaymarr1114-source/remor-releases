@@ -388,6 +388,47 @@ class TestIntentHttp(_HttpBase):
         code, obj = self.req("GET", "/api/dispatches?limit=1")
         self.assertEqual(len(obj["dispatches"]), 1)
 
+    def test_empty_args_dict_engages_media_synthesis_over_http(self):
+        """Regression (v8 hardware defect): the GUI dispatch view always
+        sends "args": {}. An empty args dict must behave identically to
+        omitted args -- media arg synthesis engages -- never
+        bad_arguments. A non-empty partial arg set keeps the strict
+        contract (missing -> bad_arguments)."""
+        intent = self.services["intent"]
+        media_out = os.path.join(self.tmp, "media_out")
+
+        eng, _, dispatcher = intent._ensure()
+
+        def _wire():
+            from swarm_engine.media.wiring import (
+                admit_media_capabilities, MEDIA_PHRASINGS)
+            report = admit_media_capabilities(eng, media_out_dir=media_out)
+            dispatcher.media_out_dir = media_out
+            return report, MEDIA_PHRASINGS["image"][0]
+
+        report, text = intent._thread.run(_wire)
+        entry = report.get("image", {})
+        self.assertTrue(entry.get("admitted"), entry.get("reasons"))
+
+        code1, obj1 = self.req("POST", "/api/intent/dispatch",
+                               {"text": text, "producer": "gui:operator"})
+        code2, obj2 = self.req("POST", "/api/intent/dispatch",
+                               {"text": text, "args": {},
+                                "producer": "gui:operator"})
+        self.assertEqual(code1, 200, obj1)
+        self.assertEqual(code2, 200, obj2)
+        self.assertTrue(obj1["ok"], obj1)
+        self.assertTrue(obj2["ok"], obj2)
+        self.assertNotEqual(obj2.get("refusal"), "bad_arguments", obj2)
+
+        # strict contract preserved for non-empty partial args
+        code3, obj3 = self.req("POST", "/api/intent/dispatch",
+                               {"text": text, "args": {"prompt": "x"},
+                                "producer": "gui:operator"})
+        self.assertEqual(code3, 200, obj3)
+        self.assertFalse(obj3["ok"])
+        self.assertEqual(obj3["refusal"], "bad_arguments", obj3)
+
     def test_quarantined_capability_refused_over_http(self):
         """Dispatch ok -> real quarantine (drops the goal binding) ->
         re-bind the quarantined id -> the router's effective-status gate
@@ -508,6 +549,99 @@ class TestIntentMetering(_HttpBase):
         code, obj = intent.intent_dispatch({"text": "5 times 6"})
         self.assertEqual(code, 200, obj)
         self.assertEqual(obj["refusal"], "unknown_intent")
+
+
+class TestIntentComposition(_HttpBase):
+    """M4: cross-capability composition over the real HTTP path.
+
+    One NL request decomposes into multiple capability legs; each leg
+    runs the governed single-dispatch core (existence, plan
+    fingerprint, effective_status, arg validation, real Composer
+    execution, persisted record). A failed leg fails honestly, naming
+    the leg -- never a partial-fake result.
+    """
+
+    def _admit_media(self):
+        intent = self.services["intent"]
+        media_out = os.path.join(self.tmp, "media_out")
+        eng, _, dispatcher = intent._ensure()
+
+        def _wire():
+            from swarm_engine.media.wiring import admit_media_capabilities
+            report = admit_media_capabilities(eng, media_out_dir=media_out)
+            dispatcher.media_out_dir = media_out
+            return report
+
+        report = intent._thread.run(_wire)
+        return intent, dispatcher, report
+
+    def test_two_leg_composition_over_http(self):
+        intent, dispatcher, report = self._admit_media()
+        self.assertTrue(report.get("image", {}).get("admitted"), report)
+        self.assertTrue(report.get("video", {}).get("admitted"), report)
+        code, obj = self.req(
+            "POST", "/api/intent/dispatch",
+            {"text": "generate an image of a sunset and "
+                     "create a short video of ocean waves",
+             "args": {}, "producer": "gui:operator"})
+        self.assertEqual(code, 200, obj)
+        self.assertTrue(obj["ok"], obj)
+        self.assertEqual(obj.get("route_via"), "composition", obj)
+        res = obj["result"]
+        self.assertTrue(res.get("composition"), res)
+        self.assertEqual(len(res.get("legs", [])), 2, res)
+        arts = res.get("artifacts", [])
+        self.assertEqual(len(arts), 2, res)
+        for a in arts:
+            self.assertTrue(os.path.exists(a["path"]), a)
+            self.assertGreater(os.path.getsize(a["path"]), 0, a)
+        # both legs persisted audit rows through the governed path
+        rows = dispatcher.history(limit=10)
+        leg_rows = [r for r in rows
+                    if (r.get("route_via") or "").startswith(
+                        "composition:leg")]
+        self.assertEqual(len(leg_rows), 2, rows)
+        self.assertTrue(all(r["ok"] == 1 for r in leg_rows), rows)
+
+    def test_quarantined_leg_refuses_honestly_over_http(self):
+        """One leg quarantined -> the composition refuses, naming the
+        leg and the quarantined capability; the healthy leg never
+        executes (no partial-fake result)."""
+        intent, dispatcher, report = self._admit_media()
+        image_id = report.get("image", {}).get("capability_id")
+        self.assertTrue(image_id, report)
+        _quarantine_authorized(intent, image_id, reason="m4 probe")
+        code, obj = self.req(
+            "POST", "/api/intent/dispatch",
+            {"text": "generate an image of a sunset and "
+                     "create a short video of ocean waves",
+             "args": {}, "producer": "gui:operator"})
+        self.assertEqual(code, 200, obj)
+        self.assertFalse(obj["ok"], obj)
+        self.assertEqual(obj.get("refusal"), "composition_leg_unroutable",
+                         obj)
+        reasons = " ".join(obj.get("reasons", []))
+        self.assertIn("generate an image of a sunset", reasons, obj)
+        self.assertIn("quarantined", reasons, obj)
+        self.assertIn(image_id[:12], reasons, obj)
+
+    def test_adjective_join_stays_single_dispatch(self):
+        """'a dog with brown fur and white spots' is ONE request, not a
+        composition: the non-imperative fragment keeps the whole text
+        on the single-dispatch path."""
+        self._admit_media()
+        code, obj = self.req(
+            "POST", "/api/intent/dispatch",
+            {"text": "make a picture of a dog with brown fur "
+                     "and white spots",
+             "args": {}, "producer": "gui:operator"})
+        self.assertEqual(code, 200, obj)
+        self.assertNotEqual(obj.get("route_via"), "composition", obj)
+        # single dispatch proceeds normally (here: effect_fallback to
+        # the admitted image capability); the point is only that the
+        # adjective-join never becomes a composition.
+        self.assertIn(obj.get("route_via"),
+                      ("effect_fallback", "exact_goal", "structural"), obj)
 
 
 if __name__ == "__main__":

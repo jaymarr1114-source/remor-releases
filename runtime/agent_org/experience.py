@@ -194,10 +194,16 @@ class ExperienceStore:
     # -- L1 -> L2 gate --------------------------------------------------
     def promote(self, candidate_id: str,
                 generality_cases: List[Any],
-                derived_from: Optional[List[str]] = None
+                derived_from: Optional[List[str]] = None,
+                effect_policy: Any = None,
                 ) -> Tuple[bool, Any]:
         """Promote a candidate to L2 organizational experience.
 
+        effect_policy selects the sandbox profile for the generality
+        gauntlet (default PURE); pass EXEC_POLICY explicitly when promoting
+        a tester/repair procedure with a legitimate need for dynamic code
+        execution. The grant is recorded in the generality verdict's effect
+        evidence.
         The generality gauntlet is executed by the ENGINE's ReviewBoard
         (verify_generality): the verdict is persisted as an authoritative
         ao_review_verdicts row (artifact_kind="generality") bound to the
@@ -229,7 +235,8 @@ class ExperienceStore:
             [(dict(c.args), None) for c in generality_cases[:2]])
         verdict = board.verify_generality(
             cand.code, cand.entrypoint or "selftest", spec,
-            list(generality_cases), candidate_id)
+            list(generality_cases), candidate_id,
+            effect_policy=effect_policy)
         if not verdict.admitted:
             return False, list(verdict.reasons)
         row = board.require_admitted_verdict(digest(cand.code), "generality")

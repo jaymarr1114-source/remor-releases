@@ -88,6 +88,13 @@ class Evidence:
     generalises: Optional[bool] = None
     # Aggregate of every oracle binding across findings (reporting).
     oracle_bindings: List[Dict[str, Any]] = field(default_factory=list)
+    # W4-R1: the execution evidence under which the candidate ran -- the
+    # sandbox effect policy in force ({"profile", "grants"} or None when
+    # the runner did not report one) and the list of observed effect
+    # events ({"event", "args"} entries). The Arbiter's admission decision
+    # is gated on this record for PURE claims, never on declarations.
+    effect_policy: Optional[Dict] = None
+    observed_effects: List[Dict] = field(default_factory=list)
 
     def add(self, level: Level, passed: bool, detail: str, role: str,
             bindings: Optional[List[Dict[str, Any]]] = None) -> None:
@@ -112,6 +119,8 @@ class Evidence:
             "deterministic": self.deterministic, "generalises": self.generalises,
             "levels": self.levels_passed(), "failed_levels": self.failed_levels(),
             "findings": [f.as_dict() for f in self.findings[:20]],
+            "effect_policy": self.effect_policy,
+            "observed_effects": list(self.observed_effects),
         }
 
 
@@ -281,12 +290,25 @@ class Tester:
 
     def __init__(self, runner: Callable[[str, str, List[Dict[str, Any]]], Any]):
         self.runner = runner
+        # W4-R1: the auditable observed-effects record for the latest run.
+        # Populated from the RunReport by run(); the Verifier copies these
+        # onto its Evidence so admission can be gated on execution evidence.
+        self.last_observed_effects: List[Dict] = []
+        self.last_effect_policy: Dict = {}
 
     def run(self, code: str, entrypoint: str,
             cases: Sequence[Case]) -> Tuple[bool, List[Dict[str, Any]], str]:
         if not cases:
             return True, [], ""
         report = self.runner(code, entrypoint, [dict(c.args) for c in cases])
+        # W4-R1: record what the execution environment observed, on success
+        # AND on failure (a failed run may still have produced effects).
+        # Field names are locked with the subprocess-runner contract:
+        # RunReport.observed_effects / RunReport.effect_policy.
+        self.last_observed_effects = list(
+            getattr(report, "observed_effects", None) or [])
+        self.last_effect_policy = dict(
+            getattr(report, "effect_policy", None) or {})
         if not getattr(report, "ok", False):
             return False, [], getattr(report, "error", "execution failed")
         return True, list(report.value or []), ""
@@ -378,6 +400,16 @@ class Verifier:
         return [{"oracle_id": oracle_id, "version": version,
                  "eval_id": eval_id}]
 
+    def _absorb_effect_evidence(self, evidence: Evidence) -> None:
+        """Copy the tester's latest observed-effects record onto the
+        evidence (W4-R1). Called after every tester run -- success or
+        failure -- so the evidence always carries the auditable record of
+        what the execution environment observed under which policy."""
+        if self.tester.last_effect_policy:
+            evidence.effect_policy = dict(self.tester.last_effect_policy)
+        evidence.observed_effects.extend(
+            dict(e) for e in (self.tester.last_observed_effects or []))
+
     def verify(self, code: str, entrypoint: str, spec,
                cases: Sequence[Case]) -> Evidence:
         evidence = Evidence()
@@ -398,6 +430,7 @@ class Verifier:
 
         # -- behavioural ----------------------------------------------------
         ok, results, error = self.tester.run(code, entrypoint, cases)
+        self._absorb_effect_evidence(evidence)
         if not ok:
             evidence.add(
                 Level.SYNTACTIC, False, f"could not execute: {error}",
@@ -438,6 +471,7 @@ class Verifier:
         hostile = self.adversary.generate(spec)
         if hostile:
             ok, results, error = self.tester.run(code, entrypoint, hostile)
+            self._absorb_effect_evidence(evidence)
             if not ok:
                 evidence.add(
                     Level.ADVERSARIAL, False,
@@ -474,6 +508,7 @@ class Verifier:
         held_out = self.adversary.generalisation_cases(spec)
         if held_out:
             ok, results, error = self.tester.run(code, entrypoint, held_out)
+            self._absorb_effect_evidence(evidence)
             if ok:
                 held_bindings: List[Dict[str, Any]] = []
                 passed = 0
@@ -502,6 +537,7 @@ class Verifier:
         probes = self.adversary.novelty_probes(spec)
         if probes:
             ok, results, error = self.tester.run(code, entrypoint, probes)
+            self._absorb_effect_evidence(evidence)
             if ok and results:
                 answered = sum(1 for r in results if r.get("ok"))
                 novelty_bindings: List[Dict[str, Any]] = []
@@ -524,6 +560,7 @@ class Verifier:
         if cases:
             first = [cases[0], cases[0]]
             ok, results, _ = self.tester.run(code, entrypoint, first)
+            self._absorb_effect_evidence(evidence)
             if ok and len(results) == 2:
                 evidence.deterministic = (results[0] == results[1])
                 det_bindings: List[Dict[str, Any]] = []

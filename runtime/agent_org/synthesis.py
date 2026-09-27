@@ -28,6 +28,7 @@ OrgSynthesizer.synthesize(relationship, engine):
 """
 from __future__ import annotations
 
+import ast
 import difflib
 import re
 from dataclasses import dataclass, field
@@ -103,24 +104,92 @@ def _measure(code: str, entrypoint: str, runner: Any,
     return True, (total_out / max(1, total_in)), ratios
 
 
+def _namespace_component(code: str, prefix: str) -> Optional[str]:
+    """Parse one codec component and rename its codec entry points.
+
+    ``encode`` -> ``<prefix>_encode``, ``decode`` -> ``<prefix>_decode`` --
+    both the ``FunctionDef`` names AND every ``Name`` reference (so
+    recursive/self references keep working). Attribute accesses
+    (``obj.encode``) are deliberately NOT renamed: they are ``Attribute``
+    nodes, not ``Name`` nodes.
+
+    Runs in the DRIVER (trusted parent process): ``ast`` parsing never
+    executes the component. Returns the renamed source, or None when the
+    component does not define both names (invalid composition).
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    defined = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if "encode" not in defined or "decode" not in defined:
+        return None
+
+    class _Renamer(ast.NodeTransformer):
+        def visit_FunctionDef(self, node):
+            if node.name == "encode":
+                node.name = prefix + "_encode"
+            elif node.name == "decode":
+                node.name = prefix + "_decode"
+            return self.generic_visit(node)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Name(self, node):
+            if node.id == "encode":
+                node.id = prefix + "_encode"
+            elif node.id == "decode":
+                node.id = prefix + "_decode"
+            return node
+
+    new_tree = _Renamer().visit(tree)
+    ast.fix_missing_locations(new_tree)
+    return ast.unparse(new_tree)
+
+
 def _compose_code(x_code: str, y_code: str) -> str:
-    """Build the X-then-Y sequential composition as fresh wrapper code.
+    """Build the X-then-Y sequential composition as a single PURE source.
 
     encode = Y.encode(X.encode(data)); decode = X.decode(Y.decode(blob)).
-    The wrapper is generated; both components are executed, not assumed.
+
+    W4-R1 (2026-09-27): the old wrapper embedded the untrusted component
+    sources via ``exec`` + ``types.ModuleType`` -- unsound, because a
+    TRUSTED profile would have handed the embedded code full builtins, and
+    under PURE the wrapper itself needed the denied ``exec``/``types``.
+    The rework namespaces the components with ``ast`` in the DRIVER
+    (trusted parent process; parsing never executes): ``encode``/``decode``
+    become ``x_encode``/``x_decode`` and ``y_encode``/``y_decode``, and the
+    single composed source defines all four plus ``selftest``. The composed
+    source contains no ``exec``, no ``types``, and no imports beyond what
+    the (already PURE-measured) components import -- it runs clean under
+    the PURE default.
+
+    If either component does not define both names, the composition is
+    invalid: a wrapper is returned whose ``selftest`` reports a failed
+    measurement -- the same observable outcome as the old path, where the
+    missing attribute raised at runtime inside the selftest's try.
     """
+    x_src = _namespace_component(x_code, "x")
+    y_src = _namespace_component(y_code, "y")
+    if x_src is None or y_src is None:
+        return (
+            "def selftest(data_hex: str) -> dict:\n"
+            "    return {\"roundtrip_ok\": False, \"ratio\": -1.0,\n"
+            "            \"error\": \"invalid composition: component "
+            "missing encode/decode\"}\n"
+        )
     return (
-        "import types as _ao_types\n"
-        f"_ao_modx = _ao_types.ModuleType('ao_modx')\n"
-        f"exec({x_code!r}, _ao_modx.__dict__)\n"
-        f"_ao_mody = _ao_types.ModuleType('ao_mody')\n"
-        f"exec({y_code!r}, _ao_mody.__dict__)\n"
+        x_src + "\n\n" + y_src + "\n"
         "\n"
         "def encode(data: bytes) -> bytes:\n"
-        "    return _ao_mody.encode(_ao_modx.encode(bytes(data)))\n"
+        "    return y_encode(x_encode(bytes(data)))\n"
         "\n"
         "def decode(blob: bytes) -> bytes:\n"
-        "    return _ao_modx.decode(_ao_mody.decode(bytes(blob)))\n"
+        "    return x_decode(y_decode(bytes(blob)))\n"
         "\n"
         "def selftest(data_hex: str) -> dict:\n"
         "    try:\n"

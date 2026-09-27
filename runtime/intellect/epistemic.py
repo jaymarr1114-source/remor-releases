@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 
 class HypothesisState(Enum):
@@ -148,6 +149,18 @@ class EpistemicStore:
                 (obs.observation_id, json.dumps(obs.as_dict()), obs.at))
         return obs
 
+    def record_observation(self, content: str, source: str,
+                           raw: Optional[Dict[str, Any]] = None) -> Observation:
+        """Record an observation in one call: builds an Observation with a
+        unique id, persists it via save_observation, and returns it."""
+        obs = Observation(
+            observation_id=f"obs_{uuid4().hex[:12]}",
+            content=content,
+            source=source,
+            raw=raw if raw is not None else {},
+        )
+        return self.save_observation(obs)
+
     def all_observations(self) -> List[Observation]:
         with self._conn() as conn:
             rows = conn.execute("SELECT data FROM observations ORDER BY at").fetchall()
@@ -174,6 +187,21 @@ class EpistemicStore:
                 (hyp.hypothesis_id, hyp.question_id, json.dumps(hyp.as_dict()),
                  time.time()))
         return hyp
+
+    def record_hypothesis(self, question_id: str, statement: str,
+                          specification: Optional[Dict[str, Any]] = None,
+                          provenance: Optional[Dict[str, Any]] = None) -> Hypothesis:
+        """Record a hypothesis in one call: builds a Hypothesis (state PROPOSED)
+        with a unique id, persists it via save_hypothesis, and returns it."""
+        hyp = Hypothesis(
+            hypothesis_id=f"hyp_{uuid4().hex[:12]}",
+            question_id=question_id,
+            statement=statement,
+            specification=specification if specification is not None else {},
+            provenance=provenance if provenance is not None else {},
+            state=HypothesisState.PROPOSED,
+        )
+        return self.save_hypothesis(hyp)
 
     def all_hypotheses(self) -> List[Hypothesis]:
         with self._conn() as conn:

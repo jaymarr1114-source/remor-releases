@@ -19,6 +19,13 @@ module only ever sees chat-mode text or an ambiguity flag):
       capabilities  -> CapabilityAPI.list_capabilities("all")  [real store]
       runs          -> scheduler.list_runs()                    [real runs]
       run_status    -> scheduler.get_run(run_id)                [real record]
+                        + acceptance overlay state when present
+      accept_run    -> acceptance.record_verdict(satisfied=True)
+                        [STATE-CHANGING: the only write kinds in this
+                        handler; writes go ONLY to the acceptance overlay,
+                        never to the capability/evidence/scheduler DBs]
+      reject_run    -> acceptance.record_verdict(satisfied=False, feedback)
+                        [STATE-CHANGING: same overlay-only rule]
       identity      -> EvidenceStore.get_document("soul.md")     [hosted doc]
       document      -> EvidenceStore.get_document(name)          [hosted doc]
       status        -> metering.tier() + metering.tasks_today()  [real caps]
@@ -62,6 +69,19 @@ _PATTERNS: List[Tuple[str, List[str]]] = [
         r"succeed(?:ed)?|fail(?:ed)?)\b",
         r"\bdid (?:the )?run\s+" + _RUN_ID + r"\b",
         r"\bwhat happened (?:to|with) (?:the )?run\s+" + _RUN_ID + r"\b",
+    ]),
+    ("accept_run", [
+        r"\baccept (?:the )?run\s+" + _RUN_ID + r"\b",
+        r"\b(?:i'm|i am) (?:happy|satisfied) with (?:the )?run\s+"
+        + _RUN_ID + r"\b",
+        r"\brun\s+" + _RUN_ID + r"\s+(?:looks good|is good|is fine)\b",
+    ]),
+    ("reject_run", [
+        r"\breject (?:the )?run\s+" + _RUN_ID + r"\b",
+        r"\b(?:i'm|i am) not (?:happy|satisfied) with (?:the )?run\s+"
+        + _RUN_ID + r"\b",
+        r"\brun\s+" + _RUN_ID + r"\s+(?:is wrong|is not (?:right|good enough)|"
+        r"failed me|missed)\b",
     ]),
     ("capabilities", [
         r"\bwhat can you do\b",
@@ -171,6 +191,10 @@ def answer(text: Any, services: Optional[Dict[str, Any]],
 
     if kind == "run_status":
         return _answer_run_status(match, services)
+    if kind == "accept_run":
+        return _answer_accept_run(match, services)
+    if kind == "reject_run":
+        return _answer_reject_run(match, text, services)
     if kind == "capabilities":
         return _answer_capabilities(services)
     if kind == "runs":
@@ -302,17 +326,121 @@ def _answer_run_status(match: Optional[re.Match],
         return _unreadable("run_status", "scheduler", rec)
     grounded = {"kind": "run_status", "store": "scheduler.get_run(run_id)",
                 "run_id": run_id, "found": rec is not None}
+    # Acceptance overlay (M6): consulted for acceptance state, and as a
+    # fallback record when the scheduler never saw the run (a presented
+    # attempt is a real record even without a scheduler row). The scheduler
+    # is never edited here.
+    acc = services.get("acceptance")
+    arec = None
+    if acc is not None:
+        ok_a, got = _safe(lambda: acc.store.get(run_id))
+        if ok_a:
+            arec = got
     if rec is None:
-        return {"mode": "answer", "kind": "run_status", "grounded": grounded,
-                "text": f"I have no record of run '{run_id}' -- I can't "
-                        "report on a run that never existed, and I won't "
-                        "claim it completed or did anything."}
+        if arec is None:
+            return {"mode": "answer", "kind": "run_status",
+                    "grounded": grounded,
+                    "text": f"I have no record of run '{run_id}' -- I can't "
+                            "report on a run that never existed, and I won't "
+                            "claim it completed or did anything."}
+        return {"mode": "answer", "kind": "run_status",
+                "grounded": {**grounded, "acceptance_overlay": True,
+                             "acceptance_state": arec.state.value},
+                "text": f"Run '{run_id}' (goal '{arec.goal}'): the scheduler "
+                        f"holds no system record, but the acceptance loop "
+                        f"does -- acceptance state '{arec.state.value}' "
+                        f"(rounds: {arec.rounds}, near-misses: "
+                        f"{len(arec.near_miss_ids)}). System 'completed' is "
+                        "a candidate state -- only your satisfaction (or a "
+                        "terminal condition) closes the loop."}
     bits = [f"Run '{rec.get('id')}': goal '{rec.get('goal')}'; "
             f"status '{rec.get('status')}'."]
     if rec.get("error"):
         bits.append(f"Error: {rec['error']}.")
+    # Acceptance overlay (M6): completed vs accepted are distinct statuses.
+    # The scheduler record is never edited here; the overlay is read only.
+    if arec is not None:
+        bits.append(
+            f"Acceptance: '{arec.state.value}' "
+            f"(rounds: {arec.rounds}, near-misses: "
+            f"{len(arec.near_miss_ids)}"
+            + (f", closed: {arec.close_reason}"
+               if arec.close_reason else "") + "). "
+            "System 'completed' is a candidate state -- only your "
+            "satisfaction (or a terminal condition) closes the loop.")
     return {"mode": "answer", "kind": "run_status", "grounded": grounded,
             "text": " ".join(bits)}
+
+
+def _acceptance_loop(services: Dict[str, Any]):
+    acc = services.get("acceptance")
+    if acc is None:
+        return None, ("the acceptance loop is not available in this "
+                      "service graph")
+    return acc, None
+
+
+def _answer_accept_run(match: Optional[re.Match],
+                       services: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = match.group(1) if match else ""
+    acc, why = _acceptance_loop(services)
+    if acc is None:
+        return _unreadable("accept_run", "acceptance loop", why)
+    try:
+        rec = acc.record_verdict(run_id, satisfied=True)
+    except (KeyError, ValueError) as exc:
+        return {"mode": "answer", "kind": "accept_run",
+                "grounded": {"kind": "accept_run", "run_id": run_id,
+                             "error": str(exc)},
+                "text": f"I can't accept run '{run_id}': {exc}. I won't "
+                        "invent a verdict for a run I have no record of."}
+    return {"mode": "answer", "kind": "accept_run",
+            "grounded": {"kind": "accept_run", "run_id": run_id,
+                         "state": rec.state.value,
+                         "close_reason": rec.close_reason},
+            "text": f"Run '{run_id}' accepted -- the loop is closed by your "
+                    "satisfaction."}
+
+
+def _answer_reject_run(match: Optional[re.Match], text: str,
+                       services: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = match.group(1) if match else ""
+    acc, why = _acceptance_loop(services)
+    if acc is None:
+        return _unreadable("reject_run", "acceptance loop", why)
+    feedback = _extract_feedback(text, run_id)
+    try:
+        rec = acc.record_verdict(run_id, satisfied=False,
+                                 feedback=feedback)
+    except (KeyError, ValueError) as exc:
+        return {"mode": "answer", "kind": "reject_run",
+                "grounded": {"kind": "reject_run", "run_id": run_id,
+                             "error": str(exc)},
+                "text": f"I can't record rejection for run '{run_id}': "
+                        f"{exc}."}
+    nm_id = rec.near_miss_ids[-1] if rec.near_miss_ids else None
+    return {"mode": "answer", "kind": "reject_run",
+            "grounded": {"kind": "reject_run", "run_id": run_id,
+                         "state": rec.state.value,
+                         "near_miss_id": nm_id, "feedback": feedback},
+            "text": f"Recorded: run '{run_id}' did not satisfy you. The "
+                    f"attempt plus your feedback is kept as a near-miss "
+                    f"record ({nm_id}); the loop reopens at pool expansion, "
+                    "steered away from what failed."}
+
+
+def _extract_feedback(text: str, run_id: str) -> str:
+    """Pull the user's free-text feedback after the run id. The loop never
+    invents unmet criteria from prose — feedback is stored verbatim."""
+    low = text.lower()
+    idx = low.find(run_id.lower())
+    tail = text[idx + len(run_id):] if idx >= 0 else text
+    tail = tail.lstrip(" :,-")
+    for marker in ("because", "since", "as"):
+        m = re.search(r"\b" + marker + r"\b", tail, re.IGNORECASE)
+        if m:
+            return tail[m.end():].strip(" :,-")
+    return tail.strip()
 
 
 def _answer_identity(services: Dict[str, Any]) -> Dict[str, Any]:
