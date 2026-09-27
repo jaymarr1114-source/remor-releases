@@ -196,7 +196,7 @@ import threading
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from swarm_engine.core.engine import SwarmEngine
 from swarm_engine.governance.caller_authorization import (
@@ -892,7 +892,8 @@ class _Service:
     mutating-route gate in _Handler.
     """
 
-    def __init__(self, db_path: str, base_dir: Optional[str] = None):
+    def __init__(self, db_path: str, base_dir: Optional[str] = None,
+                 enable_dispatch_learning: bool = True):
         db_path = os.path.abspath(db_path)
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.engine = SwarmEngine(db_path=db_path)
@@ -912,6 +913,24 @@ class _Service:
                 "http_adapter: engine has no oracle registry -- caller "
                 "authorization cannot be verified; refusing boot")
         self.agents = AgentDirectory(oreg)
+        # [Worker 1 / LIVE DISPATCH FLOW] Dispatch-learning wiring: boot (or
+        # re-attach) the real organizational store at the deployment-convention
+        # path (<engine-db-dir>/agent_org.db, where the read-only
+        # dispatch_evidence endpoint below locates it) and bind it as the
+        # dispatcher's native learning hook. Attribute is always set: None
+        # when the kill switch is off or boot failed, in which case the
+        # dispatcher keeps its learning=None behavior exactly as before.
+        self.dispatch_learning = None
+        if enable_dispatch_learning:
+            try:
+                self.dispatch_learning = self._boot_dispatch_learning()
+            except Exception as exc:  # fail closed: dispatch still works,
+                # just without the learning side effect; the failure is
+                # logged, never swallowed invisibly.
+                print(f"http_adapter: dispatch learning unavailable "
+                      f"({type(exc).__name__}: {exc}); continuing without "
+                      f"it", flush=True)
+        self.dispatcher.learning = self.dispatch_learning
         # The operator token file is written under base_dir at first boot;
         # the directory must exist before _provision_operator runs.
         os.makedirs(self.base_dir, exist_ok=True)
@@ -925,6 +944,101 @@ class _Service:
         # governed HTTP media fronts (auth + scoped WRITE_FS grant +
         # governed dispatch with persisted records). Fail-closed at boot.
         self._wire_media()
+
+    # -- dispatch learning (Worker 1 / LIVE DISPATCH FLOW) ----------------------------
+    def _boot_dispatch_learning(self):
+        """Boot (or re-attach) the real org backing the learning service.
+
+        Org store lives at the deployment-convention path
+        <engine-db-dir>/agent_org.db -- the same file the read-only
+        ``dispatch_evidence`` endpoint reads. Mirrors the ensure_review_board
+        / deploy_org precedents: explicit anchor genesis on first boot,
+        re-attach (journal-verified) on later boots, and an auto-anchor
+        wrapper so every legitimate store write re-anchors the journal tip
+        (without it a later re-attach would fail AnchorMismatch on the
+        evidence rows written since the last anchor).
+
+        HONEST BOUNDARY (documented at the seam): completion is NEVER
+        auto-invoked from the dispatcher. A live dispatch carries no
+        technique metadata (technique_name / code / entrypoint /
+        generality_cases), and fabricating it would be simulation. Only the
+        native evidence capture runs automatically; ``complete_dispatch_knowledge``
+        is invoked explicitly by an authorized caller (the engine as root
+        authority, or the attributed agent) who can supply the real
+        technique metadata.
+        """
+        from swarm_engine.agent_org.org import RemorOrganization
+        from swarm_engine.governance.anchor import collect_anchor_heads
+        from swarm_engine.governance.caller_authorization import (
+            AgentDirectory as _AgentDirectory)
+        from swarm_engine.governance.oracle_binding import ENGINE_PRODUCER_ID
+        from swarm_engine.services.dispatch_learning import (
+            DispatchLearningService)
+        org_dir = os.path.dirname(self.engine.db_path) or "."
+        org = RemorOrganization.boot(org_dir)
+        eng_caller = org.oregistry.engine_handle()
+        # Explicit anchor genesis on first boot (no lazy/implicit genesis).
+        if not org.anchor.journal_exists():
+            org.anchor.initialize(
+                collect_anchor_heads(org.store, org.oregistry),
+                ENGINE_PRODUCER_ID, caller=eng_caller)
+        # Auto-anchor every legitimate store write, exactly the
+        # deploy_org/ensure_review_board pattern.
+        store, oreg, anchor = org.store, org.oregistry, org.anchor
+
+        def _anchor_now():
+            anchor.anchor(collect_anchor_heads(store, oreg), reason="verdict",
+                          authority=ENGINE_PRODUCER_ID, caller=eng_caller)
+
+        orig_insert = store.insert
+
+        def insert_and_anchor(table, fields):
+            seq = orig_insert(table, fields)
+            _anchor_now()
+            return seq
+
+        store.insert = insert_and_anchor
+        orig_chained = oreg._insert_chained
+
+        def chained_and_anchor(table, fields):
+            res = orig_chained(table, fields)
+            _anchor_now()
+            return res
+
+        oreg._insert_chained = chained_and_anchor
+        return DispatchLearningService(
+            org, _AgentDirectory(org.oregistry), self.engine)
+
+    def complete_dispatch_knowledge(
+            self, *, dispatch_id: str, agent_id: str, assignment_id: str,
+            args: Dict[str, Any], result_value: Any, technique_name: str,
+            code: str, entrypoint: str, problem_class: str,
+            tags: List[str], io_contract: Dict[str, Any],
+            params: Dict[str, Any], generality_cases: List[Any],
+            caller: Any):
+        """Governed production entry for dispatch -> knowledge admission.
+
+        Delegates to DispatchLearningService.complete_dispatch_knowledge:
+        idempotent evidence capture -> independent review (subprocess
+        re-execution) -> L2 admission with held-out generality cases.
+        All trust gates (caller auth, review, admission) live in the
+        service and are unchanged. Raises RuntimeError when the learning
+        service is unavailable (kill switch off or boot failure) -- fail
+        closed, never a silent no-op.
+        """
+        if self.dispatch_learning is None:
+            raise RuntimeError(
+                "dispatch learning is disabled on this service "
+                "(enable_dispatch_learning=False or the learning service "
+                "failed to boot); complete_dispatch_knowledge refused -- "
+                "no silent no-op")
+        return self.dispatch_learning.complete_dispatch_knowledge(
+            dispatch_id=dispatch_id, agent_id=agent_id,
+            assignment_id=assignment_id, args=args,
+            result_value=result_value, technique_name=technique_name,
+            code=code, entrypoint=entrypoint, problem_class=problem_class,
+            tags=tags, io_contract=io_contract, params=params,
+            generality_cases=generality_cases, caller=caller)
 
     # -- operator provisioning (C, Phase 3 operator auth) -------------------------------------------
     def _provision_operator(self):
