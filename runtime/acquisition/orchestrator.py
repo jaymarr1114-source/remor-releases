@@ -664,7 +664,9 @@ class AcquisitionOrchestrator:
 
 
     def _heldout_admission_gate(self, spec: CapabilitySpec, capability_id: str,
-                                min_heldout: int = 1) -> Tuple[bool, str]:
+                                min_heldout: int = 1,
+                                registered_name: Optional[str] = None
+                                ) -> Tuple[bool, str]:
         """Post-hoc admission consistency check plus synthetic novelty probe.
 
         Re-verifies the admitted capability on the last-third example split
@@ -675,6 +677,23 @@ class AcquisitionOrchestrator:
         and is rejected as non-generalizing. True held-out proof (inputs
         never shown to synthesis) is the caller's responsibility.
         When fewer than 2 examples exist, gate is skipped (insufficient split).
+
+        registered_name: the exact primitive name the executable was
+        registered under (e.g. acquire_capability's outcome["promoted_name"]).
+        It is exact-resolved FIRST, before any alias list, because the gate
+        must test the admitted bytes -- never a name-similar stranger.
+
+        2026-09-27 (M8-R1): the old bare-substring fallback scan over all
+        primitive names (``if capability_id in n or n in capability_id``)
+        is DELIBERATELY GONE. It matched the unrelated ``"get"`` primitive
+        (``"get"`` is a substring of ``"acq_fullooptarget_..."``), so the gate
+        tested ``get_path`` instead of the real fn and spuriously rejected a
+        correct, generalizing capability (M8 obstruction 1). Resolution is now
+        exact-only: direct id, caller-supplied registered name, the
+        ``acquired.<id>`` convention, the registry's own
+        ``_acquired_capability_ids`` capability->primitive index, and
+        acquired_code row names. Anything unresolvable fails closed with
+        ``heldout_no_primitive`` -- never a fuzzy guess.
         """
         examples = list(spec.examples or [])
         if len(examples) < 2:
@@ -685,25 +704,45 @@ class AcquisitionOrchestrator:
         prim = self.engine.primitives.get(capability_id)
         rec = self.engine.capabilities.get(capability_id)
         if prim is None:
-            aliases = [capability_id, f"acquired.{capability_id}"]
+            # Exact-only alias resolution (M8-R1). Every candidate name is
+            # resolved with primitives.get(name) -- a recorded, exact
+            # registration -- never a substring guess.
+            aliases = []
+            # 1. Caller-supplied registration name (e.g. the verdict-promotion
+            #    promoted_name): the name the executable was actually
+            #    registered under. Exact-resolved first.
+            if registered_name:
+                aliases.append(registered_name)
+            # 2. Admission's documented primitive-naming convention.
+            aliases.append(f"acquired.{capability_id}")
             if rec is not None:
                 aliases.extend([
                     getattr(rec, "name", "") or "",
                     f"acquired.{getattr(rec, 'capability_id', '')}",
                 ])
-            # acquire_capability often registers under the node/spec name
-            # while held-out is keyed by capability_id — scan acquired_code
+            # 3. The registry's own capability->primitive index (maintained
+            #    by admission._register_capability_as_primitive and the
+            #    node-name alias mechanism): any name recorded against this
+            #    capability id is a legitimate exact alias.
+            try:
+                _index = getattr(self.engine.primitives,
+                                 "_acquired_capability_ids", None) or {}
+                for _reg_name, _cid in _index.items():
+                    if _cid == capability_id and _reg_name not in aliases:
+                        aliases.append(_reg_name)
+            except Exception:
+                pass
+            # 4. acquired_code rows keyed by this capability id: the row's
+            #    recorded name is the name acquire_capability was called
+            #    with, under which the legacy registrar registers the fn.
             if hasattr(self.engine, "acquired_code"):
                 for row in self.engine.acquired_code.all():
                     if row.get("capability_id") == capability_id or row.get("id") == capability_id:
-                        aliases.append(row.get("name") or "")
-            # Also: any primitive whose registration notes mention the id
-            try:
-                for n in self.engine.primitives.names():
-                    if capability_id in n or n in capability_id:
-                        aliases.append(n)
-            except Exception:
-                pass
+                        _nm = row.get("name") or ""
+                        if _nm and _nm not in aliases:
+                            aliases.append(_nm)
+            # No bare-substring scan: a fuzzy name-similar stranger must
+            # never stand in for the admitted bytes (M8 obstruction 1).
             seen = set()
             for name in aliases:
                 if not name or name in seen:
@@ -3663,7 +3702,14 @@ class AcquisitionOrchestrator:
             required_effects=spec.required_effects)
         if outcome.get("acquired"):
             cap_id = outcome["capability_id"]
-            ok, detail = self._heldout_admission_gate(spec, cap_id)
+            # M8-R1: thread the verdict-promotion registered name so the
+            # gate exact-resolves the admitted bytes instead of guessing.
+            # outcome["promoted_name"] is e.g. "acquired.acq_<name>_<digest>"
+            # while cap_id is "acq_<name>_<other-digest>" -- without this,
+            # the gate could not find the executable at all.
+            ok, detail = self._heldout_admission_gate(
+                spec, cap_id,
+                registered_name=outcome.get("promoted_name") or None)
             if not ok:
                 self._reject_capability(cap_id, detail)
                 return False, f"held-out admission rejected: {detail}", ""
