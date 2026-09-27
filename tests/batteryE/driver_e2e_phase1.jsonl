@@ -1,0 +1,25 @@
+{"name": "e2e.A-created", "pass": true, "detail": "agt_d82e36c45f4ccb52"}
+{"name": "e2e.A-executed", "pass": true, "detail": "technique=chunk_dedup"}
+{"name": "e2e.X-reviewed-accepted", "pass": true, "detail": "all required evidence present"}
+{"name": "J.independent-verification", "pass": true, "detail": "findings=7"}
+{"name": "e2e.X-promoted", "pass": true, "detail": "exp_d4c5b5d83bc8afd7"}
+{"name": "e2e.X-promoted-L2", "pass": true, "detail": "exp_d4c5b5d83bc8afd7"}
+{"name": "e2e.A-destroyed", "pass": true, "detail": ""}
+{"name": "E.experience-survives", "pass": true, "detail": "expX still retrievable after A destroyed"}
+{"name": "e2e.B-created-distinct", "pass": true, "detail": ""}
+{"name": "e2e.B-executed", "pass": true, "detail": "technique=rle"}
+{"name": "F.replacement-reuses-experience", "pass": true, "detail": "B measured baseline chunk_dedup"}
+{"name": "e2e.Y-reviewed-accepted", "pass": true, "detail": "all required evidence present"}
+{"name": "e2e.Y-promoted", "pass": true, "detail": "exp_cc7bf1094f35311a"}
+{"name": "e2e.Y-promoted-L2", "pass": true, "detail": "X=chunk_dedup Y=rle"}
+{"name": "e2e.XY-distinct", "pass": true, "detail": "chunk_dedup vs rle"}
+{"name": "e2e.relationship-found", "pass": true, "detail": "order=y_then_x"}
+{"name": "e2e.relationship-measured", "pass": true, "detail": "order=y_then_x rx=0.436 ry=0.716 rxy=0.403"}
+{"name": "e2e.Z-synthesized", "pass": true, "detail": "5401 chars"}
+{"name": "K.distinct-artifact", "pass": true, "detail": "own RMZ1 framing; token-sim vs X=0.520 vs Y=0.599"}
+{"name": "e2e.Z-verified", "pass": true, "detail": "all required evidence present"}
+{"name": "K.verified-before-trust", "pass": true, "detail": "findings=7"}
+{"name": "K.verdict-stored", "pass": true, "detail": "execution_id=vex_31cc6a1455c9a53d"}
+{"name": "e2e.Z-admitted-L3", "pass": true, "detail": "exp_9b1a7b612b637320"}
+{"name": "K.l3-bound-to-verdict", "pass": true, "detail": "L3 trust derived from stored verdict vex_31cc6a1455c9a53d"}
+{"name": "e2e.final-audit", "pass": true, "detail": ""}

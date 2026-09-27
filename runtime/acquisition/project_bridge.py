@@ -30,11 +30,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from swarm_engine.acquisition.gap_reasoner import CapabilityGapReasoner
 from swarm_engine.acquisition.orchestrator import AcquisitionOrchestrator
+
+
+# M+29.05: the "test"/"assert" markers match as whole tokens (word
+# boundaries), so names like ".../contest/...", "latest_run.py" or
+# "looptest" don't divert source files into test_paths.
+_TEST_TOKEN_RE = re.compile(r"(?<![a-z0-9])test(?![a-z0-9])")
+_ASSERT_TOKEN_RE = re.compile(r"(?<![a-z0-9])assert(?![a-z0-9])")
 
 
 @dataclass
@@ -536,7 +544,7 @@ class ProjectExecutor:
                 # generic over the resolved plan and requirement description;
                 # it does not depend on topology, operation identity, or the
                 # originating objective.
-                verdict = self.engine.admission.admit(req.description, proposal.plan)
+                verdict = self.engine.admit_as_engine(req.description, proposal.plan)
                 if verdict.ok and verdict.capability_id:
                     req.capability_id = verdict.capability_id
                     req.validation_level = (
@@ -925,6 +933,38 @@ class ProjectExecutor:
                 fails.append((name, value))
         return fails
 
+    @staticmethod
+    def _verifier_rejection_detail(report) -> str:
+        """Build the diagnoser input for a verifier-channel rejection.
+
+        The independent verifier is a caller-supplied ``project.verify``
+        callable returning bool, so its "reasons" are whatever it
+        communicated: a False verdict over the leaf results, or an
+        exception captured in report.error. Both are folded into the
+        detail string so the diagnoser -- and the recorded diagnosis
+        event's detail -- consume the upstream output rather than a
+        placeholder.
+        """
+        parts = [
+            "independent verifier rejected the project result while all "
+            "processes were green: project.verify(leaf_results) did not "
+            "accept the terminal outputs",
+        ]
+        try:
+            summary = {}
+            for name, value in (report.leaf_results or {}).items():
+                try:
+                    blob = json.dumps(value, sort_keys=True, default=str)
+                except Exception:
+                    blob = str(value)
+                summary[str(name)] = blob[:400]
+            parts.append("leaf_results=" + json.dumps(summary, sort_keys=True)[:1500])
+        except Exception:
+            pass
+        if getattr(report, "error", ""):
+            parts.append("verifier error: " + str(report.error)[:500])
+        return "; ".join(parts)
+
     def _find_repair_capability(self, path: str):
         """Select an active capability whose plan targets this path (generic)."""
         store = getattr(self.engine, "capabilities", None)
@@ -945,25 +985,65 @@ class ProjectExecutor:
     async def _attempt_graph_replan(
             self, project, order, outputs, report, graph_fingerprint, by_name,
             provisional_context, behavioral_evidence, root_inputs):
-        """Diagnose process failure, mutate project graph, re-execute once."""
+        """Diagnose process failure, mutate project graph, re-execute once.
+
+        D3 repair: when no process failed but the independent verifier
+        rejected the result (report.verified is False with all-green
+        outputs), the verifier channel routes into diagnosis on the
+        verifier's own verdict/reasons and continues down the same bounded
+        replan path instead of returning None silently. The process-failure
+        path below is behavior-identical; only the verifier-rejection case
+        gains the diagnosis -> replan -> rerun chain.
+        """
         from swarm_engine.improvement.loop import RecoveryAction
         fails = self._process_failures(outputs)
+        verifier_channel = False
         if not fails:
-            return None
-        failed_name, fail_val = fails[-1]
-        err = fail_val.get("stderr") or fail_val.get("stdout") or "process failed"
+            # Verifier channel (D3): every process is green, so the failure
+            # signal is the independent verifier's rejection alone
+            # (project.verify returned False or raised). Fail-closed is not
+            # enough -- it must enter diagnosis like a process failure.
+            if report.verified is not False:
+                return None
+            # Bounded to one verifier-channel replan per project: the rerun
+            # below builds a fresh report (no replan_attempted flag), so
+            # without this project-level marker a deterministically
+            # rejecting verifier would recurse without bound. The
+            # process-failure path never sets or reads this marker.
+            if (project.provenance or {}).get("verifier_replan_done"):
+                return None
+            verifier_channel = True
+            # The verifier judges the terminal results: anchor the repair on
+            # the last leaf requirement (mirrors fails[-1] on the process
+            # path).
+            leaves = project.leaf_names()
+            if leaves:
+                failed_name = leaves[-1]
+            elif order:
+                failed_name = order[-1].name
+            else:
+                failed_name = ""
+            err = self._verifier_rejection_detail(report)
+        else:
+            failed_name, fail_val = fails[-1]
+            err = fail_val.get("stderr") or fail_val.get("stdout") or "process failed"
         diagnoser = getattr(self.engine, "diagnoser", None)
         recovery = getattr(self.engine, "recovery", None)
         if diagnoser is None:
             return None
         diagnosis = diagnoser.diagnose(err)
-        report.lifecycle_events.append({
+        diagnosis_event = {
             "phase": "diagnosis",
             "requirement": failed_name,
             "kind": getattr(diagnosis.kind, "value", str(diagnosis.kind)),
             "action": getattr(diagnosis.action, "value", str(diagnosis.action)),
             "detail": (diagnosis.detail or "")[:300],
-        })
+        }
+        if verifier_channel:
+            # Label the channel: this diagnosis came from the independent
+            # verifier's rejection, not from a failed process.
+            diagnosis_event["channel"] = "verifier"
+        report.lifecycle_events.append(diagnosis_event)
         action = diagnosis.action
         action_val = getattr(action, "value", str(action))
         if action_val not in ("replan", "substitute", "resynthesize"):
@@ -1146,7 +1226,19 @@ class ProjectExecutor:
 
         # Same-process path: resume execution of mutated graph
         report.provenance["replan_rerun"] = True
+        if verifier_channel:
+            # Bound the verifier channel to a single re-execution (see the
+            # marker check at the top of this method).
+            project.provenance = dict(project.provenance or {})
+            project.provenance["verifier_replan_done"] = True
         new_report = await self.run(project, root_inputs)
+        if verifier_channel:
+            # The rerun builds a fresh report, so the verifier-channel
+            # diagnosis would otherwise be visible only inside
+            # parent_lifecycle: carry it into the final report's own
+            # lifecycle events, in chronological position (the diagnosis
+            # preceded the rerun).
+            new_report.lifecycle_events.insert(0, dict(diagnosis_event))
         new_report.provenance = dict(new_report.provenance or {})
         new_report.provenance["graph_before"] = graph_before
         new_report.provenance["graph_after"] = graph_after
@@ -1169,7 +1261,15 @@ class ProjectExecutor:
             if not path:
                 continue
             desc = (req.description or "").lower()
-            if path.endswith(".py") and ("test" in path.lower() or "test" in desc or "assert" in desc):
+            # M+29.05: match the "test" marker on the path BASENAME only
+            # (existing Path_name convention, lowercase), as a whole token.
+            # The description usually embeds the full path, so strip it
+            # before the word checks -- otherwise a scratch dir like
+            # ".../contest/..." re-triggers the quirk via the description.
+            desc_words = desc.replace(path.lower(), "", 1)
+            if path.endswith(".py") and (_TEST_TOKEN_RE.search(Path_name(path))
+                                         or _TEST_TOKEN_RE.search(desc_words)
+                                         or _ASSERT_TOKEN_RE.search(desc_words)):
                 test_paths.append(path)
             elif path.endswith(".py"):
                 source_paths.append(path)
@@ -1188,10 +1288,34 @@ class ProjectExecutor:
         return None
 
     def _admit_synthesized_repair(self, candidate) -> dict:
-        """Persist synthesized repair as a write_text capability plan."""
-        import time as _time
+        """Admit a synthesized repair as a write_text capability plan.
+
+        2026-09-27 (Worker 2, item 6): this previously stored the
+        CapabilityRecord DIRECTLY, bypassing admission entirely -- the
+        row's id (cap_synth_<sha>) was not even fingerprint-bound, so
+        the repair plan rode an unadmitted identity with only
+        examples_satisfied >= 1 and non-empty content as gates. It now
+        goes through the real admission path
+        (engine.admit_as_engine, the trust-spine choke point):
+        engine-attributed caller auth ('agent:admit_capability'),
+        type check, effect ceiling, permission grants,
+        quarantine-stickiness guards (0b/0c), fingerprint-bound id,
+        goal binding, and acquired.* primitive registration.
+
+        The candidate-level evidence gates (non-empty content, >=1
+        satisfied example from the synthesizer's real test runs) stay
+        as pre-checks. No smoke test is supplied: the evidence is the
+        synthesizer's example runs (recorded in the report's lifecycle
+        events), and executing a filesystem write as a "smoke test"
+        would be a redundant side effect rather than new evidence --
+        the orchestrator likewise admits with smoke=None in places.
+        The plan's write_text effect must be covered by the bridge's
+        scoped workspace grants (issued once at run start); without a
+        grant admission fails closed at the permission stage, which is
+        the honest outcome.
+        """
         import hashlib
-        from swarm_engine.synthesis.capability_store import CapabilityRecord
+        from swarm_engine.synthesis.capability_store import plan_fingerprint
         store = getattr(self.engine, "capabilities", None)
         if store is None:
             return {"ok": False, "reasons": ["no_capability_store"]}
@@ -1206,30 +1330,46 @@ class ProjectExecutor:
             "output": {"$step": "s1"},
         }
         goal = f"Create file {candidate.path} containing {candidate.content.strip()}"
-        cid = "cap_synth_" + hashlib.sha256(
-            (candidate.path + candidate.content).encode()).hexdigest()[:14]
         if not candidate.content.strip():
             return {"ok": False, "reasons": ["empty_content"]}
         if candidate.examples_satisfied < 1:
             return {"ok": False, "reasons": ["no_examples_satisfied"]}
-        rec = CapabilityRecord(
-            capability_id=cid,
-            name=f"repair_{candidate.func_name}",
-            goal=goal,
-            plan=plan,
-            ops=["write_text"],
-            effects=["write_fs"],
-            version=1,
-            status="active",
-            created_at=_time.time(),
-        )
+        # Migration bridge: pre-repair rows used the cap_synth_<sha>
+        # namespace, which was never fingerprint-bound. If an identical
+        # repair (same path+content) was DELIBERATELY quarantined under
+        # that legacy identity, admitting the same bytes fresh under a
+        # fingerprint id would silently resurrect it -- refuse,
+        # preserving deliberate-quarantine stickiness across the
+        # namespace migration. (admit()'s own 0c guard covers the new
+        # fingerprint id.)
+        legacy_cid = "cap_synth_" + hashlib.sha256(
+            (candidate.path + candidate.content).encode()).hexdigest()[:14]
+        legacy = store.get(legacy_cid)
+        if (legacy is not None and legacy.status == "quarantined"
+                and store._quarantine_was_deliberate(legacy_cid)):
+            store.log(legacy_cid, "resurrection_refused",
+                      "synthesized-repair admission refused: identical "
+                      "repair is deliberately quarantined under its legacy "
+                      "identity; deliberate revocations are sticky -- "
+                      "restore via integrity.restore_everywhere with "
+                      "trust:transition authority")
+            return {"ok": False,
+                    "reasons": ["deliberately_quarantined_sticky: identical "
+                                "repair capability is deliberately "
+                                "quarantined; re-admission refused"]}
+        admit = getattr(self.engine, "admit_as_engine", None)
+        if admit is None:
+            return {"ok": False, "reasons": ["no_admission_path"]}
         try:
-            store.store(rec)
-            if hasattr(store, "bind_goal"):
-                store.bind_goal(goal, cid)
-            return {"ok": True, "capability_id": cid, "reasons": ["stored"]}
+            res = admit(goal, plan, name=f"repair_{candidate.func_name}")
         except Exception as exc:
-            return {"ok": False, "reasons": [str(exc)]}
+            return {"ok": False, "reasons": [f"admission raised: {exc!r}"]}
+        if res.ok:
+            return {"ok": True, "capability_id": res.capability_id,
+                    "reasons": [f"admitted via admission path "
+                                f"(verdict={res.verdict}): "
+                                + "; ".join(res.reasons)]}
+        return {"ok": False, "reasons": list(res.reasons)}
 
     def _persist_replan_checkpoint(
             self, project, objective_text, root_inputs, completed_outputs,

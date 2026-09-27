@@ -200,9 +200,16 @@ def deploy_org(workdir, authority="track3:deploy"):
     # boot seeds templates and the __init__ runs before any anchor exists:
     # initialize the journal on the POST-BOOT state (genesis commits to
     # the seeded templates), then arm the auto-anchor.
+    # Caller authorization: the org anchor is registry-bound, so journal
+    # writes require an authenticated caller holding 'agent:anchor_write'.
+    # The test harness acts as the engine operator: the claimed authority
+    # is the engine's own producer id (confused-deputy rule).
+    from swarm_engine.governance.oracle_binding import ENGINE_PRODUCER_ID
+    _eng = org.oregistry.engine_handle()
     d = org.anchor.initialize(
-        collect_anchor_heads(org.store, org.oregistry), authority)
-    install_auto_anchor(org, authority="track3:harness")
+        collect_anchor_heads(org.store, org.oregistry),
+        ENGINE_PRODUCER_ID, caller=_eng)
+    install_auto_anchor(org, authority=ENGINE_PRODUCER_ID, caller=_eng)
     print(f"ANCHOR-DEPLOY genesis={d[:16]} journal={journal}", flush=True)
     return org
 
@@ -221,19 +228,24 @@ def attach_org(workdir):
     org = RemorOrganization.boot(workdir)
     # boot() verified the journal above; re-arm the auto-anchor for this
     # process's writes.
-    install_auto_anchor(org, authority="track3:harness")
+    install_auto_anchor(org)
     return org
     print(f"ANCHOR-ATTACH records={org.anchor.record_count}", flush=True)
     return org
 
 
-def install_auto_anchor(org, authority="track3:harness"):
+def install_auto_anchor(org, authority=None, caller=None):
+    from swarm_engine.governance.oracle_binding import ENGINE_PRODUCER_ID
     store, oreg = org.store, org.oregistry
     anchor = org.anchor
+    if caller is None:
+        caller = oreg.engine_handle()
+    if authority is None:
+        authority = ENGINE_PRODUCER_ID
 
     def _anchor_now():
         anchor.anchor(collect_anchor_heads(store, oreg),
-                      reason="verdict", authority=authority)
+                      reason="verdict", authority=authority, caller=caller)
 
     orig_insert = store.insert
 

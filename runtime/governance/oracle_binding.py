@@ -49,9 +49,22 @@ import inspect
 import json
 import secrets
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+# NOTE (D11): db_ownership lives under swarm_engine.core, whose package
+# __init__ eagerly imports core.engine. A module-level
+# `from swarm_engine.core.db_ownership import ...` here would therefore
+# drag core.engine (and, transitively, verification.independent) into
+# oracle_binding's own import, creating a circular import:
+#   verification.independent -> governance.oracle_binding
+#       -> swarm_engine.core.__init__ -> core.engine -> ... 
+#       -> verification.independent (partially initialized)
+# independent.py swallows that ImportError and leaves DECISION_VERIFICATION
+# undefined (NameError at runtime). So the ownership wrapper is imported
+# lazily inside OracleRegistry.__init__, the only place that needs it.
 
 # Decision classes an oracle may be authorized for. An oracle authorized for
 # one class is NOT authorized for another.
@@ -60,6 +73,31 @@ DECISION_VERIFICATION = "verification"
 DECISION_GRANT = "grant"               # authority to issue effect grants
 DECISION_TRUST_TRANSITION = "trust:transition"
 DECISION_REPAIR_CANDIDATE = "repair_candidate"
+# Caller-authorization decision classes (agent↔REMOR authorization layer).
+# An agent may invoke a privileged operation only when it holds the matching
+# class. The engine producer holds all of these as root authorizations.
+DECISION_ADMIT_CAPABILITY = "agent:admit_capability"
+DECISION_QUARANTINE = "agent:quarantine"
+DECISION_RESTORE = "agent:restore"
+DECISION_REPAIR_SUBMIT = "agent:repair_submit"
+DECISION_REPAIR_APPLY = "agent:repair_apply"
+DECISION_ANCHOR_WRITE = "agent:anchor_write"
+AGENT_DECISION_CLASSES = (
+    DECISION_ADMIT_CAPABILITY, DECISION_QUARANTINE, DECISION_RESTORE,
+    DECISION_REPAIR_SUBMIT, DECISION_REPAIR_APPLY, DECISION_ANCHOR_WRITE,
+)
+# Every decision class the engine's root authority holds at bootstrap.
+ROOT_DECISION_CLASSES = (
+    DECISION_ADMISSION_SMOKE, DECISION_VERIFICATION, DECISION_GRANT,
+    DECISION_TRUST_TRANSITION, DECISION_REPAIR_CANDIDATE,
+) + AGENT_DECISION_CLASSES
+# Classes authorize_producer() may grant to a producer. Closed set:
+# the agent decision classes, trust:transition (capability restore
+# performs a governed trust transition), plus grant-issuance itself
+# (so the engine can delegate issuance). Anything else -- unknown
+# names, wildcards -- is refused at grant time.
+_GRANTABLE_CLASSES = (AGENT_DECISION_CLASSES + (DECISION_TRUST_TRANSITION,
+                                                DECISION_GRANT))
 
 ENGINE_PRODUCER_ID = "remor:engine"
 ROOT_SOURCE = "engine bootstrap"
@@ -208,6 +246,72 @@ _TABLES = {
         "attest_id TEXT UNIQUE NOT NULL, producer_id TEXT NOT NULL, "
         "token_hash TEXT NOT NULL, attested_at TEXT NOT NULL, "
         "prev_digest TEXT NOT NULL, row_digest TEXT NOT NULL"),
+    # Agent identities (caller-authorization layer). ob_agents holds the
+    # immutable registration record; ob_agent_events holds the chained
+    # lifecycle events ('registered' / 'destroyed'). A destroyed agent's
+    # credential is dead even if ob_producers.status is tampered back to
+    # 'active': authenticate() refuses when a 'destroyed' event exists.
+    "ob_agents": (
+        "seq INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "agent_id TEXT UNIQUE NOT NULL, producer_id TEXT NOT NULL, "
+        "template_id TEXT, template_version TEXT, "
+        "substrate_id TEXT, substrate_kind TEXT, source TEXT, "
+        "registered_by TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "prev_digest TEXT NOT NULL, row_digest TEXT NOT NULL"),
+    "ob_agent_events": (
+        "seq INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "event_id TEXT UNIQUE NOT NULL, agent_id TEXT NOT NULL, "
+        "event TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT, "
+        "at TEXT NOT NULL, "
+        "prev_digest TEXT NOT NULL, row_digest TEXT NOT NULL"),
+    # Revocations of producer decision-class authorizations. Rows are
+    # EVENTS: the latest event for (producer_id, decision_class) among
+    # ob_producer_authorizations (grants) and this table (revocations)
+    # decides. A re-grant after a revocation re-enables (visible event).
+    # Revocations of producer decision-class authorizations. Rows are
+    # EVENTS (history). The LIVE decision does not compare seq values
+    # across this table and ob_producer_authorizations (separate
+    # autoincrements are causally incomparable) -- it reads the unified
+    # ob_producer_authz_events chain instead. This table is preserved as
+    # the tamper-evident revocation record.
+    "ob_producer_authz_revocations": (
+        "seq INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "rev_id TEXT UNIQUE NOT NULL, producer_id TEXT NOT NULL, "
+        "decision_class TEXT NOT NULL, revoked_by TEXT NOT NULL, "
+        "reason TEXT, revoked_at TEXT NOT NULL, "
+        "prev_digest TEXT NOT NULL, row_digest TEXT NOT NULL"),
+    # Unified grant/revoke event chain for producer decision-class
+    # authorizations. ONE autoincrement seq orders every post-bootstrap
+    # GRANT and REVOKE event, so "latest event wins" is causally
+    # well-defined. producer_authorized() reads only this table's
+    # latest event for (producer_id, decision_class); when no event
+    # exists it falls back to the base grant row in
+    # ob_producer_authorizations (covers the engine's pre-event
+    # bootstrap root authorizations).
+    "ob_producer_authz_events": (
+        "seq INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "event_id TEXT UNIQUE NOT NULL, producer_id TEXT NOT NULL, "
+        "decision_class TEXT NOT NULL, event TEXT NOT NULL, "
+        "actor TEXT NOT NULL, reason TEXT, at TEXT NOT NULL, "
+        "prev_digest TEXT NOT NULL, row_digest TEXT NOT NULL"),
+    # HTTP permission grants (caller-authorization layer, Phase 3 operator
+    # auth). Rows are EVENTS: grant_id is the logical identity (deliberately
+    # not UNIQUE), ordered by seq; the head row decides. An issue row opens
+    # the grant (consumed=0, revoked=0); a later row with consumed=1 retires
+    # a single-use ('allow-once') grant after its one authorized call; a
+    # later row with revoked=1 retires any grant. scope_class is one of
+    # allow-once | allow-for-project | effectively-unlimited; project_id is
+    # set only for allow-for-project. Same append-only chained discipline
+    # as ob_grants -- this extends the AgentDirectory grant model, it does
+    # not bypass it.
+    "ob_http_permissions": (
+        "seq INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "grant_id TEXT NOT NULL, agent_id TEXT NOT NULL, "
+        "scope_class TEXT NOT NULL, project_id TEXT NOT NULL DEFAULT '', "
+        "issued_by TEXT NOT NULL, issued_at TEXT NOT NULL, "
+        "consumed INTEGER NOT NULL DEFAULT 0, "
+        "revoked INTEGER NOT NULL DEFAULT 0, "
+        "prev_digest TEXT NOT NULL, row_digest TEXT NOT NULL"),
 }
 
 # Fields that participate in each table's row digest (everything except the
@@ -238,6 +342,20 @@ _DIGEST_FIELDS = {
     # a silent row rewrite.
     "ob_producer_attestations": ("attest_id", "producer_id", "token_hash",
                                  "attested_at", "prev_digest"),
+    "ob_agents": ("agent_id", "producer_id", "template_id",
+                  "template_version", "substrate_id", "substrate_kind",
+                  "source", "registered_by", "created_at", "prev_digest"),
+    "ob_agent_events": ("event_id", "agent_id", "event", "actor", "reason",
+                        "at", "prev_digest"),
+    "ob_producer_authz_revocations": ("rev_id", "producer_id",
+                                      "decision_class", "revoked_by",
+                                      "reason", "revoked_at", "prev_digest"),
+    "ob_producer_authz_events": ("event_id", "producer_id", "decision_class",
+                                "event", "actor", "reason", "at",
+                                "prev_digest"),
+    "ob_http_permissions": ("grant_id", "agent_id", "scope_class",
+                            "project_id", "issued_by", "issued_at",
+                            "consumed", "revoked", "prev_digest"),
 }
 
 
@@ -261,7 +379,17 @@ class OracleRegistry:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn = sqlite3.connect(db_path)
+        # D11: this connection is thread-bound (sqlite3 check_same_thread
+        # default). Wrap it so cross-thread use raises a named
+        # ThreadAffinityError instead of a raw sqlite3.ProgrammingError.
+        self._owner_thread = threading.get_ident()
+        # D11: lazy import (see module docstring note above) -- importing
+        # swarm_engine.core at module level would circular-import core.engine.
+        from swarm_engine.core.db_ownership import ThreadBoundConnection
+        self._conn = ThreadBoundConnection(
+            sqlite3.connect(db_path),
+            owner_thread=self._owner_thread,
+            owner_desc="OracleRegistry(%s)" % db_path)
         self._conn.row_factory = sqlite3.Row
         self._migrate_legacy_grant_schema()
         self._init_tables()
@@ -487,9 +615,7 @@ class OracleRegistry:
             # oracles for the decision classes REMOR itself decides. This is
             # the trust anchor; it is the FIRST chained content after
             # GENESIS, so any tampering with it breaks every later digest.
-            for cls in (DECISION_ADMISSION_SMOKE, DECISION_VERIFICATION,
-                        DECISION_GRANT, DECISION_TRUST_TRANSITION,
-                        DECISION_REPAIR_CANDIDATE):
+            for cls in ROOT_DECISION_CLASSES:
                 self._insert_chained("ob_producer_authorizations", {
                     "auth_id": f"auth_root_{cls}",
                     "producer_id": ENGINE_PRODUCER_ID,
@@ -522,12 +648,76 @@ class OracleRegistry:
 
     def producer_authorized(self, producer_id: str,
                             decision_class: str) -> bool:
+        """Revocation-aware: the latest event for (producer_id,
+        decision_class) in the unified ob_producer_authz_events chain
+        decides -- 'grant' enables, 'revoke' disables. A single
+        autoincrement seq orders GRANT and REVOKE events, so the
+        comparison is causally well-defined (comparing seq values
+        across the separate grant and revocation tables was not).
+
+        When no event exists (the engine's bootstrap root
+        authorizations predate the event table), the base grant row in
+        ob_producer_authorizations decides. A re-grant after a
+        revocation re-enables via a visible GRANT event -- never
+        silently."""
         cur = self._conn.cursor()
         cur.execute(
+            "SELECT event FROM ob_producer_authz_events "
+            "WHERE producer_id=? AND decision_class=? "
+            "ORDER BY seq DESC LIMIT 1",
+            (producer_id, decision_class))
+        row = cur.fetchone()
+        if row is not None:
+            return row["event"] == "grant"
+        cur.execute(
             "SELECT 1 FROM ob_producer_authorizations "
-            "WHERE producer_id=? AND decision_class=?",
+            "WHERE producer_id=? AND decision_class=? LIMIT 1",
             (producer_id, decision_class))
         return cur.fetchone() is not None
+
+    def _record_authz_event(self, producer_id: str, decision_class: str,
+                            event: str, actor: str, reason: str) -> str:
+        """Append a GRANT/REVOKE event to the unified authorization event
+        chain. Internal: callers have already authenticated and
+        authorized the actor."""
+        event_id = (f"azev_{event}_" +
+                    _digest(producer_id + decision_class + actor +
+                            str(time.time_ns()))[:24])
+        self._insert_chained("ob_producer_authz_events", {
+            "event_id": event_id, "producer_id": producer_id,
+            "decision_class": decision_class, "event": event,
+            "actor": actor, "reason": reason[:500], "at": _now()})
+        return event_id
+
+    def revoke_producer_authorization(self, producer_id: str,
+                                      decision_class: str,
+                                      revoked_by_id: str,
+                                      revoked_by_token: str,
+                                      reason: str = "") -> str:
+        """Revoke a producer's decision-class authorization. The revoker
+        must hold DECISION_GRANT. Recorded as a chained event; the grant
+        row is never mutated. A later re-grant re-enables (visible)."""
+        self._require_auth(revoked_by_id, revoked_by_token)
+        if not self.producer_authorized(revoked_by_id, DECISION_GRANT):
+            raise OracleBindingError(
+                f"{revoked_by_id!r} lacks '{DECISION_GRANT}' authority: "
+                f"cannot revoke authorizations")
+        if not self.producer_authorized(producer_id, decision_class):
+            raise OracleBindingError(
+                f"{producer_id!r} holds no live '{decision_class}' "
+                f"authorization to revoke")
+        rev_id = ("rev_" + _digest(producer_id + decision_class +
+                                   revoked_by_id +
+                                   str(time.time_ns()))[:16])
+        self._insert_chained("ob_producer_authz_revocations", {
+            "rev_id": rev_id, "producer_id": producer_id,
+            "decision_class": decision_class, "revoked_by": revoked_by_id,
+            "reason": reason[:500], "revoked_at": _now()})
+        # Unified event: this REVOKE is the latest word on
+        # (producer_id, decision_class) until a later GRANT.
+        self._record_authz_event(producer_id, decision_class, "revoke",
+                                revoked_by_id, reason)
+        return rev_id
 
     # -- oracles --------------------------------------------------------
     @staticmethod
@@ -695,11 +885,30 @@ class OracleRegistry:
         if not self.producer_authorized(granted_by_id, DECISION_GRANT):
             raise OracleBindingError(
                 f"{granted_by_id!r} lacks '{DECISION_GRANT}' authority")
+        # Grantable classes are closed: the agent decision classes plus
+        # grant-issuance itself (delegation). Unknown classes and
+        # wildcards ("*", "agent:*") are refused -- an unrecognized class
+        # must never become an authorization.
+        if decision_class not in _GRANTABLE_CLASSES:
+            raise OracleBindingError(
+                f"refusing grant of unknown decision class "
+                f"{decision_class!r}: not in the grantable set")
+        # Self-grant ban: even a holder of grant-issuance cannot grant a
+        # class to itself. Escalation requires a DIFFERENT authorized
+        # issuer, so a compromised grant-holder cannot self-escalate.
+        if producer_id == granted_by_id:
+            raise OracleBindingError(
+                f"self-grant refused: {granted_by_id!r} cannot grant "
+                f"{decision_class!r} to itself")
         auth_id = f"pauth_{_digest(producer_id + decision_class + granted_by_id  + str(time.time_ns()))[:16]}"
         self._insert_chained("ob_producer_authorizations", {
             "auth_id": auth_id, "producer_id": producer_id,
             "decision_class": decision_class, "granted_by": granted_by_id,
             "granted_at": _now()})
+        # Unified event: this GRANT is the latest word on
+        # (producer_id, decision_class) until a later REVOKE.
+        self._record_authz_event(producer_id, decision_class, "grant",
+                                granted_by_id, "")
         return auth_id
 
     def oracle_authorized(self, oracle_id: str, version: int,

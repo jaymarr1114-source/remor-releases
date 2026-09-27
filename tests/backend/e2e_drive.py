@@ -29,14 +29,23 @@ SIMPLE_GOAL = "for input x compute x squared plus three"
 SIMPLE_EXAMPLES = [[{"x": x}, x ** 2 + 3] for x in range(5)]
 
 BASE = None
+TOKEN = None
+OP_ID = None
+OP_TOKEN = None
 STEPS = []
 
 
 def req(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"}
+    if TOKEN:
+        headers["Authorization"] = "Bearer " + TOKEN
+    if method in ("POST", "PUT", "DELETE", "PATCH") and OP_ID and OP_TOKEN:
+        # Merged contract: mutating routes need operator credentials.
+        headers["X-Agent-Id"] = OP_ID
+        headers["X-Agent-Token"] = OP_TOKEN
     r = urllib.request.Request(
-        BASE + path, data=data, method=method,
-        headers={"Content-Type": "application/json"})
+        BASE + path, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(r, timeout=120) as resp:
             return resp.status, json.loads(resp.read().decode() or "{}")
@@ -74,9 +83,14 @@ def poll(path, want, timeout, field="status"):
 
 
 def main():
-    global BASE
+    global BASE, TOKEN, OP_ID, OP_TOKEN
     tmp = tempfile.mkdtemp(prefix="remor_ff_e2e_")
     server, services, thread, BASE = serve(tmp)
+    with open(os.path.join(tmp, "api_token"), encoding="utf-8") as fh:
+        TOKEN = fh.read().strip()
+    with open(os.path.join(tmp, "operator.token"), encoding="utf-8") as fh:
+        OP_TOKEN = fh.read().strip()
+    OP_ID = server.svc.operator_id
     print(f"adapter on {BASE} (data: {tmp})", flush=True)
     try:
         # ---- 1. run queue: preemption over HTTP -------------------------

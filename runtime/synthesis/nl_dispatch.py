@@ -20,11 +20,34 @@ dispatch(text, args, producer):
      trust chain -- documented bound).
 
 Refusals are fail-closed and machine-readable (DispatchResult.refusal).
+
+Organizational learning (item 2, 2026-09-25): the dispatcher accepts an
+optional learning hook (``learning=``) plus an agent binding
+(``bind_agent``). On a SUCCESSFUL dispatch, when both are present, the
+dispatcher natively calls ``learning.capture_evidence(...)`` so dispatch
+evidence capture is a product behavior, not driver orchestration.
+
+Attribution is fail-closed: the evidence is attributed to the BOUND
+agent_id (an engine-issued identity), never to the free-form ``producer``
+string. With no agent bound, no capture happens (the dispatch still
+succeeds). The native call runs as the engine (the learning hook's
+documented engine caller): ``capture_dispatch_evidence`` re-verifies the
+agent/assignment binding itself, so the caller identity can never forge
+attribution.
+
+A capture exception never fails the already-successful dispatch: it is
+recorded as ``DispatchResult.learning_error`` (an operational field,
+like the intent_dispatches row) and documented here. Rationale: the
+dispatch executed and was recorded; refusing it after the fact would
+rewrite history, and dropping the error silently would hide a learning
+outage. The error is visible on the result for the operator to act on.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import sqlite3
 import time
 import uuid
@@ -36,6 +59,7 @@ from swarm_engine.synthesis.composer import _spec
 from swarm_engine.primitives.core import coerce
 from swarm_engine.synthesis.integrity import effective_status
 from swarm_engine.synthesis.intent_router import IntentRouter
+from swarm_engine.synthesis.semantic_frames import parse_frame
 
 MAX_ARGS_BYTES = 64 * 1024
 MAX_ARG_DEPTH = 6
@@ -57,6 +81,57 @@ CREATE TABLE IF NOT EXISTS intent_dispatches (
 """
 
 
+_SPEC_COLORS = {
+    "red": "#ff0000", "green": "#00a86b", "blue": "#2563eb",
+    "yellow": "#facc15", "white": "#ffffff", "black": "#000000",
+    "orange": "#f97316", "purple": "#8b5cf6", "pink": "#ec4899",
+    "cyan": "#22d3ee", "gray": "#9ca3af", "grey": "#9ca3af",
+}
+_SPEC_SHAPES = ("circle", "square", "rectangle", "triangle")
+
+
+def _spec_from_shape_words(prompt: str, text: str, seed: int):
+    """Synthesize an image spec ONLY from explicit color+shape words.
+
+    Returns (spec, None) when the prompt names exactly one recognized
+    color and exactly one recognized shape; the shape is centered on a
+    flat dark background and the subject label is the literal
+    "<color> <shape>" (a descriptive label, never a depiction).
+    Returns (None, reason) otherwise -- fabricating a geometric spec
+    for an undrawable subject (e.g. "a sunset") would claim a depiction
+    the renderer cannot produce, so the caller must answer
+    "underspecified_media" instead.
+    """
+    words = re.findall(r"[a-z]+", (prompt or "").lower())
+    colors = [c for c in _SPEC_COLORS if c in words]
+    shapes = [s for s in _SPEC_SHAPES if s in words]
+    if len(colors) != 1 or len(shapes) != 1:
+        return None, (
+            "the spec renderer draws only explicit shapes from an "
+            "explicit spec (e.g. 'draw a red circle'); it cannot depict "
+            "subjects it has no geometry for. Provide {'spec': ...} via "
+            "dispatch_by_id, or ask for a '<color> <shape>'.")
+    color, shape = colors[0], shapes[0]
+    w = h = 512
+    cx = cy = 256
+    fill = _SPEC_COLORS[color]
+    if shape == "circle":
+        geo = {"kind": "circle", "center": [cx, cy], "radius": 120,
+               "fill": fill}
+    elif shape in ("square", "rectangle"):
+        geo = {"kind": "rect", "box": [cx - 100, cy - 100,
+                                       cx + 100, cy + 100], "fill": fill}
+    else:  # triangle
+        geo = {"kind": "polygon",
+               "points": [[cx, cy - 110], [cx - 110, cy + 90],
+                          [cx + 110, cy + 90]], "fill": fill}
+    spec = {"subject": f"{color} {shape}", "width": w, "height": h,
+            "style": "flat", "seed": seed,
+            "background": {"color": "#0b1e3a"},
+            "shapes": [geo], "texts": []}
+    return spec, None
+
+
 @dataclass
 class _RouteInfo:
     """Minimal route descriptor for _record (routed or direct dispatch)."""
@@ -73,6 +148,10 @@ class DispatchResult:
     route_via: Optional[str] = None
     refusal: Optional[str] = None
     reasons: List[str] = field(default_factory=list)
+    # Operational field: a native learning-capture failure never fails the
+    # dispatch; it is recorded here (None when capture was not attempted or
+    # succeeded). See the module docstring for the rationale.
+    learning_error: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -83,21 +162,129 @@ class DispatchResult:
             "route_via": self.route_via,
             "refusal": self.refusal,
             "reasons": self.reasons,
+            "learning_error": self.learning_error,
         }
 
 
 class NLToolDispatcher:
     """NL -> capability dispatcher. Bound to one engine."""
 
-    def __init__(self, engine, router: Optional[IntentRouter] = None):
+    def __init__(self, engine, router: Optional[IntentRouter] = None,
+                 learning: Any = None):
         self.engine = engine
         self.router = router or IntentRouter(engine)
+        # Organizational-learning hook (item 2): an object exposing
+        # capture_evidence(dispatch_id, agent_id, assignment_id, args,
+        # result_value, caller) and an engine_caller identity for the
+        # native path -- e.g. DispatchLearningService. None disables
+        # native capture (driver-orchestrated capture still works).
+        self.learning = learning
+        # Agent context for native capture: (agent_id, assignment_id).
+        # Bound explicitly by the operator/driver; never derived from the
+        # free-form producer string (fail-closed attribution).
+        self._learning_agent: Optional[tuple] = None
+        # Server-chosen governed output dir for synthesized media args.
+        # Set by the HTTP adapter's media wiring (the dir the WRITE_FS
+        # grant covers); None means arg synthesis cannot choose a path
+        # and media requests without caller args are refused honestly.
+        self.media_out_dir: Optional[str] = None
         con = sqlite3.connect(engine.db_path)
         try:
             con.execute(_DISPATCH_DDL)
             con.commit()
         finally:
             con.close()
+
+    def bind_agent(self, agent_id: str, assignment_id: str) -> None:
+        """Bind the agent context native capture attributes evidence to."""
+        if not agent_id or not assignment_id:
+            raise ValueError(
+                "bind_agent requires a non-empty agent_id and assignment_id")
+        self._learning_agent = (agent_id, assignment_id)
+
+    def unbind_agent(self) -> None:
+        """Clear the agent context: dispatches no longer capture natively."""
+        self._learning_agent = None
+
+    # -- media argument synthesis -------------------------------------------
+    @staticmethod
+    def _media_plan(rec) -> bool:
+        """Whether the routed capability is a media capability (by its
+        admitted plan's declared lexicon effects)."""
+        try:
+            declared = set((rec.plan or {}).get("effects") or [])
+        except Exception:
+            return False
+        return any(str(e).startswith("media_") for e in declared)
+
+    @staticmethod
+    def _media_op(rec) -> Optional[str]:
+        try:
+            steps = (rec.plan or {}).get("steps") or []
+            if steps and isinstance(steps[0], dict):
+                return steps[0].get("op")
+        except Exception:
+            pass
+        return None
+
+    def _governed_media_path(self, ext: str) -> str:
+        """Server-chosen uuid output path under the governed media dir."""
+        if self.media_out_dir is None:
+            raise RuntimeError("media_out_dir not configured")
+        name = f"{uuid.uuid4().hex[:12]}_image.{ext}"
+        return os.path.join(os.path.abspath(self.media_out_dir), name)
+
+    def _synthesize_media_args(self, text: str, rec):
+        """Build full capability args for a media request the parser
+        understood, when the caller supplied none.
+
+        Mirrors task_interface._understand_create_media: the prompt comes
+        from the frame entities; width/height/voice/etc. take sane
+        defaults; the seed derives deterministically from the request
+        text; the output path is server-chosen under the governed media
+        dir (callers never choose it). Returns (args, None) on success,
+        (None, reason) when synthesis is impossible -- never a partial
+        or fabricated arg set.
+        """
+        op = self._media_op(rec)
+        seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16)
+        frame = parse_frame(text)
+        prompt = (frame.entities or {}).get("prompt")
+        prompt = prompt.strip() if isinstance(prompt, str) else ""
+        if op == "media.image_render_spec":
+            spec, why = _spec_from_shape_words(prompt or "", text, seed)
+            if spec is None:
+                return None, why
+            return {"spec": spec,
+                    "path": self._governed_media_path("png")}, None
+        if self.media_out_dir is None:
+            return None, ("server has no governed media output dir "
+                          "configured; cannot choose an output path")
+        if not prompt:
+            return None, ("no media prompt understood from the request -- "
+                          "describe what to depict (e.g. 'a sunset over "
+                          "the ocean')")
+        name = f"{uuid.uuid4().hex[:12]}"
+        out = os.path.join(os.path.abspath(self.media_out_dir), name)
+
+        def _path(stem: str, ext: str) -> str:
+            return f"{out}_{stem}.{ext}"
+
+        if op == "media.image_generate":
+            return {"prompt": prompt, "path": _path("image", "png"),
+                    "width": 512, "height": 512, "seed": seed}, None
+        if op == "media.video_generate":
+            return {"prompt": prompt, "path": _path("video", "mp4"),
+                    "duration_s": 4.0, "fps": 24,
+                    "width": 640, "height": 360, "seed": seed}, None
+        if op == "media.song_assemble":
+            return {"lyrics": prompt, "spec": {"style": "ballad"},
+                    "path": _path("song", "wav"),
+                    "work_dir": f"{out}_song_work"}, None
+        if op == "media.voice_synthesize":
+            return {"text": prompt, "voice": "default",
+                    "path": _path("voice", "wav")}, None
+        return None, f"no arg synthesizer for plan op {op!r}"
 
     # -- argument validation ------------------------------------------------
     def _check_json_value(self, v: Any, depth: int, path: str) -> Optional[str]:
@@ -198,6 +385,23 @@ class NLToolDispatcher:
                 ok=False, refusal=route.refusal, reasons=route.reasons)
 
         cap_id = route.capability_id
+        # 1b. argument synthesis for pure-NL media requests: when the
+        # caller supplied no args at all and the parser understood the
+        # request, complete the args from the frame + sane defaults
+        # (mirrors task_interface._understand_create_media). A caller
+        # that supplies explicit args keeps the strict contract:
+        # missing/unknown args are still bad_arguments.
+        if args is None:
+            rec0 = self.engine.capabilities.get(cap_id)
+            if rec0 is not None and self._media_plan(rec0):
+                synth, why = self._synthesize_media_args(text, rec0)
+                if synth is None:
+                    return DispatchResult(
+                        ok=False, refusal="underspecified_media",
+                        capability_id=cap_id, route_via=route.via,
+                        reasons=[why or "media args could not be synthesized",
+                                 f"routed via {route.via} to {cap_id[:12]}..."])
+                args = synth
         return self._dispatch_validated(
             text, cap_id, args, producer, route_via=route.via,
             route_score=route.score)
@@ -295,14 +499,60 @@ class NLToolDispatcher:
                                   route_via=route_via,
                                   reasons=[f"execution failed: {err}"])
         value = exec_res.get("value", exec_res.get("result", exec_res))
+        # Honest bounds stay attached to every media answer: the substrate
+        # result dict does not carry them (services.media adds them only
+        # on its own front), so the dispatch path attaches the admitted
+        # plan's declared-effect bounds here, from services/media.py.
+        try:
+            from swarm_engine.media.wiring import media_bounds_for_effects
+            declared = (rec.plan or {}).get("effects") or []
+            bounds = media_bounds_for_effects(declared)
+        except Exception:
+            bounds = []
+        if bounds and isinstance(value, dict):
+            value = dict(value)
+            value.setdefault("bounds", list(bounds))
         result_digest = hashlib.sha256(
             json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
         self._record(dispatch_id, producer, text, route, cap_id,
                      rec.version, input_digest, result_digest, True, None)
-        return DispatchResult(ok=True, result=value, capability_id=cap_id,
-                              dispatch_id=dispatch_id, route_via=route_via,
-                              reasons=[f"dispatched via {route_via}",
-                                       f"dispatch_id={dispatch_id}"])
+        res = DispatchResult(ok=True, result=value, capability_id=cap_id,
+                             dispatch_id=dispatch_id, route_via=route_via,
+                             reasons=[f"dispatched via {route_via}",
+                                      f"dispatch_id={dispatch_id}"])
+        self._native_capture(res, dispatch_id, dict(coerced), value)
+        return res
+
+    def _native_capture(self, res: DispatchResult, dispatch_id: str,
+                        coerced: Dict[str, Any], value: Any) -> None:
+        """Item 2: native organizational-learning capture on success.
+
+        Runs only when a learning hook AND an agent context are both
+        bound; otherwise the dispatch simply has no learning side effect.
+        The call runs as the learning hook's engine caller (the dispatcher
+        never holds agent credentials); attribution comes from the bound
+        agent_id, and capture_dispatch_evidence re-verifies the
+        agent/assignment binding itself. Any exception is recorded as
+        res.learning_error -- it never fails the successful dispatch.
+        """
+        if self.learning is None or self._learning_agent is None:
+            return
+        agent_id, assignment_id = self._learning_agent
+        try:
+            caller = self.learning.engine_caller
+        except Exception as exc:
+            res.learning_error = (
+                f"native capture skipped: learning hook has no engine "
+                f"caller ({exc!r})")
+            return
+        try:
+            self.learning.capture_evidence(
+                dispatch_id=dispatch_id, agent_id=agent_id,
+                assignment_id=assignment_id, args=coerced,
+                result_value=value, caller=caller)
+        except Exception as exc:
+            res.learning_error = (
+                f"{type(exc).__name__}: {exc}")[:400]
 
     def history(self, capability_id: Optional[str] = None,
                 limit: int = 50) -> List[Dict[str, Any]]:

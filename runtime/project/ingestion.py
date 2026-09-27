@@ -85,6 +85,77 @@ _BULLET_RE = re.compile(r"^\s*[-*]\s+(.*)")
 _REQUIREMENT_WORDS = ("must", "should", "shall", "needs to", "required",
                       "requirement")
 
+# project_id values reach ingestion from the HTTP API (POST /api/projects),
+# so they are untrusted input: 1-64 chars, [A-Za-z0-9_-], leading
+# alphanumeric. Anything else (traversal, separators, NUL, blanks) is
+# refused before any filesystem work happens.
+_PROJECT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+# Maximum bytes for a single entry's name. Mirrors the reference archive
+# path's canonical-name policy.
+_MAX_ENTRY_NAME_LEN = 1024
+
+# Streaming read size for extraction. Caps are checked per chunk so a
+# forged central directory cannot make us write unbounded real bytes.
+_STREAM_CHUNK = 64 * 1024
+
+
+class ZipEntryUnsafeError(ValueError):
+    """A zip entry failed the safety policy (unsafe name, symlink,
+    encrypted). Whole-archive refusal: the archive is rejected, never
+    partially ingested."""
+
+
+def _check_zip_entry_name(name):
+    """Strict canonical-form entry-name check.
+
+    Returns (True, "") for safe names, (False, reason) otherwise.
+    Mirrors the reference ScopedFileService._check_entry_name policy:
+    empty names, over-long names, NUL bytes, backslashes, absolute
+    paths, drive-letter paths, UNC prefixes, and empty / "." / ".."
+    components are all unsafe. A trailing "/" marks a directory entry
+    and is allowed. Encoded traversal ("..%2f..") is NOT decoded — it
+    stays a literal, contained filename (same semantics as the
+    reference path).
+    """
+    if not name:
+        return False, "empty entry name"
+    if len(name) > _MAX_ENTRY_NAME_LEN:
+        return False, "entry name too long"
+    if "\x00" in name:
+        return False, "NUL byte in entry name"
+    if "\\" in name:
+        return False, "backslash in entry name"
+    if name.startswith("\\\\") or name.startswith("//"):
+        return False, "UNC path in entry name"
+    if re.match(r"^[A-Za-z]:", name):
+        return False, "drive-letter path in entry name"
+    if name.startswith("/"):
+        return False, "absolute path in entry name"
+    stripped = name[:-1] if name.endswith("/") else name
+    for part in stripped.split("/"):
+        if part == "..":
+            return False, "dot-dot component in entry name"
+        if part == ".":
+            return False, "dot component in entry name"
+        if part == "":
+            return False, "empty component in entry name"
+    return True, ""
+
+
+def _zipinfo_is_symlink(zi):
+    """True if the ZipInfo describes a symlink (unix mode bits), mirroring
+    the reference _is_symlink_zi."""
+    return (zi.external_attr >> 16) & 0o170000 == 0o120000
+
+
+def _validate_project_id(project_id):
+    """Refuse traversal/separator/NUL/blank/over-long project ids before
+    they touch the filesystem."""
+    if not isinstance(project_id, str) or not _PROJECT_ID_RE.fullmatch(project_id):
+        raise ValueError(f"invalid project_id: {project_id!r}")
+    return project_id
+
 
 class ProjectIngestor:
     """Extracts a zip (or reads an existing directory) into a managed root and
@@ -93,34 +164,156 @@ class ProjectIngestor:
 
     MAX_FILES = 5000
     MAX_TOTAL_BYTES = 200 * 1024 * 1024
+    # Per-entry streaming cap. Defaults to the total cap so every archive
+    # ingestible under the old claimed-total check stays ingestible; its
+    # job is bounding the REAL byte stream when the central directory lies
+    # about sizes (forged-size refusal, sibling parity with the reference
+    # archive path's per-entry streaming cap).
+    MAX_ENTRY_BYTES = 200 * 1024 * 1024
 
     def __init__(self, projects_dir: str = "/tmp/swarm_projects"):
         self.projects_dir = projects_dir
         os.makedirs(projects_dir, exist_ok=True)
 
     def ingest_zip(self, zip_path: str, project_id: Optional[str] = None) -> ProjectModel:
-        project_id = project_id or hashlib.sha256(
-            f"{zip_path}{time.time()}".encode()).hexdigest()[:16]
+        if project_id is None:
+            project_id = hashlib.sha256(
+                f"{zip_path}{time.time()}".encode()).hexdigest()[:16]
+        _validate_project_id(project_id)
+        if not os.path.isfile(zip_path):
+            raise ValueError(f"archive not found: {zip_path}")
         root = os.path.join(self.projects_dir, project_id)
+        root_real = os.path.realpath(root)
+        created_root = not os.path.lexists(root)
         os.makedirs(root, exist_ok=True)
-
-        with zipfile.ZipFile(zip_path) as archive:
-            members = archive.infolist()
-            if len(members) > self.MAX_FILES:
-                raise ValueError(f"archive has {len(members)} entries, "
-                                 f"exceeding the {self.MAX_FILES} file limit")
-            total = sum(m.file_size for m in members)
-            if total > self.MAX_TOTAL_BYTES:
-                raise ValueError(f"archive is {total} bytes, exceeding the "
-                                 f"{self.MAX_TOTAL_BYTES} byte limit")
-            for member in members:
-                target = os.path.normpath(os.path.join(root, member.filename))
-                if not target.startswith(os.path.abspath(root)):
-                    raise ValueError(f"archive entry {member.filename!r} "
-                                     f"attempts to escape the project root")
-            archive.extractall(root)
-
+        written: List[str] = []
+        created_dirs: List[str] = []
+        try:
+            with zipfile.ZipFile(zip_path) as archive:
+                members = archive.infolist()
+                self._prescan_zip_members(members)
+                self._stream_extract(archive, members, root_real,
+                                     written, created_dirs)
+        except Exception as exc:
+            self._cleanup_partial(root, created_root, written, created_dirs)
+            if isinstance(exc, zipfile.BadZipFile):
+                raise ValueError(
+                    f"{zip_path} is not a zip archive ({exc})") from exc
+            raise
         return self.index(root, project_id)
+
+    def _prescan_zip_members(self, members: List[zipfile.ZipInfo]) -> None:
+        """Whole-archive pre-scan BEFORE any byte is written: entry-count
+        cap, claimed-total cap (catches over-claim size lies), then
+        per-entry name / symlink / encrypted checks. Any unsafe entry
+        refuses the whole archive, naming every offender."""
+        if len(members) > self.MAX_FILES:
+            raise ValueError(f"archive has {len(members)} entries, "
+                             f"exceeding the {self.MAX_FILES} entry limit")
+        claimed = sum(m.file_size for m in members)
+        if claimed > self.MAX_TOTAL_BYTES:
+            raise ValueError(f"archive claims {claimed} bytes, exceeding "
+                             f"the {self.MAX_TOTAL_BYTES} byte limit")
+        bad = []
+        for member in members:
+            name = member.filename
+            ok, reason = _check_zip_entry_name(name)
+            if not ok:
+                bad.append(f"{name!r} ({reason})")
+            elif _zipinfo_is_symlink(member):
+                bad.append(f"{name!r} (symlink entry)")
+            elif member.flag_bits & 0x1:
+                bad.append(f"{name!r} (encrypted entry)")
+        if bad:
+            raise ZipEntryUnsafeError(
+                "archive refused: unsafe entries: " + "; ".join(bad))
+
+    def _stream_extract(self, archive: zipfile.ZipFile,
+                        members: List[zipfile.ZipInfo],
+                        root_real: str,
+                        written: List[str],
+                        created_dirs: List[str]) -> None:
+        """Extract entry-by-entry with per-entry and running-total caps
+        checked per chunk against REAL streamed bytes — the second layer
+        under the claimed-size pre-scan, catching under-claim size lies.
+        Symlink entries never reach here (pre-scan refusal); the
+        containment re-check is defense in depth."""
+        total_streamed = 0
+        for member in members:
+            name = member.filename
+            target = self._contained_target(root_real, name)
+            if name.endswith("/"):
+                if not os.path.isdir(target):
+                    os.makedirs(target, exist_ok=True)
+                    created_dirs.append(target)
+                continue
+            parent = os.path.dirname(target)
+            if parent and not os.path.isdir(parent):
+                # record newly created parents (deepest first) for cleanup
+                missing = []
+                cursor = parent
+                while cursor and not os.path.isdir(cursor):
+                    missing.append(cursor)
+                    cursor = os.path.dirname(cursor)
+                os.makedirs(parent, exist_ok=True)
+                created_dirs.extend(missing)
+            entry_bytes = 0
+            # Open the destination first so a mid-stream failure still has
+            # a tracked partial file for cleanup.
+            with open(target, "wb") as dst:
+                written.append(target)
+                with archive.open(member) as src:
+                    while True:
+                        chunk = src.read(_STREAM_CHUNK)
+                        if not chunk:
+                            break
+                        entry_bytes += len(chunk)
+                        total_streamed += len(chunk)
+                        if entry_bytes > self.MAX_ENTRY_BYTES:
+                            raise ZipEntryUnsafeError(
+                                f"entry {name!r} exceeded "
+                                f"{self.MAX_ENTRY_BYTES} bytes while "
+                                f"streaming")
+                        if total_streamed > self.MAX_TOTAL_BYTES:
+                            raise ZipEntryUnsafeError(
+                                f"archive exceeded {self.MAX_TOTAL_BYTES} "
+                                f"bytes while streaming")
+                        dst.write(chunk)
+
+    @staticmethod
+    def _contained_target(root_real: str, name: str) -> str:
+        """Defense in depth under the canonical name check: resolve the
+        target against the real project root and re-check containment
+        with realpath + commonpath (mirrors the reference
+        _resolve_under)."""
+        target = os.path.realpath(os.path.join(root_real, name))
+        if os.path.commonpath([root_real, target]) != root_real:
+            raise ZipEntryUnsafeError(
+                f"archive entry {name!r} escapes the project root")
+        return target
+
+    @staticmethod
+    def _cleanup_partial(root: str, created_root: bool,
+                         written: List[str],
+                         created_dirs: List[str]) -> None:
+        """Best-effort cleanup after a refused archive: unlink files we
+        wrote, remove directories we created (deepest first, only if
+        empty), and remove the project root if we created it."""
+        for path in written:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        for directory in reversed(created_dirs):
+            try:
+                os.rmdir(directory)
+            except OSError:
+                pass
+        if created_root:
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
 
     def ingest_directory(self, source_dir: str, project_id: Optional[str] = None
                          ) -> ProjectModel:

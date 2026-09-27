@@ -127,6 +127,12 @@ class RecoveryAttempt:
     succeeded: bool
     detail: str = ""
     value: Any = None
+    # Which phase produced this record: "candidate_execution" for the
+    # recovery's own attempt at a plan, "independent_validation" for the
+    # fresh re-execution + semantic-bar check that must pass before a
+    # candidate counts as repaired. A plan that executed but failed
+    # validation stays visible here instead of silently counting as fixed.
+    phase: str = "candidate_execution"
 
 
 class RecoveryEngine:
@@ -135,6 +141,14 @@ class RecoveryEngine:
     Strategies are bounded and non-repeating: each is tried at most once per
     failure so a systematically broken goal cannot loop. Escalation is a real
     terminal state, not a disguised retry.
+
+    A candidate repair is only reported as recovered after independent
+    validation: the winning plan is re-executed fresh through the composer
+    (the recovery's own outcome is never trusted) and must still clear the
+    semantic-matcher's sufficiency bar against the goal. Validation is
+    recorded as its own attempt phase, so a plan that executed but failed
+    validation shows up honestly in the attempt history rather than
+    silently counting as a repair.
     """
 
     def __init__(self, planner, composer, diagnoser: Optional[FailureDiagnoser] = None,
@@ -171,10 +185,26 @@ class RecoveryEngine:
             if action is RecoveryAction.RETRY:
                 await asyncio.sleep(self.backoff_s)
 
-            ok, value, detail = await self._try_alternative(goal, args, tried)
-            attempts.append(RecoveryAttempt(action, ok, detail, value))
-            if ok:
+            ok, value, detail, proposal = await self._try_alternative(goal, args, tried)
+            attempts.append(RecoveryAttempt(action, ok, detail, value,
+                                            phase="candidate_execution"))
+            if not ok or proposal is None:
+                continue
+
+            # Independent validation before the repair counts: a fresh
+            # re-execution of the winning plan (never the recovery's own
+            # outcome) plus the semantic-matcher's sufficiency bar against
+            # the goal. A candidate that executes but fails validation is
+            # not a repair -- keep trying the remaining alternatives.
+            validated, validation_detail = await self._validate_recovery(
+                goal, args, proposal)
+            attempts.append(RecoveryAttempt(action, validated, validation_detail,
+                                            value if validated else None,
+                                            phase="independent_validation"))
+            if validated:
                 return True, value, attempts
+            # The winning plan's signature is already in `tried`, so it
+            # cannot be re-offered; the loop moves on to the next action.
 
         return False, None, attempts
 
@@ -193,7 +223,11 @@ class RecoveryEngine:
         return order
 
     async def _try_alternative(self, goal: str, args: Dict[str, Any],
-                               tried: set) -> Tuple[bool, Any, str]:
+                               tried: set) -> Tuple[bool, Any, str, Any]:
+        """Try untried alternative plans. Returns (ok, value, detail,
+        proposal): `proposal` is the winning plan's proposal when ok is
+        True, retained so the caller can independently re-execute it for
+        validation; None otherwise."""
         for proposal in self.planner.propose(goal, limit=5):
             signature = tuple(proposal.ops_used)
             if signature in tried:
@@ -210,8 +244,40 @@ class RecoveryEngine:
                     continue
             outcome = await self.composer.execute(proposal.plan, dict(args))
             if outcome.get("success"):
-                return True, outcome.get("value"), f"recovered via {proposal.strategy}"
-        return False, None, "no untried alternative plan succeeded"
+                return (True, outcome.get("value"),
+                        f"recovered via {proposal.strategy}", proposal)
+        return False, None, "no untried alternative plan succeeded", None
+
+    async def _validate_recovery(self, goal: str, args: Dict[str, Any],
+                                 proposal) -> Tuple[bool, str]:
+        """Independently validate a candidate repair.
+
+        The winning plan is re-executed fresh through the composer -- the
+        recovery's own outcome is deliberately not reused, so a plan that
+        only worked because of transient state cannot pass -- and must
+        still clear the same semantic-match sufficiency bar applied before
+        execution. A plan that executes but no longer means the goal is not
+        a repair.
+        """
+        try:
+            fresh = await self.composer.execute(proposal.plan, dict(args))
+        except Exception as exc:
+            return False, (f"independent validation failed: fresh "
+                           f"re-execution of the recovery plan raised {exc}")
+        if not fresh.get("success"):
+            return False, ("independent validation failed: fresh re-execution "
+                           "of the recovery plan did not succeed")
+        if not proposal.strategy.startswith("template"):
+            match = self.matcher.score(
+                goal, description=" ".join(proposal.ops_used),
+                ops_used=proposal.ops_used, strategy=proposal.strategy)
+            if not match.sufficient:
+                return False, (f"independent validation failed: the plan "
+                               f"executes but no longer clears the semantic "
+                               f"bar for the goal (score {match.score:.3f})")
+        return True, (f"independent validation passed: fresh re-execution "
+                      f"succeeded and the semantic bar was met "
+                      f"(strategy {proposal.strategy})")
 
 
 # ---------------------------------------------------------------------------
@@ -301,25 +367,26 @@ class EvolutionEngine:
             return EvolutionResult(False, goal, reason="no incumbent capability to improve")
 
         incumbent = await self.measure(record.plan, cases)
-        best: Optional[Tuple[Any, Measurement]] = None
+        best: Optional[Tuple[Any, Measurement, Any]] = None
 
         for proposal in self.planner.propose(goal, limit=5):
             if proposal.ops_used == record.ops:
                 continue
-            if not self.composer.analyze(proposal.plan).ok:
+            analysis = self.composer.analyze(proposal.plan)
+            if not analysis.ok:
                 continue
             measured = await self.measure(proposal.plan, cases)
             if not measured.correct:
                 continue
             if best is None or measured.latency_ms < best[1].latency_ms:
-                best = (proposal, measured)
+                best = (proposal, measured, analysis)
 
         if best is None:
             return EvolutionResult(False, goal, incumbent_id=record.capability_id,
                                    incumbent=incumbent,
                                    reason="no correct alternative was found")
 
-        proposal, measured = best
+        proposal, measured, analysis = best
         if not measured.dominates(incumbent):
             return EvolutionResult(
                 False, goal, incumbent_id=record.capability_id,
@@ -327,7 +394,15 @@ class EvolutionEngine:
                 reason=f"challenger did not clearly beat the incumbent "
                        f"({measured.latency_ms:.3f}ms vs {incumbent.latency_ms:.3f}ms)")
 
+        # revise() requires the op list and effect set for the new plan;
+        # the analysis was already computed above (the plan was checked ok).
+        # effects are stored as plain strings (CapabilityRecord.effects is
+        # List[str]); sorting raw Effect enums would raise TypeError for
+        # multi-effect plans, so project to .value first (same projection
+        # PlanAnalysis.as_dict() uses).
         revised = self.store.revise(record, proposal.plan,
+                                    ops=proposal.ops_used,
+                                    effects=sorted(e.value for e in analysis.effects),
                                     note=f"evolved: {measured.latency_ms:.3f}ms vs "
                                          f"{incumbent.latency_ms:.3f}ms")
         new_id = getattr(revised, "capability_id", None)
@@ -569,9 +644,13 @@ class SelfImprovementEngine:
         if not failures:
             return diagnoses
 
+        # The diagnoser normally rides on the engine (production engines
+        # always carry one); a same-class default keeps observe() honest
+        # for engine-like collaborators that do not.
+        diagnoser = getattr(self.engine, "diagnoser", None) or FailureDiagnoser()
         kinds: Dict[str, int] = {}
         for sample in failures:
-            diagnosis = self.engine.diagnoser.diagnose(sample.get("error"))
+            diagnosis = diagnoser.diagnose(sample.get("error"))
             kinds[diagnosis.kind.value] = kinds.get(diagnosis.kind.value, 0) + 1
 
         rate = len(failures) / len(samples)
@@ -863,9 +942,19 @@ class ImprovementCycle:
 
 
 class RecursiveImprovementLoop:
-    """Chains improvement cycles: diagnose -> improve -> re-diagnose against
-    the *new* state -> improve again, until nothing more is diagnosable or a
-    hard cycle limit is hit.
+    """Chains improvement cycles: observe -> diagnose -> improve -> re-observe
+    against the *new* state -> improve again, until nothing more is diagnosable
+    or a hard cycle limit is hit.
+
+    The OBSERVE -> DIAGNOSE step is not re-implemented here. Each cycle draws
+    raw failure samples from FailureMemory -- one sample per recorded failure
+    of a diagnosable kind, shaped {"success": False, "error": detail,
+    "goal": goal} -- and hands them to SelfImprovementEngine.observe; the
+    cycle then uses the ComponentDiagnosis observe returns, verbatim. The
+    kind->component mapping therefore lives in exactly one place (observe),
+    not in a second private copy inside this loop, so the loop cannot drift
+    out of agreement with standalone improvement passes about which
+    component a failure kind implicates.
 
     The dangerous version of this loop is one that keeps "improving" forever
     because it always finds something to fix. Two things stop that here.
@@ -882,11 +971,32 @@ class RecursiveImprovementLoop:
     where it started, not just one step back.
     """
 
+    # Failure kinds this loop will spend improvement budget on. A kind is
+    # diagnosable here only if SelfImprovementEngine.observe maps it onto a
+    # component the caller can offer changes for; anything else (permission
+    # denials, strategy exhaustion, unrecognised errors) is left to the
+    # recovery layer rather than being "improved" on.
+    DIAGNOSABLE_KINDS = frozenset({
+        "bad_argument", "type_error", "missing_primitive",
+        "logic", "timeout", "resource"})
+
     def __init__(self, improver: SelfImprovementEngine, failure_memory,
                 max_cycles: int = 5):
         self.improver = improver
         self.failure_memory = failure_memory
         self.max_cycles = max_cycles
+
+    def _failure_samples(self, limit_per_kind: int = 10000
+                         ) -> List[Dict[str, Any]]:
+        """One raw sample per recorded failure of a diagnosable kind, shaped
+        for SelfImprovementEngine.observe. Every record in FailureMemory is a
+        failure, so `success` is always False; observe keys on that."""
+        samples: List[Dict[str, Any]] = []
+        for kind in sorted(self.DIAGNOSABLE_KINDS):
+            for rec in self.failure_memory.by_kind(kind, limit=limit_per_kind):
+                samples.append({"success": False, "error": rec.detail,
+                                "goal": rec.goal})
+        return samples
 
     async def run(self, component_changes: Dict[str, Tuple[Any, Any]],
                  goals: List[Tuple[str, Dict[str, Any], Any]]
@@ -902,38 +1012,48 @@ class RecursiveImprovementLoop:
         seen_diagnoses: set = set()
 
         for cycle_index in range(1, self.max_cycles + 1):
-            diagnosable_kinds = {"bad_argument", "type_error", "missing_primitive",
-                                 "logic", "timeout", "resource"}
-            total_failures = sum(len(self.failure_memory.by_kind(k, limit=10000))
-                                 for k in diagnosable_kinds)
-            if total_failures <= last_seen_failure_count:
+            # Raw failure evidence through the production OBSERVE path.
+            # This is the only way this loop turns failures into a
+            # diagnosis: it never classifies or maps kinds itself.
+            samples = self._failure_samples()
+            if len(samples) <= last_seen_failure_count:
                 cycles.append(ImprovementCycle(
                     cycle_index, None, None,
                     "no new failure evidence since the last cycle; stopping "
                     "rather than re-diagnosing stale history"))
                 break
 
-            dominant = self.failure_memory.dominant_kind(min_samples=3)
-            if dominant is None:
+            diagnoses = self.improver.observe(samples)
+            if not diagnoses:
+                cycles.append(ImprovementCycle(
+                    cycle_index, None, None,
+                    "observe produced no diagnosis from the failure samples; "
+                    "stopping rather than improving on no diagnosis"))
+                break
+            diagnosis = diagnoses[0]
+
+            # Minimum-evidence gate (previously dominant_kind(min_samples=3),
+            # now applied to the observe-produced evidence): the dominant
+            # kind among the observed samples must still have enough samples
+            # to say anything about it.
+            kinds = diagnosis.evidence.get("kinds", {}) or {}
+            if not kinds or max(kinds.values()) < 3:
                 cycles.append(ImprovementCycle(
                     cycle_index, None, None,
                     "no component has enough failure evidence to diagnose"))
                 break
 
-            diagnosis = ComponentDiagnosis(
-                component=self._component_for_kind(dominant["kind"]),
-                symptom=f"{dominant['count']} recorded failures of kind "
-                       f"{dominant['kind']!r}",
-                hypothesis=f"the {self._component_for_kind(dominant['kind'])} "
-                          f"is implicated by {dominant['count']} matching failures",
-                evidence=dominant)
-
-            fingerprint = (diagnosis.component, dominant["kind"], dominant["count"])
+            # Fixed-point fingerprint, rebuilt from the observe-produced
+            # diagnosis: the implicated component plus the observed
+            # failure-kind profile.
+            fingerprint = (diagnosis.component, tuple(sorted(kinds)))
             if fingerprint in seen_diagnoses:
                 cycles.append(ImprovementCycle(
                     cycle_index, diagnosis.as_dict(), None,
-                    "identical diagnosis to a previous cycle with no new "
-                    "evidence in between; this is a fixed point, not progress"))
+                    "the same component is implicated with the same "
+                    "failure-kind profile as a previous cycle; offering the "
+                    "same change against this evidence again is a fixed "
+                    "point, not progress"))
                 break
             seen_diagnoses.add(fingerprint)
 
@@ -950,7 +1070,7 @@ class RecursiveImprovementLoop:
             result = await self.improver.improve(diagnosis, apply_fn, revert_fn, goals)
             cycles.append(ImprovementCycle(cycle_index, diagnosis.as_dict(),
                                            result.as_dict()))
-            last_seen_failure_count = total_failures
+            last_seen_failure_count = len(samples)
 
             if not result.deployed:
                 # The offered change did not help this diagnosis. Trying the
@@ -959,8 +1079,3 @@ class RecursiveImprovementLoop:
                 break
 
         return cycles
-
-    def _component_for_kind(self, kind: str) -> str:
-        return {"bad_argument": "planner", "type_error": "planner",
-               "missing_primitive": "acquisition", "logic": "verification",
-               "timeout": "scheduler", "resource": "budget"}.get(kind, "planner")

@@ -74,9 +74,35 @@ def plan_has_map(plan: Optional[Dict[str, Any]]) -> bool:
     if not plan:
         return False
     for step in plan.get("steps") or []:
-        if isinstance(step, dict) and step.get("op") == "map":
+        if isinstance(step, dict) and _bare_op(step.get("op")) == "map":
             return True
     return False
+
+
+def _bare_op(op: Any, registry=None) -> str:
+    """Canonical bare op name for shape/polarity matching.
+
+    The registry registers every primitive under its bare name and resolves
+    qualified aliases ("data.map" -> "map") to it; real admitted plans use
+    qualified names (planner templates emit them). Shape and polarity
+    tables are keyed on bare names, so qualified plan ops must be
+    normalized before comparison -- otherwise "data.map" is invisible to
+    the map-shape detector and "computation.multiply" is invisible to the
+    multiply/divide polarity guard, even though they name the same
+    primitives as the bare forms the tables were written for. Without a
+    registry, strip the family prefix (best-effort, same result for every
+    real qualified name the registry accepts).
+    """
+    if not isinstance(op, str):
+        return str(op)
+    if registry is not None:
+        try:
+            resolved = registry.resolve(op)
+            if resolved:
+                return resolved
+        except Exception:
+            pass
+    return op.split(".")[-1]
 
 
 @dataclass
@@ -437,8 +463,14 @@ def polarity_conflict(goal: str, plan, registry, composer=None) -> tuple:
     plan_ops = set(plan_partial_ops(plan)) | set(
         s.get("op") for s in (plan or {}).get("steps") or [] if isinstance(s, dict)
     )
+    # Normalize to canonical bare names: plans admitted from real planner
+    # templates use qualified ops ("computation.multiply") while the
+    # inverse tables below are keyed on bare names ("multiply"); without
+    # normalization the guard is blind to qualified-name plans (a
+    # "divide by 2" goal would not conflict with a "multiply by 2" plan).
+    bare_ops = {_bare_op(o, registry) for o in plan_ops}
     # Direct inverse of plan ops
-    for op in plan_ops:
+    for op in bare_ops:
         inv = _inverse_name(str(op))
         hit = named & inv
         if hit:
@@ -464,12 +496,198 @@ def polarity_conflict(goal: str, plan, registry, composer=None) -> tuple:
             return True, f"additive -b vs goal naming add"
     # Goal names an op that is not the plan op and is inverse-related
     for gop in named:
-        if gop in plan_ops:
+        if gop in bare_ops:
             continue
         # if goal names multiply but plan is lcm — compatible family, not conflict
         inv = _inverse_name(gop)
-        if inv & plan_ops:
-            return True, f"goal op {gop} inverse-related to plan ops {sorted(plan_ops)}"
+        if inv & bare_ops:
+            return True, f"goal op {gop} inverse-related to plan ops {sorted(bare_ops)}"
     return False, "no polarity conflict"
 
 
+
+
+# ---------------------------------------------------------------------------
+# Adaptation: bound-constant substitution with behavioral re-verification
+# ---------------------------------------------------------------------------
+# Retrieval replays admitted contracts: a capability whose bound constants
+# do not coincide with the goal's numbers scores 0 structurally, and a
+# capability that does not reproduce the caller's examples scores 0
+# behaviorally. Neither path generalizes across the constant -- the
+# capability-level analogue of the retention finding (retention replays
+# exposure vocabulary; it does not generalize).
+#
+# adapt_compatible() is the first generalization mechanism: for a
+# structural near-miss (exactly one distinct bound constant in the plan,
+# exactly one distinct number in the goal, and they differ), it
+# substitutes the goal's number for the plan's bound constant and
+# behaviorally re-verifies the SUBSTITUTED plan against the caller's
+# examples. The result is a PROPOSAL, not an admission:
+#
+#   * the adapted plan is never stored, registered, or executed under the
+#     source capability's identity -- that would be the substitution
+#     attack capability_store.py guards against (same id, different
+#     bytes). The caller must run the proposal through
+#     AdmissionController.admit(): new plan bytes get a new fingerprint,
+#     new capability id, and the full type/effect/permission/smoke
+#     pipeline.
+#   * verification requires caller-supplied examples and demands 100%
+#     reproduction -- no examples, no adaptation (fail closed).
+#   * ambiguous substitutions (several distinct bounds, several distinct
+#     goal numbers) are refused rather than guessed.
+#
+# Bounds of the mechanism (by construction, not by tuning): single
+# bound-constant substitution only. Multi-constant plans, structural
+# rewrites, and param-shape changes are out of scope and refused.
+
+
+@dataclass
+class AdaptationProposal:
+    """A behaviorally-verified variant of an admitted capability.
+
+    `plan` is the adapted plan bytes -- UNADMITTED. `derived_from` names
+    the source capability for provenance. `substitution` maps the old
+    bound value to the new one. `arg_alignment` records an example-arg ->
+    plan-param renaming applied during verification (None when the
+    caller's example args already matched the plan's params).
+    """
+    derived_from: str
+    plan: Dict[str, Any]
+    substitution: Dict[str, float]
+    goal: str
+    behavioral: float
+    arg_alignment: Optional[Dict[str, str]] = None
+    reasons: List[str] = None
+
+    def __post_init__(self):
+        if self.reasons is None:
+            self.reasons = []
+
+
+def _rewrite_partial_bounds(plan: Dict[str, Any], old: float,
+                            new: float) -> Dict[str, Any]:
+    """Deep-copy `plan`, replacing $partial bound values equal to `old`
+    with `new`. Only bound values are touched -- plan structure, params,
+    and step wiring are byte-identical otherwise."""
+    import copy
+
+    plan = copy.deepcopy(plan)
+
+    def walk(node: Any):
+        if isinstance(node, dict):
+            if "$partial" in node and isinstance(node["$partial"], dict):
+                bound = node["$partial"].get("bound")
+                if isinstance(bound, dict):
+                    for k, v in list(bound.items()):
+                        if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                                and float(v) == old:
+                            bound[k] = new
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(plan)
+    return plan
+
+
+def _align_example_args(plan: Dict[str, Any],
+                        examples: Sequence[Tuple[Dict[str, Any], Any]]
+                        ) -> Tuple[List[Tuple[Dict[str, Any], Any]],
+                                   Optional[Dict[str, str]]]:
+    """Align caller example args to the plan's param names.
+
+    The behavioral gate otherwise fails on a naming accident: examples
+    keyed {"numbers": [...]} against a plan with param "values" are not a
+    behavioral mismatch, they are the same single argument under a
+    different name. Alignment applies ONLY in the unambiguous 1-param /
+    1-arg case; anything else is returned unchanged (the caller must
+    supply matching args, or the candidate simply does not verify).
+    """
+    params = list((plan or {}).get("params") or {})
+    if len(params) != 1:
+        return list(examples), None
+    aligned = []
+    mapping = None
+    for args, expected in examples:
+        if not isinstance(args, dict) or len(args) != 1:
+            return list(examples), None
+        (k,) = args.keys()
+        if k == params[0]:
+            aligned.append((args, expected))
+            continue
+        if mapping is None:
+            mapping = {k: params[0]}
+        elif mapping.get(k) != params[0]:
+            return list(examples), None
+        aligned.append(({params[0]: args[k]}, expected))
+    if mapping is None:
+        return list(examples), None
+    return aligned, mapping
+
+
+def adapt_compatible(
+    records: Sequence[Any],
+    goal: str,
+    examples: Sequence[Tuple[Dict[str, Any], Any]],
+    composer,
+    *,
+    registry=None,
+) -> List[AdaptationProposal]:
+    """Propose bound-constant adaptations of near-miss capabilities.
+
+    For each active record whose plan carries exactly one distinct bound
+    constant and whose goal carries exactly one distinct number (and the
+    two differ), substitute and behaviorally re-verify the adapted plan
+    on ALL caller examples. Only 1.0 reproduction yields a proposal.
+
+    Fail-closed: no examples -> no proposals; ambiguous (multi-value)
+    substitutions -> refused; partial reproduction -> refused; records
+    that already reproduce the examples need no adaptation and are
+    skipped. Returned proposals are UNADMITTED -- see the section
+    header for the trust contract.
+    """
+    if not examples or composer is None:
+        return []
+    goal_nums = set(extract_numbers(goal))
+    if len(goal_nums) != 1:
+        return []  # no single target constant: substitution would be a guess
+    (new_num,) = goal_nums
+    proposals: List[AdaptationProposal] = []
+    for rec in records:
+        if getattr(rec, "status", None) not in (None, "active"):
+            if getattr(rec, "status", "active") != "active":
+                continue
+        plan = getattr(rec, "plan", None)
+        if not plan:
+            continue
+        bound = set(plan_bound_numbers(plan))
+        if len(bound) != 1:
+            continue  # zero or several distinct bounds: not adaptable
+        (old_num,) = bound
+        if old_num == new_num:
+            continue  # not an adaptation -- rank_compatible's domain
+        adapted = _rewrite_partial_bounds(plan, old_num, new_num)
+        aligned_examples, mapping = _align_example_args(adapted, examples)
+        probe = type("AdaptProbe", (), {
+            "capability_id": getattr(rec, "capability_id", "?"),
+            "plan": adapted, "status": "active"})()
+        b_score, b_reason = behavioral_score(probe, aligned_examples, composer)
+        if b_score < 1.0:
+            continue  # the adapted plan does not reproduce the examples
+        proposals.append(AdaptationProposal(
+            derived_from=getattr(rec, "capability_id", "?"),
+            plan=adapted,
+            substitution={f"{old_num}": new_num},
+            goal=goal,
+            behavioral=b_score,
+            arg_alignment=mapping,
+            reasons=[
+                f"bound-constant substitution {old_num} -> {new_num}",
+                f"behavioral {b_reason} on adapted plan"
+                + (f" (example args aligned {mapping})"
+                   if mapping else ""),
+            ],
+        ))
+    return proposals

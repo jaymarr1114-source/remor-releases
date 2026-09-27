@@ -126,6 +126,12 @@ class ReviewBoard:
         # should be shared with RemorOrganization (it is, via boot()).
         self.anchor = (anchor_store if anchor_store is not None
                        else AnchorStore(*default_anchor_paths(store.db_path)))
+        # Caller authorization on journal writes: the anchor's registry
+        # binding makes initialize/anchor/transition require a
+        # token-authenticated caller holding 'agent:anchor_write'.
+        # Bound here (and in RemorOrganization.boot, which shares this
+        # instance) so every runtime journal write is authorized.
+        self.anchor.bind_registry(self.oregistry)
 
     # -- reads ----------------------------------------------------------
     def get_work_product(self, wp_id: str) -> WorkProduct:
@@ -228,16 +234,18 @@ class ReviewBoard:
             "created_at": now()})
         # Anchor the new chain heads OUTSIDE the database: a whole-DB
         # rewrite with recomputed internal chains cannot forge the journal
-        # (the HMAC key lives outside the DB). The recorded authority is
-        # the engine producer that executed the verification -- agent
-        # identities stay the producers' own claims, as before.
+        # (the HMAC key lives outside the DB). The journal write is
+        # caller-authorized: the engine's own handle (it holds
+        # 'agent:anchor_write' as a root authorization), recorded under
+        # the engine producer id -- agent identities stay the producers'
+        # own claims, as before.
         # Crash between the insert above and this anchor -> the next boot
         # (or require_admitted_verdict) sees a head mismatch and fails
         # closed; recover via an audited transition (reason="recovery").
         self.anchor.anchor(
             collect_anchor_heads(self.store, self.oregistry),
             reason="verdict",
-            authority=getattr(self.engine, "producer_id", None))
+            caller=self.engine)
         return execution_id
 
     def _latest_verdict(self, wp_id: str) -> Optional[Dict[str, Any]]:
@@ -384,9 +392,23 @@ class ReviewBoard:
            swapped, stale, or tampered-with plan is refused here.
         3. The plan is re-executed with the recorded canonical arguments in
            a real subprocess (fresh Composer over the rebuilt base
-           primitive vocabulary), through the real IndependentValidator.
-           The recomputed input/result digests must equal the recorded
-           ones -- a forged or replaced result is refused here.
+           primitive vocabulary PLUS acquired.<id> wrappers reconstructed
+           from the evidence's recorded dependency closure -- item 4),
+           through the real IndependentValidator. The recomputed
+           input/result digests must equal the recorded ones -- a forged
+           or replaced result is refused here.
+        4. Dependency closure (item 4): when the plan composes acquired
+           capabilities, the evidence document's ``dependency_closure``
+           must be non-empty and cover every ``acquired.<id>`` reference
+           of the top plan and of every entry's own plan. Each entry is
+           checked against the LIVE capability record: it must exist, its
+           plan must fingerprint to the recorded fingerprint, its version
+           must be current, and its effective status must be active. A
+           quarantined, stale, tampered-with, or vanished dependency
+           refuses the evidence. Rows captured before the closure field
+           existed are treated as an empty closure: base-primitive-only
+           plans still verify; acquired-composing plans are refused
+           exactly as the legacy behavior did.
 
         The verdict is bound to the canonical evidence-document bytes
         (artifact_kind="dispatch_evidence", artifact_ref=evidence_id) and
@@ -507,11 +529,151 @@ class ReviewBoard:
             raise VerificationFailed(
                 f"dispatch evidence {evidence_id}: evidence document not "
                 "marked ok -- refused")
+        # -- dependency closure (item 4: acquired.<id> composition) ------
+        # The review re-derives compositions too: the evidence's recorded
+        # closure is checked entry-by-entry against LIVE state, and the
+        # sandbox registry is rebuilt from the RECORDED plans (never live
+        # plans -- the live checks below gate on currency, the harness
+        # executes exactly what capture recorded). Legacy rows predate
+        # the field and are treated as an empty closure.
+        from swarm_engine.cognition.revocation import plan_acquired_refs
+        from swarm_engine.synthesis.integrity import effective_status
+        closure = doc.get("dependency_closure")
+        if closure is None:
+            closure = []
+        if not isinstance(closure, list):
+            raise VerificationFailed(
+                f"dispatch evidence {evidence_id}: dependency_closure is "
+                "not a list -- refused")
+        entries: Dict[str, Dict[str, Any]] = {}
+        for cent in closure:
+            if not isinstance(cent, dict):
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: malformed "
+                    "dependency_closure entry -- refused")
+            cid = cent.get("capability_id")
+            cfp = cent.get("plan_fingerprint")
+            cplan_json = cent.get("plan_json")
+            if (not isinstance(cid, str) or not cid
+                    or not isinstance(cfp, str) or not cfp
+                    or not isinstance(cplan_json, str) or not cplan_json):
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: malformed "
+                    "dependency_closure entry (missing capability_id / "
+                    "plan_fingerprint / plan_json) -- refused")
+            try:
+                cplan = json.loads(cplan_json)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency "
+                    f"{cid!r} plan_json does not parse ({exc}) -- refused")
+            if not isinstance(cplan, dict):
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency "
+                    f"{cid!r} plan is not an object -- refused")
+            # Entry-internal consistency: the recorded plan must
+            # fingerprint to the recorded fingerprint. A swapped plan
+            # under a kept fingerprint is refused here (before any live
+            # comparison, so neither side can be played off the other).
+            if plan_fingerprint(cplan) != cfp:
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency "
+                    f"{cid!r} recorded plan does not fingerprint to its "
+                    "recorded fingerprint -- refused")
+            if cid in entries:
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: duplicate "
+                    f"dependency_closure entry for {cid!r} -- refused")
+            entries[cid] = {
+                "capability_id": cid,
+                "version": str(cent.get("version")),
+                "plan_fingerprint": cfp,
+                "plan_json": cplan_json,
+                "plan": cplan,
+            }
+        acquired_refs = plan_acquired_refs(rec.plan)
+        if acquired_refs and not entries:
+            raise VerificationFailed(
+                f"dispatch evidence {evidence_id}: plan composes acquired "
+                f"capabilities {sorted(acquired_refs)} but the evidence "
+                "carries no dependency closure -- refused")
+        uncovered = set(acquired_refs) - set(entries)
+        if uncovered:
+            raise VerificationFailed(
+                f"dispatch evidence {evidence_id}: dependency closure "
+                f"does not cover acquired references {sorted(uncovered)} "
+                "-- refused")
+        # Transitive coverage: every entry's own acquired references must
+        # themselves be closure entries -- a dep whose plan references a
+        # missing closure entry refuses.
+        for cid, cent in entries.items():
+            missing = set(plan_acquired_refs(cent["plan"])) - set(entries)
+            if missing:
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency "
+                    f"{cid!r} references {sorted(missing)} with no "
+                    "closure entry -- refused")
+        # Depth cap (16, same as capture) + cycle detection over the
+        # closure graph: a tampered document that injects a cycle or an
+        # over-deep chain refuses here even though capture refused to
+        # write one.
+        _depth_memo: Dict[str, int] = {}
+
+        def _closure_depth(cid: str, stack: tuple) -> int:
+            if cid in stack:
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency cycle "
+                    f"in closure at {cid!r} -- refused")
+            if cid in _depth_memo:
+                return _depth_memo[cid]
+            depth = 0
+            for child in plan_acquired_refs(entries[cid]["plan"]):
+                depth = max(depth, _closure_depth(child, stack + (cid,)))
+            _depth_memo[cid] = depth + 1
+            if _depth_memo[cid] > 16:
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency depth "
+                    f"exceeds 16 at {cid!r} -- refused")
+            return _depth_memo[cid]
+
+        for _root in acquired_refs:
+            _closure_depth(_root, ())
+        # Live per-dependency checks: the closure is only as good as its
+        # currency. Each entry's live record must exist, fingerprint to
+        # the recorded fingerprint, be at the recorded version, and be
+        # effectively active -- a quarantined, stale, tampered-with, or
+        # vanished dependency refuses the evidence.
+        for cid in sorted(entries):
+            cent = entries[cid]
+            live = eng.capabilities.get(cid)
+            if live is None:
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency "
+                    f"{cid!r} vanished -- refused")
+            if plan_fingerprint(live.plan) != cent["plan_fingerprint"]:
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency "
+                    f"{cid!r} live plan fingerprint mismatch (stale or "
+                    "tampered plan) -- refused")
+            if str(getattr(live, "version", None)) != cent["version"]:
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency "
+                    f"{cid!r} version changed since capture (recorded "
+                    f"{cent['version']} vs live "
+                    f"{getattr(live, 'version', None)}) -- refused")
+            eff = effective_status(eng, cid)
+            if eff.get("effective") != "active" or not eff.get("consistent"):
+                raise VerificationFailed(
+                    f"dispatch evidence {evidence_id}: dependency "
+                    f"{cid!r} not effectively active "
+                    f"(effective={eff.get('effective')}) -- refused")
+        closure_json = canonical(closure)
         plan_json = json.dumps(rec.plan, sort_keys=True)
         expected = {"ok": True, "input_digest": ev.input_digest,
                     "result_digest": ev.result_digest}
         case = Case(
-            args={"plan_json": plan_json, "args_json": ev.args_json},
+            args={"plan_json": plan_json, "args_json": ev.args_json,
+                  "closure_json": closure_json},
             expect=expected, label=f"re-execute {evidence_id}")
         spec = _DispatchEvidenceSpec(evidence_id, case.args, expected)
         verdict = self._run_validator(_DISPATCH_REEXEC_HARNESS,
@@ -526,8 +688,14 @@ class ReviewBoard:
     def verify_repair(self, repair_id: str, agent_id: str,
                       defect_signature: Dict[str, Any], diagnosis: str,
                       pre_code: str, post_code: str, entrypoint: str,
-                      spec: Any, cases: Sequence[Case]) -> Verdict:
+                      spec: Any, cases: Sequence[Case],
+                      caller: Any = None) -> Verdict:
         """Independently verify a repair instance.
+
+        caller: REQUIRED -- the caller must hold 'agent:repair_submit'.
+        The recorded agent_id is the AUTHENTICATED caller: a supplied
+        agent_id that disagrees is a confused-deputy attempt and is
+        refused outright.
 
         Executes the real IndependentValidator against the REPAIRED
         artifact bytes (post_code) under subprocess isolation with
@@ -543,6 +711,18 @@ class ReviewBoard:
         repair admission via admit_repair(): a "repair" verdict never
         authorizes any other admission kind.
         """
+        from swarm_engine.governance.caller_authorization import (
+            AgentDirectory, AuthorizationError, require_authorized)
+        from swarm_engine.governance.oracle_binding import (
+            DECISION_REPAIR_SUBMIT)
+        authed = require_authorized(
+            self.oregistry, AgentDirectory(self.oregistry), caller,
+            DECISION_REPAIR_SUBMIT, "verify_repair", target=repair_id)
+        if agent_id != authed:
+            raise AuthorizationError(
+                f"verify_repair refused: confused deputy -- claimed "
+                f"agent_id {agent_id!r} does not match authenticated "
+                f"caller {authed!r}")
         if not post_code:
             raise VerificationFailed("verify_repair: empty repaired code")
         if not repair_id:
@@ -575,17 +755,30 @@ class ReviewBoard:
         return row
 
 
-    def admit_repair(self, repair_id: str, engine_handle: Any) -> str:
+    def admit_repair(self, repair_id: str, caller: Any = None) -> str:
         """Admit an independently verified repair. Returns decision_id.
 
-        Requires a live engine handle AND a stored admitted independent
-        verdict (artifact_kind="repair") for the EXACT post-repair bytes
-        recorded at verify time: verification cannot be skipped, and a
-        verdict for bytes X never authorizes different bytes Y (this is
-        what makes rollback-to-unverified and wrong-bytes attacks fail).
-        Trust is derived from the stored verdict row only.
+        caller: REQUIRED -- the caller must hold 'agent:repair_apply'
+        (token-authenticated). This replaces the old engine-handle check:
+        the engine still qualifies (root authorizations), but now an
+        authorized AGENT can also admit a repair -- and no unauthenticated
+        or unauthorized caller can. A bare handle object with a forged
+        producer_id no longer passes: authentication is by token.
+
+        Requires a stored admitted independent verdict
+        (artifact_kind="repair") for the EXACT post-repair bytes recorded
+        at verify time: verification cannot be skipped, and a verdict for
+        bytes X never authorizes different bytes Y (this is what makes
+        rollback-to-unverified and wrong-bytes attacks fail). Trust is
+        derived from the stored verdict row only.
         """
-        _require_engine(engine_handle)
+        from swarm_engine.governance.caller_authorization import (
+            AgentDirectory, require_authorized)
+        from swarm_engine.governance.oracle_binding import (
+            DECISION_REPAIR_APPLY)
+        authed = require_authorized(
+            self.oregistry, AgentDirectory(self.oregistry), caller,
+            DECISION_REPAIR_APPLY, "admit_repair", target=repair_id)
         rec = self.get_repair_record(repair_id)
         if rec.get("admission_decision_id"):
             raise LifecycleError(
@@ -604,6 +797,7 @@ class ReviewBoard:
             None, "ACCEPT", "repair_admission",
             {"repair_id": repair_id,
              "agent_id": rec["agent_id"],
+             "admitted_by": authed,
              "pre_digest": rec["pre_digest"],
              "post_digest": rec["post_digest"],
              "verdict_execution_id": vrow.get("execution_id"),
@@ -648,6 +842,22 @@ class ReviewBoard:
             raise VerificationFailed(
                 f"work product {wp_id}: accept refused -- no admitted "
                 f"independent verdict on record (review first)")
+        # D2 repair (verdict authorization), layered from the loopwiring
+        # fork: the row must have been produced by the authorized
+        # verification procedure. A chain-valid forged row (raw SQL,
+        # verifier != VERIFIER_ID, never produced by the independent
+        # validator) is refused here, mirroring require_admitted_verdict.
+        # Full delegation to require_admitted_verdict is NOT clean: it
+        # resolves the row by (code_digest, artifact_kind), while accept()
+        # must bind the verdict to THIS work product -- a digest-scoped
+        # lookup would let an admitted verdict for byte-identical code from
+        # another work product authorize this one (and would break the
+        # deleted-verdict refusal).
+        if row.get("verifier") != VERIFIER_ID:
+            raise VerificationFailed(
+                f"work product {wp_id}: accept refused -- verdict row not "
+                f"produced by the authorized verification procedure "
+                f"(verifier={row.get('verifier')!r})")
         current_code = wp.artifacts[0].get("code", "") if wp.artifacts else ""
         if row.get("code_digest") != digest(current_code):
             raise VerificationFailed(

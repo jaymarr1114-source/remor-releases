@@ -13,7 +13,7 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pylib"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "pylib"))
 
 from swarm_engine.core.engine import SwarmEngine
 from swarm_engine.synthesis.admission import Verdict
@@ -40,17 +40,17 @@ GOAL = "add two numbers together"
 def main():
     db = os.path.join(tempfile.mkdtemp(prefix="causal_", dir=SCRATCH), "eng.db")
     eng = SwarmEngine(db_path=db)
-    r = eng.admission.admit(goal=GOAL, plan=dict(ADD_PLAN))
+    r = eng.admission.admit(goal=GOAL, plan=dict(ADD_PLAN), caller=eng.oracle)
     assert r.verdict == Verdict.ADMITTED
     cap_id = r.capability_id
-    quarantine_everywhere(eng, cap_id, "causal test")
+    quarantine_everywhere(eng, cap_id, "causal test", caller=eng.oracle)
 
     real_pred = CapabilityStore._quarantine_was_deliberate
 
     # -- guard inert (pre-guard behavior): silent resurrection happens --
     CapabilityStore._quarantine_was_deliberate = lambda self, cid: False
     try:
-        r2 = eng.admission.admit(goal=GOAL, plan=dict(ADD_PLAN))
+        r2 = eng.admission.admit(goal=GOAL, plan=dict(ADD_PLAN), caller=eng.oracle)
         resurrected = (r2.verdict == Verdict.ADMITTED
                        and eng.capabilities.get(cap_id).status == "active"
                        and eng.primitives.get(f"acquired.{cap_id}") is not None)
@@ -68,8 +68,8 @@ def main():
 
     # -- guard active: re-admission refused, primitive stays dead --
     # (re-quarantine deliberately: the inert run left store active)
-    quarantine_everywhere(eng, cap_id, "causal test re-quarantine")
-    r3 = eng.admission.admit(goal=GOAL, plan=dict(ADD_PLAN))
+    quarantine_everywhere(eng, cap_id, "causal test re-quarantine", caller=eng.oracle)
+    r3 = eng.admission.admit(goal=GOAL, plan=dict(ADD_PLAN), caller=eng.oracle)
     check("causal: guard active -> identical re-admission REJECTED",
           r3.verdict == Verdict.REJECTED, f"verdict={r3.verdict}")
     check("causal: primitive stays unregistered",

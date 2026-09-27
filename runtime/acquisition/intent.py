@@ -42,6 +42,38 @@ _EFFECT_LEXICON: List[Tuple[str, Tuple[str, ...]]] = [
         r"\brun test\b", r"\brun the test\b", r"\bexecute test\b",
         r"\brun python\b", r"\bpytest\b", r"\bpython -m\b",
     )),
+    # Media-generation intents (worker E, 2026-09-26). Cue -> effect tokens
+    # only; routing of concrete phrasings goes through the capability
+    # store's exact goal bindings. Effect values are plain strings (like
+    # "write_fs") and flow through acquisition as string sets -- they are
+    # never converted to the Effect enum, so new values are safe.
+    ("media_voice", (
+        r"\bsynthesize speech\b", r"\btext.to.speech\b",
+        r"\btext (?:to|into) speech\b", r"\bspeak the text\b",
+        r"\bread aloud\b", r"\bread (?:this|the )?text aloud\b",
+        r"\bvoiceover\b", r"\bvoice-over\b", r"\bnarrat\w+\b",
+    )),
+    ("media_song", (
+        r"\bmake (?:me )?a song\b", r"\bcreate (?:me )?a song\b",
+        r"\bcompose (?:me )?a song\b", r"\bwrite (?:me )?a song\b",
+        r"\bsong about\b", r"\bsong for\b",
+    )),
+    ("media_image", (
+        r"\bgenerate (?:an? )?(?:\w+ )?image\b",
+        r"\bcreate (?:an? )?(?:\w+ )?image\b",
+        r"\bmake (?:an? )?(?:\w+ )?image\b",
+        r"\bgenerate (?:a )?(?:\w+ )?picture\b",
+        r"\bcreate (?:a )?(?:\w+ )?picture\b",
+        r"\bdraw (?:a )?picture\b", r"\btext.to.image\b",
+        r"\bimage of\b", r"\bpicture of\b",
+    )),
+    ("media_video", (
+        r"\bgenerate (?:a )?(?:\w+ )?video\b",
+        r"\bcreate (?:a )?(?:\w+ )?video\b",
+        r"\bmake (?:a )?(?:\w+ )?video\b",
+        r"\btext.to.video\b", r"\bvideo of\b", r"\bshort video\b",
+        r"\banimat\w*\b",
+    )),
 ]
 
 

@@ -275,7 +275,7 @@ def export_grounding_capability(lexicon: Any, engine: Any, predicate: str,
         except Exception:
             return False
 
-    verdict = engine.admission.admit(
+    verdict = engine.admit_as_engine(
         goal, plan, smoke=SmokeTest(args=dict(s_args), expect=s_expect),
         name=plan["name"], epistemic_standing=_epistemic_standing)
     if not verdict.ok:

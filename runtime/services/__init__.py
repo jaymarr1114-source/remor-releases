@@ -18,5 +18,8 @@ services/artifacts.py    -- artifact store: save/load/revisions + sandboxed
 Honest capability refusals:
 services/unavailable.py -- CapabilityUnavailable: the honest refusal type.
 services/voice.py       -- STT/TTS entry points (UNAVAILABLE: no substrate).
-services/media.py       -- image/video generation entry points (UNAVAILABLE).
+services/media.py       -- image/video generation entry points: the media
+  substrate has landed (runtime/media/); image and video admit and
+  generate where their substrate is present, and stay honestly
+  fail-closed (medium_not_admitted) where it is not.
 """

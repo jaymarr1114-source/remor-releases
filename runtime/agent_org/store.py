@@ -111,6 +111,36 @@ SCHEMAS: Dict[str, List[str]] = {
                           "diagnosis", "pre_digest", "post_digest",
                           "spec_digest", "verifier", "verdict_execution_id",
                           "admission_decision_id", "created_at"],
+    # --- repair lineage (Phase 4, 2026-09-25: repair versioning / conflict
+    # detection / rollback / quarantine) ---
+    # One row per repair-lifecycle event for a defect lineage. The
+    # lifecycle (repair_lifecycle.py) is the SOLE writer of status rows
+    # here; nothing else in runtime inserts into this table. post_code
+    # persists the EXACT independently-verified post bytes (copied from
+    # the ao_repair_records row's verified post bytes, never caller
+    # bytes), so a lawful rollback can re-apply bytes the ReviewBoard
+    # still binds a verdict to. target_path is the repaired file path
+    # taken from the repair's defect signature. The status history
+    # ("admitted" | "superseded" | "revoked" | "quarantined") is the
+    # lifecycle's authority on which repair version governs a
+    # defect_root; rows are append-only and hash-chained.
+    "ao_repair_lineage": ["lineage_id", "repair_id", "defect_root",
+                          "version", "supersedes_repair_id", "status",
+                          "post_code", "target_path", "decision_id",
+                          "recorded_by", "reason", "created_at"],
+    # --- repair submissions (Phase 4, 2026-09-25: submit -> admit byte
+    # retention) ---
+    # One row per repair submission carrying the EXACT post bytes the
+    # agent submitted for verification. The submit -> admit gap spans
+    # separate product calls (possibly separate processes), so the bytes
+    # must persist; ao_repair_records keeps only the post_digest. Bytes
+    # here are untrusted-by-construction: every consumer MUST check
+    # digest(post_code) == ao_repair_records.post_digest before use
+    # (any bytes hashing to the verdict-bound digest ARE the verified
+    # bytes; a mismatch refuses). The RepairService is the sole writer;
+    # rows are append-only and hash-chained.
+    "ao_repair_submissions": ["submission_id", "repair_id", "post_code",
+                              "post_digest", "submitted_by", "created_at"],
     # --- dispatch evidence (Track 3, 2026-09-25) ---
     # Canonical record of one real tool dispatch, attributable to the exact
     # agent + assignment that performed it. The evidence_json column carries

@@ -25,10 +25,35 @@ is preserved:
 * admission derives trust ONLY from that stored admitted verdict, exactly
   like promote()/record_l3().
 
-Bound (documented, not hidden): re-execution rebuilds the base primitive
-vocabulary via ``build_registry()``. A capability whose plan composes OTHER
-acquired capabilities (``acquired.<id>`` ops) cannot be re-executed this way
-and its dispatch evidence is refused at review -- fail closed.
+Bound (item 4, 2026-09-25): re-execution rebuilds the base primitive
+vocabulary via ``build_registry()`` AND reconstructs every acquired
+dependency from the evidence's recorded dependency closure. At capture,
+the dispatched plan's ``acquired.<id>`` references are walked
+transitively (depth cap 16; a dependency cycle refuses capture) and each
+dependency is recorded as ``{"capability_id", "version",
+"plan_fingerprint", "plan_json" (canonical)}`` in the evidence document's
+``dependency_closure`` field. At review, every closure entry is checked
+against the LIVE capability record (must exist, plan fingerprint must
+match, version must be current, ``effective_status`` must be active --
+a quarantined, stale, or tampered-with dependency refuses the evidence),
+the closure must cover every ``acquired.<id>`` ref of the top plan and of
+every entry's own plan (a missing entry refuses), and the sandbox
+registry is rebuilt as base primitives plus acquired wrappers
+reconstructed from the RECORDED plans in dependency-respecting (Kahn)
+order, mirroring ``AdmissionController._register_capability_as_primitive``
+'s closure semantics (``fn(**kw)`` -> nested
+``composer.execute_sync(recorded_plan, kw)``, raising on failure). The
+recomputed digests must be byte-identical to the recorded ones.
+
+Remaining bound (documented, not hidden): the closure walk uses the
+historical ``acquired.<id>``-prefix rule (``plan_acquired_refs`` without a
+live registry). Bare tagged names (acquired_code-path style aliases that
+resolve only through a live registry's tag index) are NOT closed over --
+a plan whose acquired composition is not covered by the recorded closure
+is refused at review, fail closed. Rows captured before this field
+existed carry no ``dependency_closure`` and are treated as an empty
+closure: base-primitive-only plans still verify; acquired-composing
+plans are refused exactly as before.
 """
 from __future__ import annotations
 
@@ -58,7 +83,11 @@ DISPATCH_KNOWLEDGE_REF_PREFIX = "dispatch_knowledge:"
 # This is fixed REVIEW-PROCEDURE code, not the artifact under review (the
 # artifact is the evidence document; its digest is what the verdict binds).
 # It runs in a real subprocess via run_code: it rebuilds the base primitive
-# vocabulary, re-executes the stored plan with the recorded canonical
+# vocabulary, reconstructs every acquired.<id> dependency from the RECORDED
+# closure plans (dependency-respecting Kahn order, mirroring
+# AdmissionController._register_capability_as_primitive's closure semantics:
+# fn(**kw) -> nested composer.execute_sync(recorded_plan, kw), raising on
+# failure), re-executes the stored plan with the recorded canonical
 # arguments, and returns the recomputed digests. The digest formulas are
 # byte-identical to NLToolDispatcher.dispatch()'s.
 #
@@ -66,9 +95,13 @@ DISPATCH_KNOWLEDGE_REF_PREFIX = "dispatch_knowledge:"
 # PYTHONPATH to the runtime tree before review (run_code inherits the
 # environment). If the import fails the harness raises, the case fails, and
 # the verdict is refused -- fail closed, never silently skipped.
+#
+# closure_json defaults to "[]" so legacy (pre-closure) evidence -- which
+# the review only ever submits for base-primitive-only plans -- keeps
+# working with the two-argument call shape.
 # ---------------------------------------------------------------------------
 _DISPATCH_REEXEC_HARNESS = '''
-def verify_dispatch(plan_json, args_json):
+def verify_dispatch(plan_json, args_json, closure_json="[]"):
     """Re-execute a stored capability plan; return recomputed digests.
 
     Total over string inputs: malformed plans/args produce a clean
@@ -85,12 +118,71 @@ def verify_dispatch(plan_json, args_json):
     try:
         plan = _json.loads(plan_json)
         args = _json.loads(args_json)
+        closure = _json.loads(closure_json)
     except Exception as exc:
         return _fail(f"malformed input: {exc}")
+    if not isinstance(closure, list):
+        return _fail("closure is not a list")
     try:
         from swarm_engine.primitives import build_registry
+        from swarm_engine.primitives.core import Primitive, Effect, ANY
         from swarm_engine.synthesis.composer import Composer
-        res = Composer(build_registry()).execute_sync(plan, args)
+        from swarm_engine.cognition.revocation import plan_acquired_refs
+        reg = build_registry()
+        composer = Composer(reg)
+        # Reconstruct acquired.<id> wrappers from the RECORDED closure
+        # plans (never from live state): the review already checked each
+        # entry against the live record; what executes here is exactly
+        # what capture recorded.
+        by_id = {}
+        for entry in closure:
+            if not isinstance(entry, dict):
+                return _fail("malformed closure entry")
+            cid = entry.get("capability_id")
+            cplan_json = entry.get("plan_json")
+            if not cid or not cplan_json:
+                return _fail("malformed closure entry")
+            try:
+                cplan = _json.loads(cplan_json)
+            except Exception as exc:
+                return _fail(f"malformed closure plan for {cid}: {exc}")
+            if not isinstance(cplan, dict):
+                return _fail(f"closure plan for {cid} is not an object")
+            by_id[cid] = cplan
+        remaining = set(by_id)
+        guard = 0
+        while remaining:
+            guard += 1
+            if guard > 10000:
+                return _fail("closure registration did not converge")
+            ready = [cid for cid in remaining
+                     if all(dep not in remaining
+                            for dep in plan_acquired_refs(by_id[cid])
+                            if dep in by_id)]
+            if not ready:
+                return _fail("dependency cycle in closure")
+            for cid in sorted(ready):
+                cplan = by_id[cid]
+                params = list((cplan.get("params") or {}).keys())
+
+                def _run(_plan=cplan, **kwargs):
+                    out = composer.execute_sync(dict(_plan), dict(kwargs))
+                    if not out.get("success"):
+                        raise RuntimeError(out.get(
+                            "error", "acquired capability execution failed"))
+                    return out.get("value")
+
+                reg.register(Primitive(
+                    name="acquired." + cid, family="acquired", fn=_run,
+                    inputs={p: ANY for p in params}, output=ANY,
+                    effects=(Effect.PURE,),
+                    doc="acquired capability " + cid), overwrite=True)
+                remaining.discard(cid)
+        if not hasattr(reg, "_acquired_capability_ids"):
+            reg._acquired_capability_ids = {}
+        for cid in by_id:
+            reg._acquired_capability_ids["acquired." + cid] = cid
+        res = composer.execute_sync(dict(plan), dict(args))
     except Exception as exc:
         return _fail(f"re-execution failed: {exc}")
     ok = isinstance(res, dict) and bool(res.get("success", False))
@@ -165,9 +257,17 @@ def build_evidence_doc(*, evidence_id: str, dispatch_id: str, ts: float,
                        plan_fingerprint: str, args: Dict[str, Any],
                        input_digest: str, result_value: Any,
                        result_digest: Optional[str], ok: bool,
-                       error: Optional[str]) -> str:
+                       error: Optional[str],
+                       dependency_closure: Optional[List[Dict[str, Any]]] = None) -> str:
     """Build the canonical evidence document (the byte string the verdict
-    binds to). Fixed field order; canonical() sorts keys anyway."""
+    binds to). Fixed field order; canonical() sorts keys anyway.
+
+    dependency_closure: the transitively collected acquired-dependency
+    closure (list of {"capability_id", "version", "plan_fingerprint",
+    "plan_json" (canonical)} dicts, sorted by capability_id). Rows
+    captured before this field existed carry no key at all; the review
+    treats a missing key as an empty closure.
+    """
     doc = {
         "evidence_id": evidence_id,
         "dispatch_id": dispatch_id,
@@ -186,8 +286,93 @@ def build_evidence_doc(*, evidence_id: str, dispatch_id: str, ts: float,
         "result_digest": result_digest,
         "ok": bool(ok),
         "error": error,
+        "dependency_closure": list(dependency_closure or []),
     }
     return canonical(doc)
+
+
+# Maximum transitive depth of the recorded acquired-dependency closure.
+# Deeper compositions are refused at capture (fail closed): the review
+# cannot re-derive what capture could not finitely record.
+_MAX_CLOSURE_DEPTH = 16
+
+
+def _build_dependency_closure(
+        engine: Any, top_plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Transitively collect the acquired-dependency closure of a plan.
+
+    Walks ``acquired.<id>`` references (``plan_acquired_refs``, prefix
+    rule) from the top plan through every dependency's own plan. Each
+    dependency is recorded as ``{"capability_id", "version",
+    "plan_fingerprint", "plan_json" (canonical)}`` from its LIVE record at
+    capture time; the review re-checks every entry against the live record
+    and re-executes from these recorded plans.
+
+    Fail-closed: a dependency cycle refuses capture; a dependency deeper
+    than ``_MAX_CLOSURE_DEPTH`` refuses capture; a dependency that vanished
+    between dispatch and capture refuses capture. Returns the entries
+    sorted by capability_id (deterministic document bytes).
+    """
+    from swarm_engine.cognition.revocation import plan_acquired_refs
+    from swarm_engine.synthesis.capability_store import plan_fingerprint
+
+    entries: Dict[str, Dict[str, Any]] = {}
+    visiting: List[str] = []
+
+    def _visit(cap_id: str, depth: int) -> None:
+        if depth > _MAX_CLOSURE_DEPTH:
+            raise ValueError(
+                "capture refused: acquired-dependency depth exceeds "
+                f"{_MAX_CLOSURE_DEPTH} at {cap_id!r} -- refused")
+        if cap_id in visiting:
+            raise ValueError(
+                "capture refused: acquired-dependency cycle at "
+                f"{cap_id!r} (chain {' -> '.join(visiting + [cap_id])}) "
+                "-- refused")
+        if cap_id in entries:
+            return
+        rec = engine.capabilities.get(cap_id)
+        if rec is None:
+            raise ValueError(
+                f"capture refused: acquired dependency {cap_id!r} vanished "
+                "between dispatch and capture -- refused")
+        plan_canonical = canonical(rec.plan)
+        entries[cap_id] = {
+            "capability_id": cap_id,
+            "version": str(rec.version),
+            "plan_fingerprint": plan_fingerprint(rec.plan),
+            "plan_json": plan_canonical,
+        }
+        visiting.append(cap_id)
+        try:
+            for child in sorted(plan_acquired_refs(rec.plan)):
+                _visit(child, depth + 1)
+        finally:
+            visiting.pop()
+
+    for root_dep in sorted(plan_acquired_refs(top_plan)):
+        _visit(root_dep, 1)
+    return [entries[cid] for cid in sorted(entries)]
+
+
+def get_dependency_closure(evidence: "DispatchEvidence") -> List[Dict[str, Any]]:
+    """Return the recorded dependency closure of an evidence record.
+
+    A missing ``dependency_closure`` key (rows captured before the field
+    existed) yields an empty closure -- the review then refuses
+    acquired-composing plans exactly as the legacy behavior did, while
+    base-primitive-only plans still verify.
+    """
+    try:
+        doc = json.loads(evidence.evidence_json)
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError("evidence document does not parse")
+    closure = doc.get("dependency_closure")
+    if closure is None:
+        return []
+    if not isinstance(closure, list):
+        raise ValueError("dependency_closure is not a list")
+    return closure
 
 
 def _operational_row(engine: Any, dispatch_id: str) -> Dict[str, Any]:
@@ -220,6 +405,11 @@ def capture_dispatch_evidence(engine: Any, store: Any, dispatch_id: str,
     second time in a subprocess.
 
     Returns the evidence_id. Raises on any inconsistency (fail closed).
+
+    The dispatched plan's acquired-dependency closure is recorded in the
+    evidence document (see _build_dependency_closure): a dependency cycle,
+    an over-deep composition, or a dependency that vanished between
+    dispatch and capture refuses the capture.
     """
     op = _operational_row(engine, dispatch_id)
     if not op["ok"]:
@@ -303,7 +493,12 @@ def capture_dispatch_evidence(engine: Any, store: Any, dispatch_id: str,
         route_score=route_score_s, capability_id=op["capability_id"],
         capability_version=cap_version_s, plan_fingerprint=fp,
         args=coerced, input_digest=input_digest, result_value=result_value,
-        result_digest=result_digest, ok=True, error=None)
+        result_digest=result_digest, ok=True, error=None,
+        # Dependency closure (item 4): transitively record every
+        # acquired.<id> dependency's plan at capture time so the review
+        # can re-derive compositions, not just base-primitive plans.
+        # Fail-closed: cycles / over-deep / vanished deps refuse capture.
+        dependency_closure=_build_dependency_closure(engine, rec.plan))
     store.insert("ao_dispatch_evidence", {
         "evidence_id": evidence_id, "dispatch_id": dispatch_id,
         "agent_id": agent_id, "assignment_id": assignment_id,

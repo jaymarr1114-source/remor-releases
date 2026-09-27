@@ -13,10 +13,17 @@ not become the engine itself.
 """
 from swarm_engine.services.run_control import checkpoint
 import json
+import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+from swarm_engine.core.db_ownership import (
+    _hatch_honored,
+    claim_db_ownership,
+)
 
 from swarm_engine.agents.base_agent import AgentRegistry
 from swarm_engine.core.arbitration import LocalArbitrator, ArbitrationTier
@@ -50,6 +57,7 @@ from swarm_engine.primitives import Governor, build_registry
 from swarm_engine.synthesis.admission import AdmissionController
 from swarm_engine.synthesis.acquisition_learning import AcquisitionLearner
 from swarm_engine.synthesis.capability_store import CapabilityStore, stable_code_id
+from swarm_engine.synthesis.capability_store import plan_fingerprint
 from swarm_engine.synthesis.composer import Composer
 from swarm_engine.synthesis.planner import Planner
 from swarm_engine.verification.pipeline import VerificationPipeline, basic_schema_check
@@ -67,12 +75,34 @@ class Task:
     plan: List[Dict[str, Any]] = field(default_factory=list)
 
 
+_log = logging.getLogger(__name__)
+
+
 class SwarmEngine:
     """Central SWarm authority for the recovered V6 patch architecture."""
 
     def __init__(self, db_path: str = "swarm_engine.db", agent_count: int = 1,
                  governor: Optional[Governor] = None,
-                 budget: Optional[ResourceBudget] = None):
+                 budget: Optional[ResourceBudget] = None,
+                 _test_allow_shared: bool = False):
+        # D11 single-owner architecture: exactly one live SwarmEngine per
+        # database file per process (plus a cross-process owner lock on
+        # <db>.owner.lock). A second construction on an already-owned path
+        # raises DuplicateEngineError HERE -- fail-closed at construction,
+        # before any sqlite work, so no split-brain can form.
+        #
+        # _test_allow_shared is the ONLY bypass and is provably test-only:
+        # it is honored only when REMOR_TEST_MODE=1 is set AND the db path
+        # is under the system temp dir (see _hatch_honored); otherwise the
+        # flag is ignored and the claim proceeds. Production code can never
+        # use it to construct the two-engines-one-DB state.
+        self._ownership = None
+        if not (_test_allow_shared and _hatch_honored(db_path)):
+            self._ownership = claim_db_ownership(
+                db_path, self, owner_desc="SwarmEngine")
+        # Explicit thread-affinity: the engine (and its oracle registry's
+        # sqlite connection) belongs to the constructing thread.
+        self._owner_thread = threading.get_ident()
         self.db_path = db_path
         self.projects_dir = "/tmp/swarm_projects"
         import os as _os
@@ -434,12 +464,73 @@ class SwarmEngine:
         self.tasks: Dict[str, Task] = {}
         self.ready = False
         self._next_id = 1
+        # Acquisition-loop wiring: the engine's own ReviewBoard org (lazy;
+        # see ensure_review_board) so NEW acquisitions can be promoted
+        # through a live verdict binding rather than the legacy
+        # sandbox-direct registration. Kill-switch for the causal test:
+        # setting this to False makes the verdict path unavailable
+        # (fail-closed; no promotion happens through it).
+        self._review_org = None
+        self._verdict_promotion_enabled = True
+        # Adaptation-driver kill switch (causal negative): when False,
+        # adapt_capability refuses before doing anything.
+        self._adaptation_enabled = True
         # Auto-boot so acquired_code and admitted plan capabilities rehydrate
         # without requiring every caller to remember eng.boot().
         try:
             self.boot()
         except Exception as _boot_exc:
             self._boot_error = str(_boot_exc)
+
+    def admit_as_engine(self, *args: Any, **kwargs: Any) -> Any:
+        """Engine-attributed admission: the single choke point for every
+        engine-mediated AdmissionController.admit() call (acquisition
+        orchestrator, project bridges, competition, engine run paths).
+
+        The caller's identity is the engine itself -- minted fresh from the
+        live oracle handle's memory-only token and authorized against the
+        registry on every call (root 'agent:admit_capability'). This is
+        not ambient authority: the engine IS the trusted computing base
+        here, and the attribution is explicit at every call site (each
+        one names admit_as_engine), so the audit trail shows every
+        admission was authorized, and by whom.
+        """
+        from swarm_engine.governance.caller_authorization import (
+            _engine_caller_context)
+        kwargs.setdefault("caller", _engine_caller_context(self))
+        return self.admission.admit(*args, **kwargs)
+
+    def quarantine_as_engine(self, capability_id: str,
+                             reason: str) -> Any:
+        """Engine-attributed quarantine: the choke point for engine-
+        mediated quarantine_everywhere() calls. Same attribution
+        contract as admit_as_engine."""
+        from swarm_engine.governance.caller_authorization import (
+            _engine_caller_context)
+        from swarm_engine.synthesis.integrity import quarantine_everywhere
+        return quarantine_everywhere(
+            self, capability_id, reason,
+            caller=_engine_caller_context(self))
+
+    def close(self):
+        """Deterministically release this engine's DB ownership.
+
+        Releases the process-wide single-owner claim and the cross-process
+        owner lock, and closes the oracle registry's sqlite connection.
+        Idempotent. After close() the engine must not be used again --
+        construct a fresh engine to re-acquire ownership (this is the
+        honest in-process simulation of a process restart / ownership
+        handoff to another process).
+        """
+        ownership, self._ownership = self._ownership, None
+        if ownership is not None:
+            ownership.release()
+        registry = getattr(self, "oracle_registry", None)
+        if registry is not None:
+            try:
+                registry.close()
+            except Exception:
+                pass
 
     def boot(self):
         # Stored capabilities are plans over primitive names. If the vocabulary
@@ -726,19 +817,40 @@ class SwarmEngine:
 
                 if not synth["success"]:
                     # Synthesis over the primitive substrate found nothing.
-                    # Before failing the task outright, try acquisition: if the
-                    # caller supplied examples, this is exactly the case that
-                    # should trigger genuine capability growth rather than a
-                    # bare "no plan found" — goal -> gap -> candidate
-                    # generation -> independent test -> admit or report why not.
+                    # Gap-flow order: adaptation BEFORE fresh synthesis. A
+                    # retained near-miss capability is strictly cheaper to
+                    # adapt than a fresh candidate is to generate and
+                    # validate, it reuses already-admitted knowledge (the
+                    # adapted record is parented to its source in
+                    # provenance), and it is behaviorally gated at 1.0 on
+                    # the caller's examples by adapt_compatible plus the
+                    # same verdict-bound promotion fresh acquisitions use.
+                    # Only when adaptation refuses (adapted=False) do we
+                    # fall through to acquire_capability -- goal -> gap ->
+                    # adapt -> candidate generation -> independent test ->
+                    # admit or report why not.
                     examples = task.metadata.get("acquisition_examples")
                     acquired = None
                     if examples:
-                        acquired = await self.acquire_capability(
+                        adapted = self.adapt_capability(
                             task.task_type,
-                            task.metadata.get("goal_description", task.task_type),
                             list(examples),
-                            required_effects=task.metadata.get("required_effects"))
+                            name=task.task_type,
+                            required_effects=task.metadata.get(
+                                "required_effects"))
+                        if adapted.get("adapted"):
+                            acquired = adapted
+                        else:
+                            _log.info("gap flow: adaptation refused (%s); "
+                                      "falling through to acquisition",
+                                      adapted.get("reason"))
+                            acquired = await self.acquire_capability(
+                                task.task_type,
+                                task.metadata.get("goal_description",
+                                                  task.task_type),
+                                list(examples),
+                                required_effects=task.metadata.get(
+                                    "required_effects"))
                         self.failure_memory.record(
                             task.task_type,
                             synth["error"] if not (acquired and acquired.get("acquired"))
@@ -767,10 +879,14 @@ class SwarmEngine:
                     # capability's actual argument names (e.g. 'n').
                     task.metadata["acquisition"] = acquired
                     input_names = (acquired.get("spec") or {}).get("inputs") or ["input"]
+                    # The verdict-bound path registers under
+                    # acquired.<ref>_<digest>, not task.task_type: the direct
+                    # plan's op must be the name that is actually registered.
+                    plan_op = (acquired.get("promoted_name") or task.task_type)
                     direct_plan = {
                         "name": f"acq_{task.task_type}",
                         "params": {a: "any" for a in input_names},
-                        "steps": [{"id": "s1", "op": task.task_type,
+                        "steps": [{"id": "s1", "op": plan_op,
                                   "args": {a: {"$param": a} for a in input_names}}],
                         "output": {"$step": "s1"},
                     }
@@ -783,7 +899,7 @@ class SwarmEngine:
                                 "state": task.state,
                                 "arbitration": task.metadata["arbitration"],
                                 "acquisition": acquired, "error": task.error}
-                    verdict = self.admission.admit(task.task_type, direct_plan)
+                    verdict = self.admit_as_engine(task.task_type, direct_plan)
                     if not verdict.ok:
                         task.state = "synthesis_failed"
                         task.error = f"acquired capability failed admission: {verdict.stage}"
@@ -796,7 +912,7 @@ class SwarmEngine:
                     task.metadata["synthesis"] = {
                         "success": True, "goal": task.task_type,
                         "capability_id": verdict.capability_id,
-                        "strategy": "acquired", "primitives_used": [task.task_type]}
+                        "strategy": "acquired", "primitives_used": [plan_op]}
                 else:
                     task.metadata["synthesis"] = synth
                     decision.matched_capability = synth["capability_id"]
@@ -1063,6 +1179,19 @@ class SwarmEngine:
 
         Fail closed (#4): non-empty required_effects with no compatible
         declared effects must not silently register as PURE.
+
+        TWO REGISTRATION LINEAGES (explicit, do not conflate):
+        * The verdict-bound pipeline: acquire_capability(..., verdict_promote=True)
+          -> _verdict_promote_acquired -> VerdictPromotionBridge.promote().
+          This is the autonomous acquisition->promotion pipeline for NEW
+          acquisitions: the capability reaches the planner ONLY through a
+          ReviewBoard verdict bound to the exact admitted bytes, and the
+          verdict path deliberately does NOT call this method -- one trust
+          story per acquisition.
+        * This method (_register_acquired) remains ONLY for (a) boot-time
+          rehydration of persisted code (rehydrate_acquired) and (b) the
+          AcquisitionPipeline's internal registrar (self.acquisition is
+          constructed with registrar=self._register_acquired).
         """
         from swarm_engine.primitives.core import ANY, STR, Effect
 
@@ -1094,6 +1223,20 @@ class SwarmEngine:
         # capability over a different argument, and it then fails at call time
         # looking like a broken implementation rather than a broken signature.
         names = list(input_names or ["text"])
+        # Same-process re-acquire (D-LINK-9): a capability that was
+        # acquired, revoked/deleted, and re-acquired without a process
+        # restart still has its primitive registered under this name, and
+        # define() below would raise ValueError("already registered").
+        # The _acquired_capability_ids tag proves whether the existing
+        # registration is the SAME capability re-registering (safe to
+        # replace) or a different claimant (genuine collision: the
+        # ValueError below is preserved, fail closed).
+        if name in self.primitives:
+            tag_index = getattr(self.primitives, "_acquired_capability_ids",
+                                None)
+            if isinstance(tag_index, dict) \
+                    and tag_index.get(name) == capability_id:
+                self.primitives.unregister(name)
         self.primitives.define(
             name=name, family="acquired",
             inputs={n: ANY for n in names}, output=ANY, effects=effects)(wrapped)
@@ -1107,6 +1250,472 @@ class SwarmEngine:
                 self.primitives._acquired_capability_ids = tag_index
             tag_index[name] = capability_id
         return name in self.primitives
+
+    def ensure_review_board(self):
+        """Return this engine's ReviewBoard, booting its backing org lazily.
+
+        The org is a REAL RemorOrganization (no mocks) in
+        <engine-db-dir>/acquisition_review, with explicit anchor genesis on
+        first boot and re-attach on later boots -- the deploy_org pattern.
+        Every legitimate store write is re-anchored (auto-anchor), so the
+        verdict chain the bridge later gates on stays anchored.
+
+        The org is booted once and cached in self._review_org. On ANY
+        exception, log and return None (fail-closed; the caller must handle
+        None by refusing verdict-bound promotion, never by falling back to
+        a weaker registration).
+        """
+        if self._review_org is not None:
+            return self._review_org.review
+        try:
+            import os as _os
+            from swarm_engine.agent_org.org import RemorOrganization
+            from swarm_engine.governance.anchor import collect_anchor_heads
+            from swarm_engine.governance.oracle_binding import (
+                ENGINE_PRODUCER_ID,
+            )
+            base_dir = _os.path.dirname(self.db_path) or "."
+            workdir = _os.path.join(base_dir, "acquisition_review")
+            _os.makedirs(workdir, exist_ok=True)
+            org = RemorOrganization.boot(workdir)
+            eng_caller = org.oregistry.engine_handle()
+            # Genesis is explicit-only: a fresh workdir gets exactly one;
+            # a re-attach (existing journal, heads verified at boot) reuses it.
+            if not org.anchor.journal_exists():
+                org.anchor.initialize(
+                    collect_anchor_heads(org.store, org.oregistry),
+                    ENGINE_PRODUCER_ID, caller=eng_caller)
+            # Auto-anchor: re-anchor the journal tip after every legitimate
+            # store write, exactly like the deploy_org harness pattern.
+            store, oreg, anchor = org.store, org.oregistry, org.anchor
+
+            def _anchor_now():
+                anchor.anchor(
+                    collect_anchor_heads(store, oreg), reason="verdict",
+                    authority=ENGINE_PRODUCER_ID, caller=eng_caller)
+
+            orig_insert = store.insert
+
+            def insert_and_anchor(table, fields):
+                seq = orig_insert(table, fields)
+                _anchor_now()
+                return seq
+
+            store.insert = insert_and_anchor
+            orig_chained = oreg._insert_chained
+
+            def chained_and_anchor(table, fields):
+                res = orig_chained(table, fields)
+                _anchor_now()
+                return res
+
+            oreg._insert_chained = chained_and_anchor
+            self._review_org = org
+            return org.review
+        except Exception as exc:
+            _log.warning("ensure_review_board: ReviewBoard unavailable: "
+                         "%s: %s", type(exc).__name__, exc)
+            return None
+
+    @staticmethod
+    def _output_typespec_for(output_kind) -> Any:
+        """Map a spec output_kind string ("int", "str", ...) to a TypeSpec.
+
+        Defaults to ANY when the kind is unknown -- the planner's
+        type-directed search treats ANY as the honest "unknown" rather than
+        a type-lie.
+        """
+        from swarm_engine.primitives.core import ANY, Kind, TypeSpec
+        try:
+            return TypeSpec(Kind(str(output_kind or "").lower()))
+        except ValueError:
+            return ANY
+
+    def _verdict_promote_acquired(self, candidate, spec, examples, name):
+        """Promote an admitted candidate through a live verdict binding.
+
+        Runs the REAL ReviewBoard verification (IndependentValidator in a
+        subprocess; verdict bound to digest(candidate.code), kind
+        "synthesis") and, on admission, registers the candidate with the
+        VerdictPromotionBridge, which re-derives the verdict at promotion
+        time and re-verifies the wired primitive against the caller's
+        examples.
+
+        Returns the registered primitive name
+        (acquired.<ref>_<digest[:12]>) on success, None on ANY failure
+        (kill-switch off, no ReviewBoard, verdict not admitted, bridge
+        refusal, unexpected exception) -- fail-closed throughout.
+        """
+        if not self._verdict_promotion_enabled:
+            return None
+        try:
+            from swarm_engine.primitives.core import ANY, Effect
+            from swarm_engine.acquisition.semantic import Case
+            from swarm_engine.capability.verdict_promotion import (
+                VerdictPromotionBridge,
+            )
+            review = self.ensure_review_board()
+            if review is None:
+                _log.warning("_verdict_promote_acquired(%r): ReviewBoard "
+                             "unavailable", name)
+                return None
+            # Fail-closed (#4) parity with the legacy registrar: a
+            # required-effects demand with no compatible declared effects
+            # must not silently register as PURE.
+            declared = list(getattr(candidate, "declared_effects", None) or [])
+            req_eff = list(getattr(spec, "required_effects", None) or [])
+            if req_eff and not declared:
+                _log.warning("_verdict_promote_acquired(%r): required "
+                             "effects %r but candidate declares none",
+                             name, req_eff)
+                return None
+            if req_eff and not set(req_eff).issubset(set(declared)):
+                _log.warning("_verdict_promote_acquired(%r): candidate "
+                             "effects %r do not cover required %r",
+                             name, declared, req_eff)
+                return None
+            cases = [Case(args=dict(args), expect=expected,
+                          kind="positive", label=f"acq_{name}_{i}")
+                     for i, (args, expected) in enumerate(examples or [])]
+            self.budget.spend(sandbox_runs=1)
+            verdict = review.verify_artifact(
+                candidate.code, candidate.entrypoint, spec, cases,
+                artifact_ref=f"acq_{name}")
+            if not getattr(verdict, "admitted", False):
+                _log.warning("_verdict_promote_acquired(%r): verdict not "
+                             "admitted: %r", name,
+                             getattr(verdict, "reasons", None))
+                return None
+            input_names = list(getattr(spec, "input_names", None) or [])
+            inputs = {n: ANY for n in input_names} or {"input": ANY}
+            output_spec = self._output_typespec_for(
+                getattr(spec, "output_kind", None))
+            # Declare effects honestly from the candidate's own declaration.
+            # The bridge's PURE-claim screen is heuristic; a PURE default
+            # applies ONLY when the candidate declares nothing, matching the
+            # legacy registrar's behaviour.
+            effects = tuple(e for e in Effect if e.value in declared) \
+                or (Effect.PURE,)
+            bridge = VerdictPromotionBridge(registry=self.primitives,
+                                            review=review)
+            # The bridge's wired-primitive re-verification: the DECLARED
+            # wiring (entrypoint -> primitive fn) must compute the declared
+            # behaviour on the caller's own examples.
+            bridge_examples = [(dict(args), (lambda v, e=expected: v == e))
+                               for args, expected in (examples or [])]
+            promoted_name = bridge.promote(
+                candidate.code, artifact_ref=f"acq_{name}",
+                inputs=inputs, output=output_spec,
+                entrypoint=candidate.entrypoint, effects=effects,
+                examples=bridge_examples)
+            return promoted_name
+        except Exception as exc:
+            _log.warning("_verdict_promote_acquired(%r) failed: %s: %s",
+                         name, type(exc).__name__, exc)
+            return None
+
+    def adapt_capability(self, goal: str,
+                         examples: List[Tuple[Dict[str, Any], Any]],
+                         name: Optional[str] = None,
+                         required_effects: Optional[List[str]] = None
+                         ) -> Dict[str, Any]:
+        """Autonomous adaptation driver: reuse a retained near-miss
+        capability instead of synthesizing a fresh one.
+
+        Ordering decision (documented): this is tried BEFORE fresh
+        synthesis in the gap flow, because (a) it is strictly cheaper --
+        no candidate generation and no per-candidate validation gauntlet;
+        (b) it reuses retained, already-admitted knowledge, whose lineage
+        is carried in parent_id provenance (the bicycle-transfer
+        persistence); and (c) it is behaviorally gated at 1.0 twice:
+        adapt_compatible only proposes adaptations that reproduce ALL
+        caller examples, and a proposal reaches the planner ONLY through
+        the EXACT verdict-bound promotion path fresh acquisitions use
+        (_verdict_promote_acquired). Trust is not weakened anywhere on
+        this route, and no new trust code is introduced.
+
+        Contract:
+          - kill switch: self._adaptation_enabled False ->
+            {"adapted": False, "reason": "adaptation disabled"} before
+            anything else (causal negative).
+          - exact-compatible check FIRST: any active record whose plan
+            reproduces ALL caller examples behaviorally at 1.0 is
+            returned as {"adapted": False, "matched": <capability_id>,
+            ...} -- adaptation is for near-misses, not exact hits.
+          - adaptation: adapt_compatible(records, goal, examples,
+            self.composer, registry=self.primitives). Empty proposals ->
+            {"adapted": False, "reason": ...} naming the refusal.
+          - admission + promotion per proposal (first wins): render the
+            adapted plan to standalone source via render_plan_to_source;
+            build a candidate (code/entrypoint="run"/declared_effects from
+            the SOURCE record -- honest, because adaptation changes only
+            bound constants, never ops); build a CapabilitySpec; call the
+            exact proven path self._verdict_promote_acquired. It returns
+            the promoted name or None -- fail closed.
+          - persistence: on success a NEW CapabilityRecord with
+            parent_id=<source capability_id> and the derived_from
+            substitution recorded in the capability events log, then
+            bind_goal(goal, new_id). The adapted record stays active for
+            future adaptation.
+          - success result carries "acquired": True, "promoted_name" and
+            "spec" (with "inputs") so the gap flow's direct-plan block
+            works unchanged.
+          - fail-closed throughout: every exception is logged and yields
+            {"adapted": False}; a render failure yields adapted=False for
+            that proposal; NEVER falls back to direct registration.
+        """
+        # Kill switch first: the causal negative. When disabled, nothing
+        # is read, rendered, or promoted.
+        if not self._adaptation_enabled:
+            return {"adapted": False, "acquired": False,
+                    "reason": "adaptation disabled"}
+        try:
+            from swarm_engine.synthesis.capability_match import (
+                adapt_compatible, behavioral_score)
+            from swarm_engine.synthesis.codegen import (
+                CodegenError, render_plan_to_source)
+            from swarm_engine.synthesis.capability_store import (
+                CapabilityRecord)
+            from swarm_engine.acquisition.strategies import CapabilitySpec
+            from types import SimpleNamespace
+        except Exception as exc:
+            _log.warning("adapt_capability: driver imports unavailable: "
+                         "%s: %s", type(exc).__name__, exc)
+            return {"adapted": False, "acquired": False,
+                    "reason": ("adaptation driver unavailable: "
+                               f"{type(exc).__name__}")}
+        try:
+            goal = str(goal or "")
+            examples = list(examples or [])
+            if not goal or not examples:
+                return {"adapted": False, "acquired": False,
+                        "reason": ("no goal or no examples supplied; "
+                                   "adaptation requires behavioural evidence "
+                                   "to verify against")}
+            adapt_name = name or ("adapted_" + "".join(
+                c if (c.isalnum() or c == "_") else "_" for c in
+                goal.strip().lower().replace(" ", "_"))[:40].strip("_")
+                or "unnamed")
+
+            records = self.capabilities.list(status="active", limit=200)
+
+            # 1. Exact-compatible check FIRST: adaptation is for
+            # near-misses, not exact hits.
+            for rec in records:
+                try:
+                    score, _ = behavioral_score(rec, examples, self.composer)
+                except Exception:
+                    continue
+                if score >= 1.0:
+                    return {
+                        "adapted": False, "acquired": False,
+                        "matched": rec.capability_id,
+                        "reason": (f"exact-compatible capability "
+                                   f"{rec.capability_id!r} already reproduces "
+                                   f"all {len(examples)} caller examples; "
+                                   f"adaptation not attempted"),
+                    }
+
+            # 2. Adaptation: near-miss proposals, behaviorally verified at
+            # 1.0 on the caller's examples by adapt_compatible itself.
+            proposals = adapt_compatible(records, goal, examples,
+                                         self.composer,
+                                         registry=self.primitives)
+            if not proposals:
+                return {"adapted": False, "acquired": False,
+                        "reason": self._adaptation_refusal_reason(
+                            records, goal, examples)}
+
+            # 3. Admission + promotion per proposal. First wins: every
+            # proposal is already behaviorally 1.0 on the caller examples
+            # at the plan level (adapt_compatible's guarantee), so the
+            # ordering among them is not a correctness axis -- the first
+            # that survives the full verdict-bound promotion on the
+            # RENDERED artifact wins. Promotion itself is the behavioral
+            # gate on the rendered bytes (the bridge re-verifies the wired
+            # primitive against the caller's examples), so a later
+            # proposal is only tried when an earlier one genuinely failed
+            # promotion, never as a silent downgrade.
+            last_reason = None
+            for prop in proposals:
+                source = None
+                try:
+                    source = self.capabilities.get(prop.derived_from)
+                except Exception as exc:
+                    _log.warning("adapt_capability: source lookup for %r "
+                                 "failed: %s: %s", prop.derived_from,
+                                 type(exc).__name__, exc)
+                if source is None or source.status != "active":
+                    last_reason = (f"source capability {prop.derived_from!r} "
+                                   f"not active; proposal skipped")
+                    continue
+                try:
+                    source_code, _meta = render_plan_to_source(
+                        prop.plan, self.primitives,
+                        purpose=(f"adaptation of {prop.derived_from}: "
+                                 f"bound-constant substitution "
+                                 f"{dict(prop.substitution)} for goal "
+                                 f"{goal!r}"))
+                except CodegenError as exc:
+                    _log.warning("adapt_capability: adapted plan from %r "
+                                 "not renderable (fail closed): %s",
+                                 prop.derived_from, exc)
+                    last_reason = (f"render failed for adapted plan from "
+                                   f"{prop.derived_from!r}: {exc}")
+                    continue
+                except Exception as exc:
+                    _log.warning("adapt_capability: render of adapted plan "
+                                 "from %r failed: %s: %s",
+                                 prop.derived_from, type(exc).__name__, exc)
+                    last_reason = (f"render error for adapted plan from "
+                                   f"{prop.derived_from!r}: "
+                                   f"{type(exc).__name__}")
+                    continue
+
+                # The candidate carries the SOURCE record's declared
+                # effects, honestly: adaptation changes only bound
+                # constants, never ops, so the effect footprint is the
+                # source's footprint.
+                candidate = SimpleNamespace(
+                    code=source_code, entrypoint="run",
+                    declared_effects=list(source.effects or []),
+                    source=f"adaptation:{prop.derived_from}",
+                    notes=(f"adapted {prop.derived_from} "
+                           f"{dict(prop.substitution)}"))
+                # Example args are aligned to the ADAPTED plan's param
+                # names (adapt_compatible only aligns in the unambiguous
+                # 1-param/1-arg case); the verdict and the bridge then
+                # verify the artifact under the names it actually runs
+                # under.
+                aligned_examples = list(examples)
+                if prop.arg_alignment:
+                    mapping = dict(prop.arg_alignment)
+                    aligned_examples = [
+                        ({mapping.get(k, k): v for k, v in args.items()},
+                         expected)
+                        for args, expected in examples]
+                input_names = list((prop.plan or {}).get("params") or {})
+                spec = CapabilitySpec(
+                    name=adapt_name, description=goal,
+                    examples=aligned_examples,
+                    input_names=input_names,
+                    output_kind=type(examples[0][1]).__name__,
+                    required_effects=list(required_effects or []))
+                promoted_name = self._verdict_promote_acquired(
+                    candidate, spec, aligned_examples, adapt_name)
+                if not promoted_name:
+                    _log.warning("adapt_capability: verdict-bound promotion "
+                                 "refused for adapted plan from %r "
+                                 "(fail closed)", prop.derived_from)
+                    last_reason = (f"verdict-bound promotion refused for "
+                                   f"adapted plan from {prop.derived_from!r}")
+                    continue
+
+                # 4. Persistence (provenance): a NEW record -- the adapted
+                # capability is its own lineage entry, parented to the
+                # source, retained active for future adaptation.
+                new_id = plan_fingerprint(prop.plan)
+                ops = sorted({str(s.get("op"))
+                              for s in (prop.plan.get("steps") or [])
+                              if isinstance(s, dict) and s.get("op")})
+                record = CapabilityRecord(
+                    capability_id=new_id, name=adapt_name, goal=goal,
+                    plan=prop.plan, ops=ops,
+                    effects=list(source.effects or []),
+                    parent_id=prop.derived_from, status="active")
+                try:
+                    self.capabilities.store(record)
+                except Exception as exc:
+                    _log.warning("adapt_capability: storing adapted record "
+                                 "failed (fail closed): %s: %s",
+                                 type(exc).__name__, exc)
+                    return {"adapted": False, "acquired": False,
+                            "reason": ("adapted plan promoted but the new "
+                                       "record could not be stored; refusing "
+                                       "to report success without "
+                                       f"persistence: {type(exc).__name__}")}
+                self.capabilities.log(new_id, "adapted_from", json.dumps({
+                    "parent_id": prop.derived_from,
+                    "substitution": {str(k): v
+                                    for k, v in prop.substitution.items()},
+                    "behavioral": prop.behavioral,
+                    "arg_alignment": prop.arg_alignment,
+                    "reasons": list(prop.reasons or []),
+                    "promoted_name": promoted_name})[:2000])
+                self.provenance.record(ProvenanceRecord(
+                    capability_id=new_id, origin=Origin.DERIVED,
+                    trust=TrustLevel.TESTED,
+                    source=f"adaptation:{prop.derived_from}",
+                    parents=[prop.derived_from],
+                    primitives_used=ops,
+                    effects=list(source.effects or [])))
+                self.provenance.log(
+                    new_id, "adapted",
+                    f"derived_from={prop.derived_from} "
+                    f"substitution={dict(prop.substitution)} "
+                    f"promoted={promoted_name}")
+                self.capabilities.bind_goal(goal, new_id)
+                self._log_acquisition_attempt(
+                    goal, adapt_name, "adaptation", True,
+                    {"source_capability_id": prop.derived_from,
+                     "capability_id": new_id,
+                     "promoted_name": promoted_name,
+                     "substitution": {str(k): v
+                                      for k, v in prop.substitution.items()}})
+                return {"adapted": True, "acquired": True,
+                        "route": "adaptation",
+                        "name": adapt_name, "capability_id": new_id,
+                        "promoted_name": promoted_name,
+                        "source_capability_id": prop.derived_from,
+                        "substitution": {str(k): v
+                                         for k, v in prop.substitution.items()},
+                        "behavioral": prop.behavioral,
+                        "spec": spec.as_dict()}
+
+            return {"adapted": False, "acquired": False,
+                    "reason": (f"{len(proposals)} adaptation proposal(s) "
+                               f"produced but none survived verdict-bound "
+                               f"promotion" +
+                               (f": {last_reason}" if last_reason else ""))}
+        except Exception as exc:
+            _log.warning("adapt_capability(%r) failed: %s: %s",
+                         goal, type(exc).__name__, exc)
+            return {"adapted": False, "acquired": False,
+                    "reason": (f"adaptation driver error: "
+                               f"{type(exc).__name__}: {exc}")}
+
+    def _adaptation_refusal_reason(self, records, goal, examples) -> str:
+        """Name WHY adapt_compatible produced no proposals, so a refusal is
+        diagnostic rather than a bare empty list. Fail-closed naming only --
+        no new proposals are generated here."""
+        try:
+            from swarm_engine.synthesis.capability_match import (
+                extract_numbers, plan_bound_numbers)
+        except Exception:
+            return "adaptation produced no proposals"
+        if not examples:
+            return ("no examples supplied; adaptation cannot be "
+                    "behaviorally verified, so no proposal was made")
+        goal_nums = set(extract_numbers(goal))
+        if len(goal_nums) != 1:
+            return (f"goal carries {len(goal_nums)} distinct numbers; "
+                    f"adaptation requires exactly one target constant "
+                    f"(ambiguous or no target) -- no proposal was made")
+        (target,) = goal_nums
+        near_misses = 0
+        for rec in records:
+            if getattr(rec, "status", "active") != "active":
+                continue
+            bound = set(plan_bound_numbers(getattr(rec, "plan", None)))
+            if len(bound) == 1 and next(iter(bound)) != target:
+                near_misses += 1
+        if near_misses:
+            return (f"{near_misses} near-miss record(s) found, but no "
+                    f"adapted plan reproduced all {len(examples)} caller "
+                    f"examples at 1.0 -- adaptation refused")
+        return ("no near-miss capability: no active record carries exactly "
+                "one bound constant different from the goal's target "
+                "constant -- adaptation refused")
 
     def synthesize_and_admit(self, goal: str,
                              examples: List[Tuple[Dict[str, Any], Any]],
@@ -1140,7 +1749,7 @@ class SwarmEngine:
 
         from swarm_engine.synthesis.admission import SmokeTest
         first_args, first_expected = examples[0]
-        verdict = self.admission.admit(
+        verdict = self.admit_as_engine(
             goal, result.plan,
             smoke=SmokeTest(args=dict(first_args), expect=first_expected))
 
@@ -1509,7 +2118,8 @@ class SwarmEngine:
                                  examples: List[Tuple[Dict[str, Any], Any]],
                                  required_effects: Optional[List[str]] = None,
                                  constraints: Optional[Dict[str, Any]] = None,
-                                 acquisition_target: Optional[Dict[str, Any]] = None
+                                 acquisition_target: Optional[Dict[str, Any]] = None,
+                                 verdict_promote: bool = True
                                  ) -> Dict[str, Any]:
         """Build, independently validate, register and persist a capability
         the engine does not have.
@@ -1518,6 +2128,16 @@ class SwarmEngine:
         specification, then judged by the Arbiter on evidence produced by
         roles that did not write them. The generator has no channel through
         which to certify its own output.
+
+        verdict_promote (default True): the admitted candidate reaches the
+        planner through the verdict-bound pipeline (_verdict_promote_acquired
+        -> VerdictPromotionBridge) -- a live ReviewBoard verdict bound to
+        the exact admitted bytes, re-derived at promotion time -- instead of
+        the legacy sandbox-direct _register_acquired. When the verdict path
+        is unavailable or refuses, this fails closed: it does NOT fall back
+        to the legacy registration. Pass verdict_promote=False for the
+        legacy behaviour (e.g. environments where the ReviewBoard org cannot
+        boot).
         """
         from swarm_engine.acquisition.strategies import (
             CapabilitySpec, StrategySelector, SynthesizingSource,
@@ -1762,9 +2382,44 @@ class SwarmEngine:
                 effects=list(required_effects or [])))
             self.provenance.log(capability_id, "validated",
                                 json.dumps(verdict.evidence)[:480])
-            registered = self._register_acquired(name, candidate, capability_id,
-                                                 input_names=spec.input_names)
-            self.provenance.log(capability_id, "registered", f"as primitive {name!r}")
+            promoted_name = None
+            if verdict_promote:
+                promoted_name = self._verdict_promote_acquired(
+                    candidate, spec, examples, name)
+            if promoted_name:
+                # Verdict-bound promotion succeeded: the capability reaches
+                # the planner ONLY through the verdict-bound primitive. The
+                # legacy _register_acquired is deliberately NOT called here
+                # -- one trust story.
+                registered = True
+                self.provenance.log(capability_id, "promoted",
+                                    f"verdict-bound as {promoted_name}")
+                self.provenance.log(capability_id, "registered",
+                                    f"as primitive {promoted_name!r}")
+            else:
+                if verdict_promote:
+                    # Verdict path failed or the ReviewBoard is unavailable:
+                    # fail closed. Do NOT fall back to the legacy
+                    # sandbox-direct registration in this mode -- the caller
+                    # asked for verdict-bound acquisition.
+                    outcome = {
+                        "acquired": False, "name": name,
+                        "reason": ("verdict-bound promotion failed or "
+                                   "ReviewBoard unavailable"),
+                        "spec": spec.as_dict(),
+                        "candidates_generated": len(candidates),
+                        "candidates_rejected": rejected,
+                        "rejection_log": rejection_log[:15],
+                        "evidence": verdict.evidence,
+                    }
+                    self._log_acquisition_attempt(name, name, "generation",
+                                                  False, outcome)
+                    return outcome
+                registered = self._register_acquired(
+                    name, candidate, capability_id,
+                    input_names=spec.input_names)
+                self.provenance.log(capability_id, "registered",
+                                    f"as primitive {name!r}")
             # Persist the source, not the callable: the capability must be
             # rebuildable from scratch in a later process, and re-scanned on
             # the way back in rather than trusted because it was trusted once.
@@ -1783,6 +2438,7 @@ class SwarmEngine:
             outcome = {
                 "acquired": True, "name": name, "capability_id": capability_id,
                 "registered": registered, "source": candidate.source,
+                "promoted_name": promoted_name,
                 "strategy": strategies[0].as_dict() if strategies else None,
                 "candidates_generated": len(candidates),
                 "candidates_rejected": rejected, "rejection_log": rejection_log[:15],
@@ -1873,7 +2529,7 @@ class SwarmEngine:
                                     f"(score {match.score:.2f})"] + match.against})
                     continue
 
-            verdict = self.admission.admit(goal, proposal.plan)
+            verdict = self.admit_as_engine(goal, proposal.plan)
             if verdict.ok:
                 self.capabilities.bind_goal(task.task_type, verdict.capability_id)
                 # A synthesized capability enters at TESTED: admission already
@@ -1924,6 +2580,29 @@ class SwarmEngine:
                 "success": False,
                 "capability_id": capability_id,
                 "error": "; ".join(problems) or f"capability {capability_id!r} unavailable",
+            }
+
+        # Admission -> execution binding (2026-09-27, Worker 2): defense
+        # in depth at the execution boundary itself. rehydrate() already
+        # verifies, but this boundary must not depend on a single
+        # upstream check -- if the stored plan does not fingerprint to
+        # the requested id, the bytes are unadmitted and must not run.
+        # This makes the engine path agree with nl_dispatch's
+        # "capability_tampered" refusal (parity gap closed).
+        try:
+            fp = plan_fingerprint(record.plan)
+        except Exception as exc:
+            return {
+                "success": False,
+                "capability_id": capability_id,
+                "error": f"capability_tampered: stored plan unreadable: {exc!r}",
+            }
+        if fp != capability_id:
+            return {
+                "success": False,
+                "capability_id": capability_id,
+                "error": "capability_tampered: stored plan does not fingerprint "
+                         "to its id; refusing to execute unadmitted bytes",
             }
 
         args = dict(task.payload)

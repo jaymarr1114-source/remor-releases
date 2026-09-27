@@ -31,19 +31,31 @@ class ProjectState(Enum):
     BLOCKED = "blocked"
     COMPLETE = "complete"
     FAILED = "failed"
+    # RETIRED is the locked Phase 2 internal archive: a project the user
+    # shelved. It is neither active nor destroyed -- the store model,
+    # lifecycle history, and progress are all preserved untouched, and
+    # retirement is one more append-only log row (never a deletion).
+    # Retirement is administrative: it is reachable from every work state.
+    # Resume re-enters at ANALYZING, the normal re-entry point for a
+    # project that must re-derive its plan from preserved state.
+    RETIRED = "retired"
 
 
 _TRANSITIONS: Dict[ProjectState, List[ProjectState]] = {
-    ProjectState.INGESTED: [ProjectState.ANALYZING],
-    ProjectState.ANALYZING: [ProjectState.PLANNING, ProjectState.BLOCKED],
-    ProjectState.PLANNING: [ProjectState.EXECUTING, ProjectState.BLOCKED],
+    ProjectState.INGESTED: [ProjectState.ANALYZING, ProjectState.RETIRED],
+    ProjectState.ANALYZING: [ProjectState.PLANNING, ProjectState.BLOCKED,
+                             ProjectState.RETIRED],
+    ProjectState.PLANNING: [ProjectState.EXECUTING, ProjectState.BLOCKED,
+                            ProjectState.RETIRED],
     ProjectState.EXECUTING: [ProjectState.VERIFYING, ProjectState.BLOCKED,
-                             ProjectState.ANALYZING],
+                             ProjectState.ANALYZING, ProjectState.RETIRED],
     ProjectState.VERIFYING: [ProjectState.COMPLETE, ProjectState.ANALYZING,
-                             ProjectState.FAILED],
-    ProjectState.BLOCKED: [ProjectState.ANALYZING, ProjectState.FAILED],
-    ProjectState.COMPLETE: [],
-    ProjectState.FAILED: [ProjectState.ANALYZING],
+                             ProjectState.FAILED, ProjectState.RETIRED],
+    ProjectState.BLOCKED: [ProjectState.ANALYZING, ProjectState.FAILED,
+                           ProjectState.RETIRED],
+    ProjectState.COMPLETE: [ProjectState.RETIRED],
+    ProjectState.FAILED: [ProjectState.ANALYZING, ProjectState.RETIRED],
+    ProjectState.RETIRED: [ProjectState.ANALYZING],
 }
 
 

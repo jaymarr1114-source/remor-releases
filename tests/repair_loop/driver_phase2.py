@@ -21,8 +21,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
     TRACK1, WORK, check, failfast, attach_org, digest,
-    engine_extract_examples, TechniqueSpec, CHECKS,
+    engine_extract_examples, TechniqueSpec, CHECKS, provision_caller,
 )
+from swarm_engine.governance.oracle_binding import (  # noqa: E402
+    DECISION_REPAIR_SUBMIT, DECISION_REPAIR_APPLY)
 import defects  # noqa: E402
 
 from swarm_engine.agent_org.substrates import CallableSubstrate  # noqa: E402
@@ -99,6 +101,11 @@ b = org.factory.create(
 B_ID, B_PRODUCER, B_WS = b.agent_id, b.producer_id, b.workspace_path
 check("B id differs from A", B_ID != A_ID and B_ID.startswith("agt_"))
 check("B producer differs from A", B_PRODUCER != A_PRODUCER)
+# Caller authorization: provision B Bearer <redacted> for repair
+# submission (agent:repair_submit); the engine operator registers it.
+B_TOKEN = provision_caller(org, B_ID, DECISION_REPAIR_SUBMIT,
+                           DECISION_REPAIR_APPLY)
+check("B caller credential provisioned", bool(B_TOKEN))
 check("B workspace fresh", os.path.isdir(B_WS) and B_WS != handoff1["agent_a"].get("workspace", ""))
 check("B substrate differs", b.substrate_id != handoff1["agent_a"]["substrate_id"])
 
@@ -217,7 +224,7 @@ spec2 = TechniqueSpec()  # placeholder, replaced below
 from common import FuncSpec, instance_cases  # noqa: E402
 REPAIR_B = "rep_" + digest(PRE2_DIGEST + POST2_DIGEST)[:16]
 verdict2 = org.review.verify_repair(
-    repair_id=REPAIR_B, agent_id=B_ID,
+    repair_id=REPAIR_B, agent_id=B_ID, caller=(B_ID, B_TOKEN),
     defect_signature={"family": "binary-operator",
                       "file": "stats.py", "function": "power",
                       "observed": "power() 3/3 examples fail; mul() correct",
@@ -243,7 +250,8 @@ check("B's repair record persisted", rec_b["repair_id"] == REPAIR_B)
 
 # ---------------------------------------------------------------- step 10
 # ENGINE admits B's repair (stored verdict only).
-decision2 = org.review.admit_repair(REPAIR_B, org.engine)
+decision2 = org.review.admit_repair(
+    REPAIR_B, caller=org.oregistry.engine_handle())
 check("B's repair admitted", decision2.startswith("dec_"))
 
 # ---------------------------------------------------------------- step 11

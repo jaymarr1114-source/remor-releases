@@ -338,7 +338,46 @@ class AnchorStore:
         # that "no journal yet" stays distinguishable from "empty journal"
         # (trust-on-first-use at boot).
         self.append_only_enforced = False
+        # Caller-authorization binding (agent↔REMOR authorization layer).
+        # When a registry is bound, journal WRITES (initialize/anchor/
+        # transition) require a token-authenticated caller holding
+        # 'agent:anchor_write', and the recorded authority label is the
+        # authenticated caller's id -- a passed authority string that
+        # disagrees is a confused-deputy attempt and is refused. When no
+        # registry is bound (operator CLI tooling), the legacy authority-
+        # string behavior applies; the journal's HMAC key file (0600) is
+        # the access control on that surface.
+        self._registry = None
         self._refresh_tip()
+
+    def bind_registry(self, registry: Any) -> "AnchorStore":
+        """Bind an OracleRegistry for caller authorization on writes."""
+        self._registry = registry
+        return self
+
+    def _authorize_write(self, caller: Any, authority: Optional[str],
+                         op: str) -> str:
+        """Resolve the recorded authority for a journal write.
+
+        Bound registry: caller is REQUIRED and must hold
+        'agent:anchor_write'; returns the authenticated caller id, refusing
+        a mismatched authority label. Unbound: legacy behavior -- the
+        passed authority string is used as-is (operator tooling)."""
+        if self._registry is None:
+            return authority or ""
+        from swarm_engine.governance.caller_authorization import (
+            AgentDirectory, AuthorizationError, require_authorized)
+        from swarm_engine.governance.oracle_binding import (
+            DECISION_ANCHOR_WRITE)
+        authed = require_authorized(
+            self._registry, AgentDirectory(self._registry), caller,
+            DECISION_ANCHOR_WRITE, op)
+        if authority is not None and authority != authed:
+            raise AuthorizationError(
+                f"{op} refused: confused deputy -- claimed authority "
+                f"{authority!r} does not match authenticated caller "
+                f"{authed!r}")
+        return authed
 
     # -- key management -------------------------------------------------
     def _load_keys(self) -> None:
@@ -497,25 +536,39 @@ class AnchorStore:
         return record["record_digest"]
 
     # -- writes ---------------------------------------------------------
-    def initialize(self, heads: Dict[str, str], authority: str) -> str:
+    def initialize(self, heads: Dict[str, str], authority: str,
+                   caller: Any = None) -> str:
         """Explicit deployment-time genesis (first-use capture).
 
         Writes exactly one genesis record committing the current heads.
         Refuses if the journal already has records. This is the ONLY
         genesis path: there is no lazy/implicit genesis anywhere.
+
+        With a bound registry, `caller` is REQUIRED (must hold
+        'agent:anchor_write') and the recorded authority is the
+        authenticated caller's id.
         """
-        if not isinstance(authority, str) or not authority.strip():
-            raise AnchorError(
-                "initialize requires a non-empty authority (operator id)")
+        if self._registry is not None:
+            if not isinstance(authority, str) or not authority.strip():
+                raise AnchorError(
+                    "initialize requires a non-empty authority (operator id)")
+            authority = self._authorize_write(caller, authority.strip(),
+                                              "initialize")
+        else:
+            if not isinstance(authority, str) or not authority.strip():
+                raise AnchorError(
+                    "initialize requires a non-empty authority (operator id)")
+            authority = authority.strip()
         clean = _check_heads(heads)
         self._refresh_tip()
         if self._next_seq != 1:
             raise AnchorError(
                 "initialize refused: journal already has records")
-        return self._append_record(clean, "genesis", authority.strip())
+        return self._append_record(clean, "genesis", authority)
 
     def anchor(self, heads: Dict[str, str], reason: str = "verdict",
-               authority: Optional[str] = None) -> str:
+               authority: Optional[str] = None,
+               caller: Any = None) -> str:
         """Append one signed, chained record committing `heads`.
 
         Fail-closed genesis rule: there is NO lazy genesis. If no
@@ -526,6 +579,10 @@ class AnchorStore:
         the ONLY genesis path. This closes the truncation-to-genesis
         and journal-deletion capture holes: a journal can never be
         silently (re)created over an attacker's database.
+
+        With a bound registry, `caller` is REQUIRED (must hold
+        'agent:anchor_write') and the recorded authority is the
+        authenticated caller's id.
         """
         if reason not in REASONS:
             raise AnchorError(f"unknown anchor reason {reason!r}")
@@ -535,6 +592,9 @@ class AnchorStore:
                 "initialize()")
         clean = _check_heads(heads)
         self._refresh_tip()
+        # Authorize before the genesis check: unauthenticated callers learn
+        # nothing about journal state.
+        authority = self._authorize_write(caller, authority, "anchor")
         if not self.journal_exists() or self._next_seq == 1:
             raise AnchorMissing(
                 "anchor refused: no anchor journal exists -- run "
@@ -543,7 +603,7 @@ class AnchorStore:
         return self._append_record(clean, reason, authority)
 
     def transition(self, new_heads: Dict[str, str], reason: str,
-                   authority: str) -> str:
+                   authority: str, caller: Any = None) -> str:
         """Audited head change for migration/rollback/rotation/recovery.
 
         This is the ONLY legitimate path for anchored heads to change
@@ -551,6 +611,10 @@ class AnchorStore:
         signed journal record, so an honest rollback is distinguishable
         from malicious rewriting. A database restored from backup without
         a matching transition record fails verification.
+
+        With a bound registry, `caller` is REQUIRED (must hold
+        'agent:anchor_write') and the recorded authority is the
+        authenticated caller's id.
         """
         if reason not in TRANSITION_REASONS:
             raise AnchorError(
@@ -559,6 +623,8 @@ class AnchorStore:
         if not isinstance(authority, str) or not authority.strip():
             raise AnchorError(
                 "transition requires a non-empty authority string")
+        authority = self._authorize_write(caller, authority.strip(),
+                                          "transition")
         clean = _check_heads(new_heads)
         self._refresh_tip()
         if not self.journal_exists() or self._next_seq == 1:
@@ -569,9 +635,10 @@ class AnchorStore:
                 "transition refused: no anchor journal exists -- run "
                 "`anchor_admin.py init` to create the genesis record "
                 "explicitly before any audited transition")
-        return self._append_record(clean, reason, authority.strip())
+        return self._append_record(clean, reason, authority)
 
-    def rotate_key(self, authority: Optional[str] = None) -> str:
+    def rotate_key(self, authority: Optional[str] = None,
+                   caller: Any = None) -> str:
         """Rotate the signing key, durably.
 
         Stages key.<new_id> (0600, O_CREAT|O_EXCL), appends a "rotation"
@@ -582,7 +649,13 @@ class AnchorStore:
         file, while every key.<id> sibling stays a known key so
         pre-rotation records still verify. The old key is genuinely
         retired from active signing use. Returns the new key id.
+
+        With a bound registry, `caller` is REQUIRED (must hold
+        'agent:anchor_write'): key rotation is a privileged write, and
+        an unauthenticated rotator could otherwise substitute the
+        journal's signing key.
         """
+        authority = self._authorize_write(caller, authority, "rotate_key")
         self._refresh_tip()
         key_dir = os.path.dirname(self.key_path)
         os.makedirs(key_dir, mode=0o700, exist_ok=True)
@@ -840,6 +913,15 @@ class CrossDbAnchor:
     def journal_exists(self) -> bool:
         return self._anchor.journal_exists()
 
+    def bind_registry(self, registry: Any) -> "CrossDbAnchor":
+        """Bind the inner AnchorStore to an OracleRegistry: all writes
+        (initialize/anchor_all/transition) then REQUIRE a
+        token-authenticated caller holding 'agent:anchor_write'.
+        Without this binding the caller parameter is ignored (legacy
+        operator-tooling behavior) -- bind before any governed write."""
+        self._anchor.bind_registry(registry)
+        return self
+
     @property
     def record_count(self) -> int:
         return self._anchor.record_count
@@ -847,23 +929,26 @@ class CrossDbAnchor:
     def latest_heads(self) -> Dict[str, str]:
         return self._anchor.latest_heads()
 
-    def initialize(self, authority: str) -> str:
+    def initialize(self, authority: str, caller: Any = None) -> str:
         """Explicit deployment-time genesis over the bound providers."""
         with CrossDbAnchor._ATTEST_LOCK:
-            return self._anchor.initialize(self._collect_locked(), authority)
+            return self._anchor.initialize(self._collect_locked(), authority,
+                                           caller=caller)
 
     def anchor_all(self, reason: str = "attest",
-                   authority: Optional[str] = None) -> str:
+                   authority: Optional[str] = None,
+                   caller: Any = None) -> str:
         """Commit current heads of all bound providers. Post-write call."""
         with CrossDbAnchor._ATTEST_LOCK:
             return self._anchor.anchor(self._collect_locked(), reason,
-                                       authority)
+                                       authority, caller=caller)
 
-    def transition(self, reason: str, authority: str) -> str:
+    def transition(self, reason: str, authority: str,
+                   caller: Any = None) -> str:
         """Audited head change (migration/rollback/rotation/recovery)."""
         with CrossDbAnchor._ATTEST_LOCK:
             return self._anchor.transition(self._collect_locked(), reason,
-                                           authority)
+                                           authority, caller=caller)
 
     def verify_all(self) -> Tuple[bool, str]:
         """Fail-closed verification of the journal against live heads."""

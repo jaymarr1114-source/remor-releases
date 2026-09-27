@@ -6,12 +6,18 @@ UniversalTaskInterface pipeline with real goals against scratch sqlite DBs
 (tempfile). Nothing is mocked except in the causality spot-check, where the
 control-installation mechanism itself is the thing under test.
 
-Slow goal used for preemption tests: "compute the triple of n" with
+Slow goal used for preemption tests: "compute the nth prime number" with
 (input, output) tuple examples. On a fresh engine this drives the real
-example-driven acquisition path (GenericCapabilityGrowthEngine ->
-synthesize_and_admit), which runs ~60s before failing honestly
-("No capability registered...") — a genuinely slow real path we interrupt
-early via stop/pause/cancel.
+example-driven acquisition path, which runs ~85s through the scheduler
+before failing honestly (nth-prime is not polynomial-synthesizable; the
+candidates fail independent validation) — a genuinely slow real path we
+interrupt early via stop/pause/cancel.
+
+Note (2026-09-27): the previous slow goal, "compute the triple of n", is
+now genuinely acquirable via the verdict-bound promotion path (it succeeds
+in ~68s through the scheduler), so it no longer serves as the
+"slow-and-honestly-failing" vehicle. The test premise went stale because the
+system got more capable, not less.
 
 Quick goal: "knowledge_stats" — real pipeline, ~0.02s, success=True, no
 payload or examples needed.
@@ -29,8 +35,21 @@ from swarm_engine.services import scheduler as sched_mod
 from swarm_engine.services.scheduler import RunScheduler
 
 QUICK_GOAL = "knowledge_stats"
-SLOW_GOAL = "compute the triple of n"
-SLOW_EXAMPLES = [({"n": 4}, 12), ({"n": 7}, 21)]
+
+
+def _nth_prime(n):
+    """The nth prime (1-indexed). Used to build SLOW_EXAMPLES."""
+    count, c = 0, 2
+    while True:
+        if all(c % i for i in range(2, int(c ** 0.5) + 1)):
+            count += 1
+            if count == n:
+                return c
+        c += 1
+
+
+SLOW_GOAL = "compute the nth prime number"
+SLOW_EXAMPLES = [({"n": i}, _nth_prime(i)) for i in range(1, 11)]
 
 TERMINAL = ("completed", "failed", "stopped", "cancelled", "error")
 
@@ -257,7 +276,9 @@ class SchedulerTest(unittest.TestCase):
 
         # Mechanism restored: the still-pending stop request now lands at the
         # next checkpoint and the run ends 'stopped' (also drains the worker).
-        rec = _wait_for(self.sched, slow_id, ("stopped",), timeout=90.0)
+        # Timeout 150s: the slow goal runs ~85s before failing honestly; the
+        # stop then resolves via _classify (stop_requested and not success).
+        rec = _wait_for(self.sched, slow_id, ("stopped",), timeout=150.0)
         self.assertEqual(rec["status"], "stopped")
 
     # -- honest errors for misuse ----------------------------------------------

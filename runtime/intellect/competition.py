@@ -389,7 +389,7 @@ def run_competition(engine, goal: str,
                 args=dict(first_exp.design["probe"]),
                 expect=first_exp.result["observed"],
                 name="epistemic_discrimination")
-            ar = engine.admission.admit(goal, comp.plan, smoke=smoke,
+            ar = engine.admit_as_engine(goal, comp.plan, smoke=smoke,
                                         name="epistemic_%s" % hyp.hypothesis_id)
             admitted = ar.capability_id if ar.ok else None
             admit_detail = {"verdict": ar.verdict, "ok": ar.ok,

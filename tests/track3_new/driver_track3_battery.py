@@ -343,5 +343,12 @@ def _repair_evidence_row(store, org, ev_id, ev):
     if not oka:
         raise SystemExit(f"G2 recovery failed: {msga}")
     from swarm_engine.governance.anchor import collect_anchor_heads
+    # Registry-bound anchor: journal writes require an authenticated caller
+    # holding 'agent:anchor_write', and the claimed authority must equal the
+    # authenticated caller id (confused-deputy rule) -- hence
+    # ENGINE_PRODUCER_ID ("remor:engine") as the authority label here, not a
+    # battery-scoped tag. Mirrors driver_track3.deploy_org.
+    from swarm_engine.governance.oracle_binding import ENGINE_PRODUCER_ID
     org.anchor.anchor(collect_anchor_heads(store, org.oregistry),
-                      reason="recovery", authority="track3:battery")
+                      reason="recovery", authority=ENGINE_PRODUCER_ID,
+                      caller=org.oregistry.engine_handle())

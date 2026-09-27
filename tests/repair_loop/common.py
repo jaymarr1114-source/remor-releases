@@ -58,6 +58,23 @@ def attach_org(workdir):
     return anchor_shim.attach_org(workdir)
 
 
+def provision_caller(org, agent_id, *decision_classes):
+    """Register an agent_org agent id in the caller-authorization
+    directory with the given decision-class grants. The registrar is
+    the engine operator (root 'agent:grant_issue'). Returns the bearer
+    token; the caller credential is the (agent_id, token) pair.
+
+    The identity persists in the oracle DB, so the token stays valid
+    across fresh-process attaches of the same workdir.
+    """
+    from swarm_engine.governance.caller_authorization import AgentDirectory
+    agents = AgentDirectory(org.oregistry)
+    cred = agents.register_agent(
+        org.oregistry.engine_handle(), source="repair_loop harness",
+        agent_id=agent_id, decision_classes=decision_classes)
+    return cred.token
+
+
 # --- engine-side INDEPENDENT example extraction (used by judges) ---
 _ASSERT_RE = re.compile(
     r"^\s*assert\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*==\s*([^\n#;]+)",

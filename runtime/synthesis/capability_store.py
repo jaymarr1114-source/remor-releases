@@ -195,6 +195,36 @@ class CapabilityStore:
 
     # -- writes -------------------------------------------------------------
     def store(self, record: CapabilityRecord) -> CapabilityRecord:
+        # Admission -> execution binding (2026-09-27, Worker 2): the
+        # capability_id IS the plan fingerprint
+        # (plan_fingerprint(plan)). A record whose plan does not
+        # fingerprint to its id is either a substitution (same id,
+        # different bytes -- the INSERT OR REPLACE this method performs
+        # would silently promote unadmitted bytes to an admitted
+        # identity) or an unadmitted identity outright. Either way it
+        # must never enter the store. Fail closed: refuse the write.
+        # All legitimate writers (AdmissionController.admit stage 5,
+        # CapabilityStore.revise) derive the id from the plan, so this
+        # changes nothing for them.
+        try:
+            fp = plan_fingerprint(record.plan)
+        except Exception as exc:
+            self.log(record.capability_id, "store_refused",
+                     "plan unreadable, identity binding cannot be verified: "
+                     f"{exc!r}")
+            raise ValueError(
+                f"store refused: plan for {record.capability_id!r} is "
+                "unreadable; identity binding cannot be verified -- "
+                "fail closed")
+        if fp != record.capability_id:
+            self.log(record.capability_id, "store_refused",
+                     f"plan fingerprint {fp[:24]}... != capability_id; "
+                     "substitution of unadmitted bytes under an admitted "
+                     "identity refused")
+            raise ValueError(
+                f"store refused: plan fingerprint {fp[:24]}... does not "
+                f"match capability_id {record.capability_id!r}; refusing "
+                "substitution of unadmitted bytes under an admitted identity")
         with self._conn() as c:
             c.execute("""
                 INSERT OR REPLACE INTO plan_capabilities
@@ -422,10 +452,34 @@ class CapabilityStore:
     def rehydrate(self, capability_id: str, registry: PrimitiveRegistry
                   ) -> Tuple[Optional[CapabilityRecord], List[str]]:
         """Load a capability and verify every primitive it depends on still
-        exists in the current registry. Returns (record, problems)."""
+        exists in the current registry. Returns (record, problems).
+
+        Also verifies the admission -> execution binding: the stored plan
+        must fingerprint to its own id. A swapped row (same id, different
+        bytes) is quarantined here -- never returned for execution --
+        matching the nl_dispatch "capability_tampered" refusal and the
+        corruption handling of the admission reuse guard. The
+        "corruption_detected" event keeps deliberate-quarantine
+        stickiness, so the tampered identity cannot be silently
+        resurrected; recovery goes through the governed
+        integrity.restore_everywhere path.
+        """
         rec = self.get(capability_id)
         if rec is None:
             return None, [f"capability {capability_id!r} not found"]
+        try:
+            fp = plan_fingerprint(rec.plan)
+        except Exception:
+            fp = None
+        if fp != capability_id:
+            self.set_status(capability_id, "quarantined")
+            self.log(capability_id, "corruption_detected",
+                     "rehydrate: stored plan does not fingerprint to its id "
+                     f"(computed {(fp[:24] + '...') if fp else 'unreadable'}); "
+                     "quarantined -- refusing execution of unadmitted bytes")
+            return None, [
+                f"capability_tampered: stored plan for {capability_id!r} "
+                "does not fingerprint to its id; unadmitted bytes refused"]
         missing = [op for op in rec.ops if op not in registry]
         if missing:
             self.set_status(capability_id, "quarantined")
@@ -534,6 +588,25 @@ class CapabilityStore:
         )
         if rec.capability_id == parent.capability_id:
             return parent  # identical plan, nothing to revise
+        # Quarantine stickiness: plan_fingerprint is a content hash, so a
+        # "revision" whose plan is byte-identical to a DELIBERATELY
+        # quarantined capability's plan lands on that capability's id --
+        # and store() is INSERT OR REPLACE, which would silently flip the
+        # quarantined row back to active. That is the same silent
+        # resurrection the admission 0c guard refuses; refuse it here too.
+        existing = self.get(rec.capability_id)
+        if (existing is not None and existing.status == "quarantined"
+                and self._quarantine_was_deliberate(rec.capability_id)):
+            self.log(rec.capability_id, "resurrection_refused",
+                     "revise refused: the new plan fingerprints to a "
+                     "deliberately quarantined capability; deliberate "
+                     "revocations are sticky -- restore via "
+                     "integrity.restore_everywhere with trust:transition "
+                     "authority")
+            raise ValueError(
+                f"revise refused: plan fingerprints to deliberately "
+                f"quarantined capability {rec.capability_id[:16]}...; "
+                "deliberate revocations are sticky")
         self.store(rec)
         self.set_status(parent.capability_id, "superseded")
         self.bind_goal(parent.goal, rec.capability_id)
@@ -548,6 +621,21 @@ class CapabilityStore:
             return None
         parent = self.get(rec.parent_id)
         if not parent:
+            return None
+        # Quarantine stickiness: a rollback must not silently resurrect a
+        # parent that was DELIBERATELY quarantined (e.g. via
+        # integrity.quarantine_everywhere). Activating it here would flip
+        # a sticky revocation back to active with no authority and no
+        # audit -- the same silent-resurrection the admission 0c guard
+        # refuses. Fail closed: refuse the rollback, log it, change
+        # nothing.
+        if self._quarantine_was_deliberate(parent.capability_id):
+            self.log(parent.capability_id, "rollback_refused",
+                     f"rollback of {capability_id} refused: parent revision "
+                     "is deliberately quarantined; deliberate revocations "
+                     "are sticky -- restore via "
+                     "integrity.restore_everywhere with trust:transition "
+                     "authority")
             return None
         self.set_status(capability_id, "quarantined")
         self.set_status(parent.capability_id, "active")

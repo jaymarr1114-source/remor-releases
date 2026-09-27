@@ -2,6 +2,7 @@
 
 Real sqlite, real subprocess sandbox, real timeout kills, real tamper.
 """
+import ast
 import os
 import sqlite3
 import subprocess
@@ -200,15 +201,41 @@ class TestExecution(unittest.TestCase):
         finally:
             td.cleanup()
 
-    def test_run_cwd_is_sandbox(self):
+    def test_run_cwd_is_fresh_per_run_dir(self):
+        # Merged 2026-09-26 (#25): each run gets a FRESH per-run subdir
+        # of the sandbox holding only the artifact's own code file --
+        # never the shared sandbox root (no sibling staged files in
+        # cwd). Test-synced from the authorization fork's expectation;
+        # the old "cwd is the sandbox root" assertion is superseded by
+        # the merged spec.
         td, store = _store()
         try:
+            sandbox = os.path.realpath(os.path.join(td.name, "sandbox"))
             s = store.save("cwdprobe", "python",
-                           "import os\nprint('CWD-IS:', os.getcwd())")
+                           "import os\nprint('CWD-IS:', os.getcwd())\n"
+                           "print('LS-IS:', sorted(os.listdir('.')))")
             r = store.run(s["artifact_id"])
             self.assertTrue(r["ok"])
-            self.assertIn("CWD-IS: " + os.path.realpath(
-                os.path.join(td.name, "sandbox")), r["stdout"])
+            line = [ln for ln in r["stdout"].splitlines()
+                    if ln.startswith("CWD-IS:")][0]
+            cwd = os.path.realpath(line.split("CWD-IS:", 1)[1].strip())
+            self.assertTrue(
+                cwd.startswith(sandbox + os.sep) and cwd != sandbox,
+                f"cwd {cwd} is not a fresh subdir of {sandbox}")
+            ls_line = [ln for ln in r["stdout"].splitlines()
+                       if ln.startswith("LS-IS:")][0]
+            listed = ast.literal_eval(ls_line.split("LS-IS:", 1)[1].strip())
+            self.assertEqual(
+                len(listed), 1,
+                f"per-run dir must hold only the artifact file, saw {listed}")
+            self.assertTrue(listed[0].endswith(".py"))
+            # ... and the per-run dir is removed afterwards
+            self.assertFalse(os.path.isdir(cwd),
+                             "per-run dir was not cleaned up")
+            leftovers = [d for d in os.listdir(sandbox)
+                         if d.startswith("run_")]
+            self.assertEqual(leftovers, [],
+                             f"run dir leftovers in sandbox: {leftovers}")
         finally:
             td.cleanup()
 

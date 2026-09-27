@@ -23,7 +23,7 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 class ProjectModificationRefused(Exception):
@@ -45,14 +45,36 @@ class ProjectChangeResult:
 
 
 class ProjectModificationGuard:
-    """Transactional create/modify/delete within a project root."""
+    """Transactional create/modify/delete within a project root.
+
+    Caller authorization: the guard can be bound to an AgentDirectory
+    (bind_authorization). The REPAIR-APPLICATION path -- apply_repair()
+    -- then requires an authenticated caller holding
+    'agent:repair_apply'. This is the governed choke point for the file
+    modification that precedes repair submission/admission: an
+    unauthenticated or unauthorized caller cannot stage a repair.
+
+    The generic create()/modify()/delete() primitives are NOT
+    caller-authorized. They are library functions used by
+    engine-internal code paths (growth engine, project loop). Do not
+    mistake them for a governed boundary: only apply_repair() is the
+    authorization choke point for agent-driven repair application.
+    """
 
     def __init__(self, root: str, protected: Optional[List[str]] = None,
-                 snapshot_dir: Optional[str] = None):
+                 snapshot_dir: Optional[str] = None,
+                 agents: Optional[Any] = None):
         self.root = os.path.abspath(root)
         self.protected = list(protected or [])
         self.snapshot_dir = snapshot_dir or tempfile.mkdtemp(prefix="swarm_project_snap_")
         self.history: List[Dict] = []
+        self.agents = agents  # AgentDirectory or None (unbound = no authz)
+
+    def bind_authorization(self, agents: Any) -> "ProjectModificationGuard":
+        """Bind an AgentDirectory; enables the authorized apply_repair()
+        path. Returns self for chaining."""
+        self.agents = agents
+        return self
 
     def _guard_path(self, path: str) -> str:
         absolute = os.path.normpath(os.path.join(self.root, path)
@@ -162,3 +184,41 @@ class ProjectModificationGuard:
                                           entry.get("action", "unknown"),
                                           "rolled back", rolled_back=True)
         return None
+
+    # -- authorized repair application ----------------------------------
+    def apply_repair(self, path: str, content: str,
+                     caller: Any,
+                     verify: Optional[Callable[[], Tuple[bool, Dict]]] = None,
+                     repair_id: Optional[str] = None,
+                     ) -> ProjectChangeResult:
+        """Apply a repair to a project file through the governed choke
+        point. The caller must be token-authenticated and hold
+        'agent:repair_apply'; the guard must be bound to an
+        AgentDirectory (bind_authorization). The authenticated caller id
+        is recorded in history as applied_by.
+
+        This authorizes the REAL file modification that precedes repair
+        submission (verify_repair) and admission (admit_repair): without
+        it, admit_repair() would bless bytes no authorized caller ever
+        staged. Unauthenticated, forged, unauthorized, or destroyed
+        callers are refused before any byte is written. repair_id is
+        optional audit metadata (the repair record id is minted at
+        submission time, after the bytes exist).
+        """
+        if self.agents is None:
+            raise ProjectModificationRefused(
+                "apply_repair requires a bound AgentDirectory: "
+                "bind_authorization() first")
+        from swarm_engine.governance.caller_authorization import (
+            require_authorized)
+        from swarm_engine.governance.oracle_binding import (
+            DECISION_REPAIR_APPLY)
+        authed = require_authorized(
+            self.agents.reg, self.agents, caller, DECISION_REPAIR_APPLY,
+            "apply_repair", target=repair_id or path)
+        result = self.modify(path, content, verify=verify)
+        if self.history and self.history[-1].get("path") == path:
+            self.history[-1]["applied_by"] = authed
+            if repair_id:
+                self.history[-1]["repair_id"] = repair_id
+        return result

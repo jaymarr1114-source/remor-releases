@@ -402,15 +402,15 @@ class ObjectiveProjectAdapter:
         if not verify_symbolic_candidate(plan, num_ex, self.engine.composer):
             return None  # GeneralSynthesizer's own candidate failed re-verification
 
-        admission = getattr(self.engine, "admission", None)
         admitted_id = None
-        if admission is not None:
+        if hasattr(self.engine, "admit_as_engine"):
             from swarm_engine.synthesis.admission import SmokeTest
             ex0 = num_ex[0]
             smoke = SmokeTest(args=dict(ex0["fields"]), expect=ex0["output"],
                                name="symbolic_bridge_smoke")
             try:
-                res = admission.admit(objective_text, plan, smoke=smoke)
+                res = self.engine.admit_as_engine(objective_text, plan,
+                                                  smoke=smoke)
                 if getattr(res, "ok", False):
                     admitted_id = res.capability_id
             except Exception:

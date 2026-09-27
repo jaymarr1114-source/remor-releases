@@ -717,10 +717,8 @@ class LongHorizonCycleLoop:
                             if r["name"] == found_ident), None)
                 qid = rec["capability_id"] if rec else found_ident
             try:
-                from swarm_engine.synthesis.integrity import \
-                    quarantine_everywhere
-                quarantine_everywhere(
-                    self.engine, qid,
+                self.engine.quarantine_as_engine(
+                    qid,
                     "f10: loop held-out verification rejected capability "
                     f"for challenge {cand.challenge_id}")
                 out["quarantined_wrong_capability"] = qid
@@ -999,7 +997,7 @@ class LongHorizonCycleLoop:
             rec = next((r for r in self.engine.acquired_code.all()
                         if r["name"] == tident), None)
             rev_id = rec["capability_id"] if rec else tident
-        quarantine_everywhere(self.engine, rev_id,
+        self.engine.quarantine_as_engine(rev_id,
                               "f10 closure audit: revoke/recover drill")
         # Must now be invalid: the live-capability lookup must fail or the
         # execution must no longer be exact.
@@ -1029,8 +1027,22 @@ class LongHorizonCycleLoop:
                 crec = self.engine.capabilities.get(new_cid)
                 if crec is not None:
                     if getattr(crec, "status", "") != "active":
-                        self.engine.capabilities.set_status(new_cid, "active")
-                        crec = self.engine.capabilities.get(new_cid)
+                        # Quarantine stickiness (defense in depth): the drill
+                        # just deliberately quarantined rev_id above, and the
+                        # recovery went through the guarded admission path,
+                        # so new_cid cannot name a deliberately quarantined
+                        # row -- but if it ever did, flipping it here would
+                        # be silent resurrection. Refuse the flip.
+                        if self.engine.capabilities._quarantine_was_deliberate(
+                                new_cid):
+                            self.engine.capabilities.log(
+                                new_cid, "resurrection_refused",
+                                "revoke/recover drill refused to reactivate "
+                                "a deliberately quarantined capability")
+                        else:
+                            self.engine.capabilities.set_status(
+                                new_cid, "active")
+                            crec = self.engine.capabilities.get(new_cid)
                     if register is not None and crec is not None:
                         register(new_cid, crec)
                     self.engine.capabilities.bind_goal(target["goal"], new_cid)

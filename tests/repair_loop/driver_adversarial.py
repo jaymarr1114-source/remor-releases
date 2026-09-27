@@ -22,6 +22,8 @@ import defects  # noqa: E402
 
 from swarm_engine.agent_org.exceptions import (  # noqa: E402
     AuthorityError, LifecycleError, VerificationFailed)
+from swarm_engine.governance.caller_authorization import (  # noqa: E402
+    AuthorizationError)
 from swarm_engine.verification.independent import (  # noqa: E402
     IndependentValidator, Arbiter, Evidence)
 from swarm_engine.agent_org.subprocess_runner import run_code  # noqa: E402
@@ -33,6 +35,7 @@ os.makedirs(PHASE, exist_ok=True)
 handoff1 = json.load(open(os.path.join(WORK, "phase1", "handoff.json")))
 ORGDIR = handoff1["workdir"]
 A_ID = handoff1["agent_a"]["agent_id"]
+A_TOKEN = handoff1["agent_a"]["token"]
 EXP1_ID = handoff1["exp1"]["exp_id"]
 REPAIR_A = handoff1["repair_a"]["repair_id"]
 POST_A = handoff1["repair_a"]["post_digest"]
@@ -48,7 +51,7 @@ print("-- 1. forged repair claim --", flush=True)
 # the DEFECTIVE pre-repair code. The independent verifier runs the
 # actual bytes: the claim determines nothing.
 v_forged = org.review.verify_repair(
-    repair_id="rep_forged_claim", agent_id=A_ID,
+    repair_id="rep_forged_claim", agent_id=A_ID, caller=(A_ID, A_TOKEN),
     defect_signature={"family": "binary-operator"}, diagnosis="fixed (lie)",
     pre_code=defects.D1_SRC, post_code=defects.D1_SRC,  # NOT repaired
     entrypoint="add", spec=FuncSpec(),
@@ -67,7 +70,8 @@ except VerificationFailed:
 # ---------------------------------------------------------------- 7
 print("-- 7. admission without verification --", flush=True)
 try:
-    org.review.admit_repair("rep_never_verified", org.engine)
+    org.review.admit_repair("rep_never_verified",
+                            caller=org.oregistry.engine_handle())
     check("admission without verification refused", False)
 except (KeyError, VerificationFailed):
     check("admission without verification refused", True)
@@ -87,18 +91,19 @@ print("-- 6. producer/verifier confusion --", flush=True)
 # A producer credential (or any non-engine handle) cannot authorize
 # admission; the verifier identity is fixed internally.
 try:
-    org.review.admit_repair(REPAIR_A, engine_handle="producer:attacker")
+    org.review.admit_repair(REPAIR_A, caller="producer:attacker")
     check("producer handle refused for admission", False)
-except AuthorityError:
+except AuthorizationError:
     check("producer handle refused for admission", True)
 try:
-    org.review.admit_repair(REPAIR_A, engine_handle=None)
+    org.review.admit_repair(REPAIR_A, caller=None)
     check("null handle refused for admission", False)
-except AuthorityError:
+except AuthorizationError:
     check("null handle refused for admission", True)
 # Double admission is also refused (replay of a decision).
 try:
-    org.review.admit_repair(REPAIR_A, org.engine)
+    org.review.admit_repair(REPAIR_A,
+                            caller=org.oregistry.engine_handle())
     check("double admission refused", False)
 except LifecycleError:
     check("double admission refused", True)
@@ -140,7 +145,7 @@ post_a_src = None  # we don't store raw code; reconstruct from the defect
 import ast as _ast
 post_a_code = _ast.unparse(_ast.parse("def add(a, b): return a + b\n")) + "\n"
 v_replay = org.review.verify_repair(
-    repair_id="rep_replay_changed", agent_id=A_ID,
+    repair_id="rep_replay_changed", agent_id=A_ID, caller=(A_ID, A_TOKEN),
     defect_signature={"family": "binary-operator",
                       "note": "replay of A's repair on changed artifact"},
     diagnosis="replay", pre_code=CHANGED_SRC, post_code=post_a_code,
@@ -153,7 +158,7 @@ CHANGED2_SRC = "def add(a, b):\n    return a * b\n"  # want a+b, have a*b
 CHANGED2_TEST = "assert add(2, 3) == 5\n"
 c2_examples = engine_extract_examples(CHANGED2_TEST)["add"]
 v_replay2 = org.review.verify_repair(
-    repair_id="rep_replay_changed2", agent_id=A_ID,
+    repair_id="rep_replay_changed2", agent_id=A_ID, caller=(A_ID, A_TOKEN),
     defect_signature={"family": "binary-operator",
                       "note": "A's a+b repair vs a*b defect"},
     diagnosis="replay", pre_code=CHANGED2_SRC, post_code=post_a_code,
@@ -169,7 +174,7 @@ CHANGED3_SRC = "def add(a, b):\n    return a + b\n"  # already correct...
 # even be applied meaningfully. Verify A's post bytes against D2's
 # power examples with entrypoint=power -> must fail (no such function).
 v_replay3 = org.review.verify_repair(
-    repair_id="rep_replay_changed3", agent_id=A_ID,
+    repair_id="rep_replay_changed3", agent_id=A_ID, caller=(A_ID, A_TOKEN),
     defect_signature={"family": "binary-operator",
                       "note": "A's repair vs D2 power defect"},
     diagnosis="replay", pre_code=defects.D2_SRC, post_code=post_a_code,
@@ -208,7 +213,7 @@ _cand = synthesize_repair_for_paths(_sp, [_tp])
 check("unrepairable defect: synthesis returns None", _cand is None)
 try:
     org.review.verify_repair(
-        repair_id="rep_empty", agent_id=A_ID, defect_signature={},
+        repair_id="rep_empty", agent_id=A_ID, caller=(A_ID, A_TOKEN), defect_signature={},
         diagnosis="x", pre_code="x", post_code="", entrypoint="f",
         spec=FuncSpec(), cases=[])
     check("empty repair refused", False)

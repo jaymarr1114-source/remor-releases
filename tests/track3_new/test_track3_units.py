@@ -48,7 +48,7 @@ def main(workdir):
     dispatcher = NLToolDispatcher(eng)
 
     adm = eng.admission.admit(goal=SORT_GOAL, plan=dict(SORT_PLAN),
-                              name="sort_numbers")
+                              name="sort_numbers", caller=eng.oracle)
     check("unit: capability admitted", adm.ok)
     cap_id = adm.capability_id
     rec = eng.capabilities.get(cap_id)
@@ -104,13 +104,14 @@ def main(workdir):
 
     # quarantine the capability: direct dispatch must refuse (governed)
     from swarm_engine.synthesis.integrity import quarantine_everywhere
-    quarantine_everywhere(eng, cap_id, reason="track3:unit")
+    quarantine_everywhere(eng, cap_id, reason="track3:unit",
+                          caller=eng.oracle)
     r_q = dispatcher.dispatch_by_id(cap_id, {"items": [1]},
                                     producer="track3:unit")
     check("unit: dispatch_by_id refuses quarantined",
           not r_q.ok and r_q.refusal == "capability_unavailable", r_q.refusal)
     from swarm_engine.synthesis.integrity import restore_everywhere
-    restore_everywhere(eng, cap_id, authority=eng.oracle,
+    restore_everywhere(eng, cap_id, caller=eng.oracle,
                        reason="track3:unit")
     r_re = dispatcher.dispatch_by_id(cap_id, {"items": [2, 1]},
                                      producer="track3:unit")

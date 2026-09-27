@@ -72,7 +72,8 @@ if _HAS_PRISTINE:
     plan = {"steps": [{"id": "s1", "op": "add", "args": {"a": 2, "b": 2}}],
             "output": {"$step": "s1"}}
     try:
-        rep = peng.admission.admit("baseline-goal", plan, smoke=lying)
+        rep = peng.admission.admit("baseline-goal", plan, smoke=lying,
+                               caller=peng.oracle)
         admitted = bool(rep.ok)
         detail = f"verdict={rep.verdict} reasons={rep.reasons[:1]}"
     except Exception as exc:  # noqa: BLE001
@@ -128,7 +129,8 @@ lying2 = SmokeTest(args={}, predicate=lambda v: True)
 plan2 = {"steps": [{"id": "s1", "op": "add", "args": {"a": 2, "b": 2}}],
          "output": {"$step": "s1"}}
 try:
-    rep2 = eng.admission.admit("goal", plan2, smoke=lying2)
+    rep2 = eng.admission.admit("goal", plan2, smoke=lying2,
+                                caller=eng.oracle)
     ok2, det2 = rep2.ok, f"verdict={rep2.verdict} reasons={rep2.reasons[:1]}"
 except Exception as exc:  # noqa: BLE001
     ok2, det2 = False, f"raised {type(exc).__name__}: {exc}"
@@ -260,7 +262,8 @@ eng11 = SwarmEngine(db_path=fresh_db("obeng11_"))
 plan11 = {"steps": [{"id": "s1", "op": "add", "args": {"a": 2, "b": 2}}],
           "output": {"$step": "s1"}}
 rep11 = eng11.admission.admit("goal", plan11,
-                              smoke=SmokeTest(args={}, expect=4))
+                              smoke=SmokeTest(args={}, expect=4),
+                              caller=eng11.oracle)
 bound11 = (rep11.smoke or {}).get("oracle_binding")
 bound_ok = False
 if bound11:
@@ -403,7 +406,7 @@ from swarm_engine.primitives.core import Governor as _Gov19
 e19 = _SE19(db_path=db19)
 e19.governor.grant(__import__("swarm_engine.primitives.core", fromlist=["Effect"]).Effect.PROCESS,
                    "/tmp/rehyd/*", note="p19")
-del e19
+e19.close()
 con = sqlite3.connect(db19 + ".oracle.db")
 con.execute("UPDATE ob_grants SET pattern='/tmp/evil/*' WHERE seq=1")
 con.commit()

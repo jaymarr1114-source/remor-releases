@@ -1,0 +1,41 @@
+{"name": "A.distinct-agents", "pass": true, "detail": "agt_aef98977f916f3d3 vs agt_ed2dc1b33d1b8c82"}
+{"name": "A.distinct-substrates", "pass": true, "detail": ""}
+{"name": "A.distinct-provenance", "pass": true, "detail": ""}
+{"name": "A.distinct-producers", "pass": true, "detail": ""}
+{"name": "B.no-assignment-refused", "pass": true, "detail": "KeyError"}
+{"name": "B.revoked-assignment-refused", "pass": true, "detail": "AuthorityError"}
+{"name": "B.completed-assignment-refused", "pass": true, "detail": "AuthorityError"}
+{"name": "C.out-of-scope-claim-refused", "pass": true, "detail": "AuthorityError"}
+{"name": "C.agent-marked-failed", "pass": true, "detail": "AuthorityError"}
+{"name": "C.missing-claims-fail-closed", "pass": true, "detail": "AuthorityError"}
+{"name": "C.grant-scoped-dedup", "pass": true, "detail": "granted capability:use:codec:dedup by remor:engine"}
+{"name": "C.grant-does-not-cover-rle", "pass": true, "detail": "no live grant for capability:use on 'codec:rle'"}
+{"name": "C.revoke-removes-grant", "pass": true, "detail": "grant gone after revoke"}
+{"name": "D.self-report-stored-not-trusted", "pass": true, "detail": "stored on the work product"}
+{"name": "D.self-cert-rejected", "pass": true, "detail": "failed BEHAVIOURAL validation;only 0/1 behavioural cases passed"}
+{"name": "G.verifier-ignores-claims", "pass": true, "detail": "agent's note absent from the verdict reasons"}
+{"name": "D.accept-without-engine-refused", "pass": true, "detail": "AuthorityError"}
+{"name": "D.accept-rejected-work-refused", "pass": true, "detail": "VerificationFailed"}
+{"name": "D.accept-without-verdict-refused", "pass": true, "detail": "VerificationFailed"}
+{"name": "E.review-accepted", "pass": true, "detail": "all required evidence present"}
+{"name": "E.promoted", "pass": true, "detail": "exp_f881dc182ff2beeb"}
+{"name": "E.promoted-L2", "pass": true, "detail": "exp_f881dc182ff2beeb"}
+{"name": "E.agent-destroyed", "pass": true, "detail": ""}
+{"name": "E.experience-survives-destruction", "pass": true, "detail": "1 experience records still retrievable"}
+{"name": "F.replacement-is-new-identity", "pass": true, "detail": ""}
+{"name": "F.replacement-no-custody", "pass": true, "detail": ""}
+{"name": "H.unique-identities", "pass": true, "detail": ""}
+{"name": "H.unique-workspaces", "pass": true, "detail": ""}
+{"name": "H.unique-producers", "pass": true, "detail": ""}
+{"name": "H.distinct-grants", "pass": true, "detail": "3 grant rows"}
+{"name": "H.no-inherited-authority", "pass": true, "detail": ""}
+{"name": "I.substrate-replaced", "pass": true, "detail": "symbolic:discovery_rules:1 -> callable:discovery_grid:1"}
+{"name": "I.replace-while-assigned-refused", "pass": true, "detail": "LifecycleError"}
+{"name": "I2.llm-template-instantiation-refused", "pass": true, "detail": "SubstrateUnavailable"}
+{"name": "I2.llm-run-refused", "pass": true, "detail": "SubstrateUnavailable"}
+{"name": "boundaries.final-audit", "pass": true, "detail": ""}
+{"name": "T.decision-tamper-detected", "pass": true, "detail": "ao_manager_decisions: tamper at seq 1 (row_digest mismatch)"}
+{"name": "T.workproduct-tamper-detected", "pass": true, "detail": "agent_org.ao_work_products: ao_work_products: tamper at seq 1 (row_digest mismatch); agent_org.ao_manager_decisions: ao_manager_decisions: tamper at seq 1 (row_digest mismatch); decisions: ao_manager_decisions: tamper at seq 1 (row_digest mismatch)"}
+{"name": "T.agent-identity-tamper-detected", "pass": true, "detail": "agent_org.ao_agents: ao_agents: tamper at seq 1 (row_digest mismatch); agent_org.ao_work_products: ao_work_products: tamper at seq 1 (row_digest mismatch); agent_org.ao_manager_decisions: ao_manager_decisions: tamper at seq 1 (row_digest mismatch); decisions: ao_manager_decisions: tamper at seq 1 (row_digest mismatch)"}
+{"name": "T.verdict-tamper-detected", "pass": true, "detail": "agent_org.ao_agents: ao_agents: tamper at seq 1 (row_digest mismatch); agent_org.ao_work_products: ao_work_products: tamper at seq 1 (row_digest mismatch); agent_org.ao_manager_decisions: ao_manager_decisions: tamper at seq 1 (row_digest mismatch); agent_org.ao_review_verdicts: ao_review_verdicts: tamper at seq 1 (row_digest mismatch); decisions: ao_manager_decisions: tamper at seq 1 (row_digest mismatch)"}
+{"name": "T.forged-grant-detected", "pass": true, "detail": "agent_org.ao_agents: ao_agents: tamper at seq 1 (row_digest mismatch); agent_org.ao_assignment_grants: ao_assignment_grants: chain break at seq 2 (prev_digest mismatch); agent_org.ao_work_products: ao_work_products: tamper at seq 1 (row_digest mismatch); agent_org.ao_manager_decisions: ao_manager_decisions: tamper at seq 1 (row_digest mismatch); agent_org.ao_review_verdicts: ao_review_verdicts: tamper at seq 1 (row_digest mismatch); decisions: ao_manager_decisions: tamper at seq 1 (row_digest mismatch)"}

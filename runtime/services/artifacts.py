@@ -23,22 +23,54 @@ Model:
   * Legitimate delete appends a tombstone row (rev=0); the lineage
     stays archived and auditable, never physically removed.
 
-Execution:
-  * python only, in a real subprocess with cwd=sandbox_dir, output
-    captured and capped at 4000 trailing chars, timeout kills the child.
+Execution (merged 2026-09-26: B's sandbox-module design + C's
+inline-preexec specifics):
+  * python only, in a real subprocess; output captured and capped at
+    4000 trailing chars.
+  * Each run gets a FRESH per-run directory under the sandbox dir
+    holding ONLY the artifact's own code file: sibling artifacts'
+    staged files (save_many jobs, other runs' temp files) are never in
+    the child's working directory, so bare relative paths cannot read
+    or clobber them. After the run, files the artifact GENERATED are
+    promoted to the sandbox root (everything except the script file,
+    which lives in the DB) so execute_api's real before/after snapshot
+    still collects them -- L's "generated files land in the sandbox
+    dir" contract. The per-run dir itself is then removed
+    (best-effort).
+  * OS-level hardening comes from the services/sandbox.py MODULE
+    (SandboxContext): rlimits (RLIMIT_CPU/AS/FSIZE/NPROC, env-tunable
+    via REMOR_SANDBOX_*) applied in the child via preexec_fn, plus the
+    opt-in uid drop (REMOR_SANDBOX_PRIVDROP=1). Per-run overrides are
+    accepted as cpu_limit_s=/ram_limit_mb= (None = the module's
+    env-driven defaults).
+  * The child is launched with start_new_session=True (its own process
+    group) and inherits a SCRUBBED minimal environment (see
+    _child_env): no parent env leaks in blindly; HOME/TMPDIR point at
+    the per-run dir so stray writes stay inside it.
+  * On wall-clock timeout -- or any abnormal termination -- the parent
+    SIGKILLs the entire process group with os.killpg and reaps the
+    direct child, so spawned grandchildren cannot survive (no zombie:
+    communicate() after the kill reaps it).
   * Non-python languages get the GUI's existing honest refusal:
     "execution for <lang> is not supported".
   * Empty code is refused ("empty code"), matching the current GUI.
 
 Honest bounds:
-  * The sandbox is "same user, separate process, working-directory
-    scoped, wall-clock killed". No UID isolation, no CPU/RAM cgroup
-    limits, no network/syscall filtering. Grandchild processes spawned
-    by the artifact survive a timeout kill of the direct child. If the
-    HTTP layer ever exposes this, it needs a real sandbox.
-  * Timeout kills only the direct child process; zombies are reaped by
-    subprocess.run (wait after kill), but orphaned grandchildren are
-    possible — BOUNDED, see module docstring of the timeout path.
+  * Same user (unless the opt-in privdrop is active), no chroot / mount
+    namespace / seccomp / network filtering. A deliberately malicious
+    artifact CAN still: read or write anywhere the OS user can
+    (absolute paths and ".." traversal are NOT blocked -- the per-run
+    dir only defeats the *shared-cwd* sibling-file hazard), exfiltrate
+    over the network, fork-bomb within its CPU/RAM budget, attack the
+    kernel, or read the parent's files. RLIMIT_CPU counts CPU time
+    only -- a sleeping process tree is bounded by the wall-clock
+    timeout + killpg.
+  * RLIMIT_AS is virtual-address-space, not resident set: it bites on
+    allocation, and overcommit accounting varies by kernel.
+  * If the HTTP layer ever exposes this to untrusted users, it needs a
+    real sandbox (UID/container/VM); this is a same-user guard against
+    buggy or greedy artifacts, not a security boundary against a
+    malicious same-UID adversary.
 """
 from __future__ import annotations
 
@@ -46,6 +78,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -63,6 +96,59 @@ from swarm_engine.governance.anchor import (
 )
 
 _OUTPUT_CAP = 4000
+
+#: Reference per-run resource defaults (C's inline-preexec values).
+#: The merged run() accepts cpu_limit_s=/ram_limit_mb= overrides;
+#: None (the default) keeps the sandbox module's env-driven limits
+#: (REMOR_SANDBOX_*: 120s CPU / 1024 MB AS generous defaults).
+_DEFAULT_CPU_LIMIT_S = 30
+_DEFAULT_RAM_LIMIT_MB = 256
+
+
+def _child_env(run_dir: str) -> Dict[str, str]:
+    """Minimal scrubbed environment for the artifact child process.
+
+    Nothing from the parent's environment is inherited: secrets,
+    tokens, and host configuration in os.environ never reach the
+    artifact blindly. What IS passed, and why:
+      PATH=/usr/bin:/bin:/usr/local/bin -- the artifact's interpreter
+        is launched by absolute path already; a sane PATH keeps
+        child-spawned tools predictable without leaking custom dirs.
+      HOME=<run_dir>, TMPDIR=<run_dir> -- libraries that write caches
+        or temp files (pip, matplotlib, tempfile) stay inside the
+        per-run dir, which is removed afterwards.
+      LANG/LC_ALL=C.UTF-8 -- deterministic UTF-8 stdio decoding.
+      PYTHONDONTWRITEBYTECODE=1 -- no __pycache__ litter in the dir.
+      PYTHONNOUSERSITE=1 -- the artifact sees the system interpreter
+        environment only, not the operator's user site-packages.
+    Deliberately NOT passed: everything else (HOME of the real user,
+    API keys, proxy config, PYTHONPATH, ...).
+    """
+    return {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": run_dir,
+        "TMPDIR": run_dir,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+    }
+
+
+def _kill_process_group(pid: int) -> None:
+    """SIGKILL every process in pid's process group (best-effort).
+
+    The artifact child is started with start_new_session=True, so it
+    is the group leader: killpg reaches the direct child AND any
+    grandchildren it spawned (which survive a plain child kill and
+    would otherwise be reparented to init). ProcessLookupError means
+    the group is already gone -- the desired end state.
+    """
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
 
 
 # ---------------------------------------------------------------------------
@@ -802,7 +888,17 @@ class ArtifactStore:
         artifact_id: int,
         revision: Optional[int] = None,
         timeout: float = 30,
+        cpu_limit_s: Optional[float] = None,
+        ram_limit_mb: Optional[float] = None,
     ) -> Dict[str, Any]:
+        """Execute a saved python artifact in the hardened sandbox.
+
+        cpu_limit_s / ram_limit_mb override the sandbox module's
+        env-driven rlimits for THIS run only (None = keep the module
+        defaults). Reference values: cpu_limit_s=30, ram_limit_mb=256
+        (C's inline-preexec defaults); the module's generous env
+        defaults (120s / 1024MB) apply when both are None.
+        """
         got = self.get(artifact_id, revision)
         if not got["ok"]:
             return got
@@ -815,47 +911,118 @@ class ArtifactStore:
             }
         if not code.strip():
             return {"ok": False, "error": "empty code"}
-        fd, fpath = tempfile.mkstemp(
-            prefix=f"artifact_{artifact_id}_r{got['revision']}_",
-            suffix=".py",
+        # [S13] OS-level hardening comes from the sandbox MODULE:
+        # rlimits (+ uid drop when viable) are applied in the child via
+        # preexec_fn. The context is built per run so REMOR_SANDBOX_*
+        # env overrides take effect immediately; construction is
+        # idempotent (chown only when the owner differs).
+        from swarm_engine.services import sandbox as _sandbox
+        ctx = _sandbox.SandboxContext(self._sandbox_dir)
+        if cpu_limit_s is not None or ram_limit_mb is not None:
+            # C's per-run configurability: override the env-read limits
+            # on this context only; the module defaults stay untouched.
+            cur = ctx.limits
+            ctx.limits = _sandbox.SandboxLimits(
+                cpu_seconds=int(cpu_limit_s)
+                if cpu_limit_s is not None else cur.cpu_seconds,
+                as_mb=int(ram_limit_mb)
+                if ram_limit_mb is not None else cur.as_mb,
+                fsize_mb=cur.fsize_mb,
+                nproc=cur.nproc,
+            )
+        # C's fresh per-run directory: the child sees ONLY its own code
+        # file in its cwd. Sibling artifacts' staged files (save_many
+        # jobs, other runs' temp files) are never in the child's
+        # working directory, so bare relative paths cannot read or
+        # clobber them. Removed afterwards, best-effort.
+        run_dir = tempfile.mkdtemp(
+            prefix=f"run_{artifact_id}_r{got['revision']}_",
             dir=self._sandbox_dir,
         )
+        if ctx.drop is not None:
+            # Privdrop mode: the per-run dir is root-created; the
+            # dropped child must be able to use it as its cwd.
+            _name, uid, gid = ctx.drop
+            os.chown(run_dir, uid, gid)
+        fpath = os.path.join(
+            run_dir, f"artifact_{artifact_id}_r{got['revision']}.py")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            with open(fpath, "w", encoding="utf-8") as fh:
                 fh.write(code)
+            # Privdrop mode: the script is root-written 0600; the
+            # dropped child must be able to read it.
+            ctx.script_readable_by_child(fpath)
+            # start_new_session=True: the child becomes a process-group
+            # leader, so a timeout can SIGKILL the whole tree (child +
+            # grandchildren), not just the direct child. The child
+            # inherits a scrubbed minimal environment (_child_env).
+            p = subprocess.Popen(
+                [sys.executable, fpath],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=run_dir,
+                env=_child_env(run_dir),
+                start_new_session=True,
+                preexec_fn=ctx.make_preexec(),
+            )
             try:
-                p = subprocess.run(
-                    [sys.executable, fpath],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=self._sandbox_dir,
-                )
-                return {
-                    "ok": True,
-                    "stdout": p.stdout[-_OUTPUT_CAP:],
-                    "stderr": p.stderr[-_OUTPUT_CAP:],
-                    "exit_code": p.returncode,
-                    "timed_out": False,
-                }
-            except subprocess.TimeoutExpired as te:
-                # subprocess.run kills the direct child before raising.
-                return {
-                    "ok": True,
-                    "stdout": (te.stdout or "")[-_OUTPUT_CAP:],
-                    "stderr": (
-                        ((te.stderr or "") + f"\ntimed out after {timeout}s")
-                        if te.stderr
-                        else f"timed out after {timeout}s"
-                    )[-_OUTPUT_CAP:],
-                    "exit_code": None,
-                    "timed_out": True,
-                }
+                stdout, stderr = p.communicate(timeout=timeout)
+                timed_out = False
+                exit_code: Optional[int] = p.returncode
+            except subprocess.TimeoutExpired:
+                # Wall-clock exceeded: kill the entire process group
+                # (grandchildren included), then reap the direct child.
+                # communicate() after the kill reaps it -- no zombie.
+                _kill_process_group(p.pid)
+                stdout, stderr = p.communicate()
+                timed_out = True
+                exit_code = None
+            stdout = (stdout or "")[-_OUTPUT_CAP:]
+            if timed_out:
+                note = f"timed out after {timeout}s"
+                stderr = ((stderr + "\n" + note) if stderr else note)[
+                    -_OUTPUT_CAP:]
+            else:
+                stderr = (stderr or "")[-_OUTPUT_CAP:]
+            return {
+                "ok": True,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+                "sandbox": ctx.describe(),
+            }
         finally:
+            # Promote generated files to the sandbox root BEFORE the
+            # per-run dir is removed: L's collectible-output contract
+            # (execute_api snapshots the sandbox dir before/after the
+            # run with os.walk). The script file itself is excluded --
+            # it is persisted in the artifact DB, not the sandbox.
+            # Best-effort: a promotion failure must never lose the run
+            # result above.
             try:
-                os.remove(fpath)
+                _script_name = os.path.basename(fpath)
+                for _entry in os.listdir(run_dir):
+                    if _entry == _script_name:
+                        continue
+                    _src = os.path.join(run_dir, _entry)
+                    _dst = os.path.join(self._sandbox_dir, _entry)
+                    try:
+                        if os.path.isdir(_src) and not os.path.islink(_src):
+                            if os.path.isdir(_dst):
+                                shutil.copytree(
+                                    _src, _dst, dirs_exist_ok=True)
+                                shutil.rmtree(_src, ignore_errors=True)
+                            else:
+                                shutil.move(_src, _dst)
+                        else:
+                            shutil.move(_src, _dst)
+                    except OSError:
+                        pass
             except OSError:
                 pass
+            shutil.rmtree(run_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

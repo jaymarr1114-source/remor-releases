@@ -41,9 +41,12 @@ Honest design notes (read before extending):
     cycles = report rounds. fraction_complete is therefore 1.0 on a clean
     success and 0.0 while gaps remain; that is the honest reading of this
     representation, not a project-health metric.
-  * delete_project is declared but ABSENT (returns an honest refusal):
-    ingested project roots, store rows, and lifecycle history have no
-    governed deletion path; a partial delete would orphan history.
+  * delete_project is refused with a typed reason (locked Phase 2): users
+    can NEVER permanently delete projects. The governed path is
+    retire_project -> the resumable internal archive (RETIRED state),
+    restorable via project_resume with full state intact.
+  * retire_project stops a running loop first (cooperatively) so a retired
+    project never keeps executing in the background.
   * Monitoring: loop_status() reports rounds_done live (counted from real
     test-run invocations, baseline excluded; approximate while running) and
     the authoritative report.rounds once finished.
@@ -72,6 +75,13 @@ from swarm_engine.services.run_control import (
 )
 
 _TERMINAL = ("completed", "failed", "stopped")
+
+#: Bound on how long retire_project() waits for a running loop to drain
+#: after requesting its (cooperative) stop, before giving up and
+#: refusing the retirement honestly. Policy choice: long enough to cover
+#: a loop parked at a checkpoint or finishing a short round, bounded so
+#: the caller never hangs indefinitely on a wedged loop.
+_RETIRE_DRAIN_TIMEOUT = 30.0
 
 
 def _new_id() -> str:
@@ -148,8 +158,14 @@ class ProjectService:
                 "root": model.root, "file_count": len(model.files),
                 "requirement_count": len(model.requirements)}
 
-    def list_projects(self) -> List[Dict[str, Any]]:
-        """One row per persisted project, merging store + lifecycle + progress."""
+    def list_projects(self, include_retired: bool = False) -> List[Dict[str, Any]]:
+        """One row per persisted project, merging store + lifecycle + progress.
+
+        Retired projects (the locked Phase 2 internal archive) are
+        EXCLUDED from the default listing -- they are neither active nor
+        destroyed. Pass include_retired=True to see them (each row still
+        carries its state, so callers can tell archive from active).
+        """
         rows = []
         for project_id in self._store.list():
             try:
@@ -174,6 +190,10 @@ class ProjectService:
                    "updated_at": updated_at}
             if corrupt:
                 row["error"] = corrupt
+            if state == "retired" and not include_retired:
+                # Retired = resumable internal archive (locked Phase 2):
+                # excluded from active listings, never destroyed.
+                continue
             rows.append(row)
         return rows
 
@@ -214,15 +234,99 @@ class ProjectService:
         return {"ok": True, "project_id": project_id, "state": target.value}
 
     def delete_project(self, project_id: str) -> Dict[str, Any]:
-        # ABSENT by design: there is no governed deletion path for an
-        # ingested project root + store row + lifecycle history. Deleting
-        # the files while leaving history (or vice versa) would orphan
-        # state; refusing is the honest behavior until such a path exists.
+        # Locked Phase 2 decision: users can NEVER permanently delete a
+        # project. Deletion therefore does NOT hard-delete (ingested
+        # roots, store rows, and lifecycle history stay), and it does NOT
+        # silently become retirement either -- a DELETE that archives
+        # would be surprising. It is refused with a typed reason naming
+        # the governed path (retire_project).
         return {"ok": False,
-                "error": "ABSENT: project deletion has no governed path "
-                         "(ingested roots, store rows, and lifecycle history "
-                         "would be orphaned); refusing rather than deleting "
-                         "partially"}
+                "error": "permanent project deletion is refused: projects "
+                         "are never deleted (locked Phase 2 decision); use "
+                         "retire_project to shelve a project into the "
+                         "resumable internal archive",
+                "code": "permanent_deletion_refused",
+                "retire_route": "POST /api/projects/<id>/retire"}
+
+    # ------------------------------------------------------------------
+    # retirement / archive / resume (locked Phase 2: retired = resumable
+    # internal archive, neither active nor destroyed)
+    # ------------------------------------------------------------------
+    def retire_project(self, project_id: str,
+                       reason: str = "") -> Dict[str, Any]:
+        """Shelve a project into the internal archive.
+
+        Implemented as one legal lifecycle transition to RETIRED -- the
+        store model, lifecycle history, and progress are preserved
+        untouched; retirement only appends a log row. A running loop is
+        stopped first and DRAINED (bounded join) before the transition,
+        so a retired project never keeps executing in the background:
+        the stop is cooperative (lands at the next per-round
+        checkpoint), and retiring first would both archive a
+        still-executing project and defeat the settle mapping
+        (EXECUTING -> BLOCKED is refused from RETIRED). If the loop
+        does not drain within _RETIRE_DRAIN_TIMEOUT, the retirement is
+        REFUSED honestly (the stop stays requested; retry once the loop
+        settles) rather than archiving over a live loop.
+        Lock discipline: the worker's finally takes self._lock, so the
+        join must happen with the lock released (else deadlock).
+        """
+        model = self._store.get(project_id)
+        if model is None:
+            return {"ok": False, "error": f"not found: {project_id}"}
+        # Request stop for every live loop of this project, then drain.
+        with self._lock:
+            draining = [
+                (job_id, job["thread"])
+                for job_id, job in self._jobs.items()
+                if job["project_id"] == project_id
+                and job["status"] not in _TERMINAL
+            ]
+            for job_id, _thread in draining:
+                self._jobs[job_id]["control"].request_stop()
+        for job_id, thread in draining:
+            thread.join(timeout=_RETIRE_DRAIN_TIMEOUT)
+            if thread.is_alive():
+                return {"ok": False,
+                        "error": f"cannot retire {project_id}: loop "
+                                 f"{job_id} still draining after "
+                                 f"{_RETIRE_DRAIN_TIMEOUT:g}s (stop was "
+                                 f"requested; it lands at the next loop "
+                                 f"checkpoint). Retry retire once the "
+                                 f"loop settles.",
+                        "code": "retire_loop_still_draining",
+                        "job_id": job_id}
+        return self.transition(
+            project_id, "retired",
+            reason=reason or "retired to internal archive")
+
+    def project_archive(self) -> List[Dict[str, Any]]:
+        """The internal archive: every retired project, full listing rows."""
+        return [r for r in self.list_projects(include_retired=True)
+                if r["state"] == "retired"]
+
+    def project_resume(self, project_id: str) -> Dict[str, Any]:
+        """Restore a retired project to active work.
+
+        One legal transition RETIRED -> ANALYZING (the normal re-entry
+        point). All preserved state -- model, full history including the
+        retirement row, progress -- is intact; the project can be
+        advanced to EXECUTING and run_loop works again.
+        """
+        model = self._store.get(project_id)
+        if model is None:
+            return {"ok": False, "error": f"not found: {project_id}"}
+        try:
+            state = self._lifecycle.state_of(project_id)
+        except ValueError as exc:
+            return {"ok": False,
+                    "error": f"corrupt persisted state for {project_id}: {exc}"}
+        if state is not ProjectState.RETIRED:
+            return {"ok": False,
+                    "error": f"project_resume requires state 'retired' "
+                             f"(currently '{state.value}')"}
+        return self.transition(project_id, "analyzing",
+                               reason="resumed from internal archive")
 
     # ------------------------------------------------------------------
     # run_loop (background) + monitoring
@@ -318,14 +422,23 @@ class ProjectService:
                     error: Optional[str] = None) -> None:
         job = self._jobs[job_id]
         with self._lock:
-            job["status"] = status
-            job["ended_at"] = time.time()
             if report is not None:
                 job["report"] = report
                 job["rounds_done"] = int(report.get("rounds", 0) or 0)
             if error is not None:
                 job["error"] = error
-        self._settle_lifecycle(job, status)
+            # Settle the lifecycle BEFORE the terminal status is published.
+            # loop_status() readers observe the terminal status only under
+            # this lock, so the EXECUTING -> BLOCKED/VERIFYING transition
+            # must be committed (or refused-and-recorded on settle_note)
+            # before job["status"] flips. Otherwise a poller could see
+            # "stopped" while the project was still "executing".
+            # Lock-order safe: _settle_lifecycle opens its own sqlite
+            # connections and never acquires self._lock; no other holder
+            # of self._lock performs sqlite I/O.
+            self._settle_lifecycle(job, status)
+            job["status"] = status
+            job["ended_at"] = time.time()
 
     def _settle_lifecycle(self, job: Dict[str, Any], status: str) -> None:
         """Persist report progress and move the lifecycle legally.

@@ -34,6 +34,9 @@ from swarm_engine.services.run_control import (
     current as _current_run_control,
     set_current as _set_current_run_control,
 )
+from swarm_engine.synthesis.codegen import synthesize_file
+from swarm_engine.synthesis.semantic_frames import Intent, parse_frame
+from swarm_engine.synthesis.semantic_route import route_frame
 
 
 def _normalize_example(ex: Any) -> Optional[Tuple[Dict[str, Any], Any]]:
@@ -222,10 +225,78 @@ class UniversalTaskInterface:
                 _reg, _handle, goal, list(examples), "task_interface.handle",
                 driver_id=driver_id or metadata.get("driver_id"))
 
-        # UNDERSTAND: goal parsing already happens inside the planner/composer
-        # on every call; nothing upstream of that is duplicated here. This
-        # stage exists as a named point in the trace, not a second parser.
-        self._trace(outcome, Stage.UNDERSTAND, True, f"goal: {goal!r}")
+        # UNDERSTAND (NL semantic layer): parse the semantic frame ONCE, then
+        # route it. Directly-answerable intents (ANSWER_META, COMPUTE) and
+        # the NL layer's explicit fail-closed intents (AMBIGUOUS, and the
+        # underspecified CREATE_FILE / unanswerable ANSWER_FACTUAL cases
+        # below) complete HERE with the answer carried in the outcome
+        # value -- an honest refusal is a completed run, never a failed or
+        # misrouted one. CREATE_FILE goes to real codegen inside a
+        # run-scoped governed directory; media intents (IMAGE/VIDEO/SONG/
+        # VOICE) go to the real media substrate or an honest "unavailable".
+        # ANSWER_FACTUAL has no answering machinery downstream (the
+        # existing pipeline would misroute it into capability synthesis),
+        # so it fails closed here too.
+        #
+        # UNKNOWN is deliberately NOT completed here: "no reliable meaning
+        # extracted" is not a verdict the NL layer owns. The legacy
+        # pipeline below is the general-purpose engine -- programmatic
+        # goals ("knowledge_stats"), acquisition tasks ("compute the
+        # triple of n" with examples), and anything else the grammar can't
+        # parse are its domain, and it fails honestly (admission refusal)
+        # when it can't handle them. Completing UNKNOWN here regressed
+        # the scheduler's pause/stop/cancel tests, which depend on the
+        # legacy pipeline running such goals. (Worker D repair, 2026-09-26:
+        # verified against pristine remor_convergence_work @ 8d54b63 --
+        # the 7 failures reproduce on this tree and vanish there.)
+        # Everything else (EXECUTE, ROUTE, UNKNOWN, any other frame)
+        # falls through to the EXISTING pipeline below unchanged:
+        # planner -> composer -> admission -> the 0.55 semantic gate.
+        frame = parse_frame(goal)
+        self._trace(outcome, Stage.UNDERSTAND, True,
+                    f"frame={frame.intent.value} mood={frame.mood} "
+                    f"conf={frame.confidence:.2f}")
+        routed = route_frame(frame, self.engine)
+        if routed.handled and frame.intent != Intent.UNKNOWN:
+            outcome.success = True
+            outcome.value = {
+                "answer": routed.answer_text,
+                "intent": frame.intent.value,
+                "refusal": routed.refusal,
+                "frame": frame.as_dict(),
+                # The live inventory snapshot the answer was built from
+                # (answering engine's own view -- the scheduler engine that
+                # executes runs, which is a different store from the HTTP
+                # front engine's).
+                "detail": routed.detail,
+            }
+            self._trace(
+                outcome, Stage.UNDERSTAND, True,
+                f"semantic route handled intent={frame.intent.value} "
+                f"refusal={routed.refusal}")
+            return outcome
+        if frame.intent == Intent.CREATE_FILE:
+            return self._understand_create_file(frame, outcome, metadata)
+        if frame.intent in (Intent.CREATE_IMAGE, Intent.CREATE_VIDEO,
+                            Intent.CREATE_SONG, Intent.CREATE_VOICE):
+            return self._understand_create_media(frame, outcome, metadata)
+        if frame.intent == Intent.ANSWER_FACTUAL:
+            outcome.success = True
+            outcome.value = {
+                "answer": ("I don't know the answer to that -- I can only "
+                           "answer questions about my own capabilities and "
+                           "inventory, do exact arithmetic, create files, or "
+                           "generate media. Could you rephrase as one of "
+                           "those?"),
+                "intent": frame.intent.value,
+                "refusal": "factual_unanswerable",
+                "frame": frame.as_dict(),
+            }
+            self._trace(outcome, Stage.UNDERSTAND, True,
+                        "ANSWER_FACTUAL has no answering machinery; "
+                        "failing closed instead of misrouting into synthesis")
+            return outcome
+        # EXECUTE / ROUTE / UNKNOWN / other frames: existing pipeline.
 
         # DECOMPOSE: real when the goal is composite (':' or ' then '); a
         # no-op, reported honestly, otherwise. Reuses the same detector
@@ -521,6 +592,220 @@ class UniversalTaskInterface:
                    "handled by the underlying capability/provenance/lifecycle "
                    "stores during EXECUTE/ACQUIRE")
 
+        return outcome
+
+    # ------------------------------------------------------------------
+    # NL semantic layer: CREATE_FILE / media handlers for the UNDERSTAND
+    # stage. Every path is real (planner -> renderer -> governed write ->
+    # subprocess execution; real media substrate) or an honest refusal.
+    # No caller text ever becomes executable code: the only user-text
+    # input to codegen is the frame's `purpose` entity, which is passed to
+    # the planner as a description string, never executed or eval()'d.
+    # ------------------------------------------------------------------
+
+    def _nl_run_dir(self, metadata: Optional[Dict[str, Any]]) -> str:
+        """Run-scoped governed directory for this run's NL artifacts.
+
+        Rooted under the engine DB's directory (<base>/nl_files), namespaced
+        by the scheduler run id when present (the scheduler threads it
+        through metadata) plus a unique suffix so concurrent runs can never
+        share a directory. Created here; ScopedFileService enforces
+        containment on every write inside it.
+        """
+        import os
+        import re
+        import uuid
+        db_path = getattr(self.engine, "db_path", None) or "swarm_engine.db"
+        root = os.path.join(os.path.dirname(os.path.abspath(db_path)),
+                            "nl_files")
+        run_id = (metadata or {}).get("run_id")
+        tag = re.sub(r"[^A-Za-z0-9_-]", "_", str(run_id))[:48] \
+            if run_id else "norun"
+        d = os.path.join(root, f"{tag}_{uuid.uuid4().hex[:8]}")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _understand_create_file(self, frame, outcome: TaskOutcome,
+                                metadata: Optional[Dict[str, Any]]
+                                ) -> TaskOutcome:
+        entities = frame.entities or {}
+        purpose = entities.get("purpose")
+        filename_hint = entities.get("filename_hint")
+        if ((not isinstance(purpose, str) or not purpose.strip())
+                and not filename_hint):
+            # Underspecified ("make it better", bare "create a file"): there
+            # is nothing to synthesize from. Fail closed with a
+            # clarification -- not a failed run, and never a fake file.
+            outcome.success = True
+            outcome.value = {
+                "answer": ("I don't understand what you want the file to do "
+                           "-- tell me its purpose (e.g. 'a random number "
+                           "generator') and optionally a filename."),
+                "intent": frame.intent.value,
+                "refusal": "underspecified_create_file",
+                "frame": frame.as_dict(),
+            }
+            self._trace(outcome, Stage.UNDERSTAND, True,
+                        "CREATE_FILE underspecified; clarification returned, "
+                        "no file written")
+            return outcome
+        run_dir = self._nl_run_dir(metadata)
+        try:
+            res = synthesize_file(frame, self.engine, run_dir)
+        except Exception as exc:  # honest, never silent
+            outcome.success = False
+            outcome.error = (f"file synthesis raised "
+                             f"{type(exc).__name__}: {exc}")
+            self._trace(outcome, Stage.UNDERSTAND, False, outcome.error)
+            return outcome
+        if res.get("ok"):
+            outcome.success = True
+            outcome.value = {
+                "answer": (f"Created {res['path']} "
+                           f"({res['bytes']} bytes). It executed cleanly and "
+                           f"printed {res['execution']['numbers']} numeric "
+                           f"line(s)."),
+                "intent": frame.intent.value,
+                "path": res["path"],
+                "bytes": res["bytes"],
+                "purpose": res.get("purpose"),
+                "ops_used": res.get("ops_used"),
+                "strategy": res.get("strategy"),
+                "execution": res.get("execution"),
+                "frame": frame.as_dict(),
+            }
+            self._trace(outcome, Stage.UNDERSTAND, True,
+                        f"codegen ok path={res['path']} "
+                        f"ops={res.get('ops_used')}")
+        elif (res.get("refusal") == "synthesis_failed"
+                and res.get("grounding_verdict") == "clarify"):
+            # Ungroundable-but-benign purpose: the planner could not compose
+            # a plan that echoes the purpose, so there is nothing honest to
+            # build. Ask for clarification -- an honest question, never a
+            # fake file. (Hostile verdicts fall through to the failure
+            # branch below: a closed refusal, never a file either.)
+            outcome.success = True
+            outcome.value = {
+                "answer": ("I couldn't turn that into a file: I can't tell "
+                           "what the program should actually do from that "
+                           "description. Could you describe the computation "
+                           "or behavior in concrete terms -- for example 'a "
+                           "random number generator' or 'compute the average "
+                           "of a list of numbers'?"),
+                "intent": frame.intent.value,
+                "refusal": "clarify_ungrounded_purpose",
+                "echo_score": res.get("echo_score"),
+                "frame": frame.as_dict(),
+            }
+            self._trace(outcome, Stage.UNDERSTAND, True,
+                        "CREATE_FILE purpose ungroundable "
+                        f"(echo={res.get('echo_score')}); clarification "
+                        "returned, no file written")
+        else:
+            # A genuine synthesis attempt that failed stays a failed run,
+            # with the stage that refused named -- never a fake path.
+            outcome.success = False
+            outcome.error = (f"file synthesis failed "
+                             f"({res.get('refusal')}): {res.get('detail')}")
+            outcome.value = {"intent": frame.intent.value,
+                             "refusal": res.get("refusal"),
+                             "detail": res.get("detail"),
+                             "frame": frame.as_dict()}
+            self._trace(outcome, Stage.UNDERSTAND, False, outcome.error)
+        return outcome
+
+    def _understand_create_media(self, frame, outcome: TaskOutcome,
+                                 metadata: Optional[Dict[str, Any]]
+                                 ) -> TaskOutcome:
+        """Route media intents to the real substrate, or honest unavailable.
+
+        Uses the governed service fronts (services.media / services.voice),
+        which delegate to the verified substrate -- procedural image/video,
+        additive song synthesis, Piper TTS -- with the honest bounds kept
+        in the outcome. Anything missing raises into an "unavailable"
+        answer, never a fabricated artifact.
+        """
+        from swarm_engine.services.unavailable import CapabilityUnavailable
+        intent = frame.intent
+        prompt = (frame.entities or {}).get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            outcome.success = True
+            outcome.value = {
+                "answer": ("I don't understand what media you want -- "
+                           "describe it (e.g. 'a sunset over the ocean')."),
+                "intent": intent.value,
+                "refusal": "underspecified_media",
+                "frame": frame.as_dict(),
+            }
+            self._trace(outcome, Stage.UNDERSTAND, True,
+                        f"{intent.value} underspecified; clarification "
+                        "returned")
+            return outcome
+        prompt = prompt.strip()
+        run_dir = self._nl_run_dir(metadata)
+        bound_names = {
+            Intent.CREATE_IMAGE: "image.png",
+            Intent.CREATE_VIDEO: "video.mp4",
+            Intent.CREATE_SONG: "song.wav",
+            Intent.CREATE_VOICE: "voice.wav",
+        }
+        out_path = __import__("os").path.join(
+            run_dir, bound_names[intent])
+        detail = {"intent": intent.value, "prompt": prompt,
+                  "frame": frame.as_dict()}
+        try:
+            if intent == Intent.CREATE_IMAGE:
+                from swarm_engine.services import media as media_svc
+                res = media_svc.generate_image(prompt, out_path=out_path)
+            elif intent == Intent.CREATE_VIDEO:
+                from swarm_engine.services import media as media_svc
+                res = media_svc.generate_video(prompt, out_path=out_path)
+            elif intent == Intent.CREATE_SONG:
+                from swarm_engine.services import media as media_svc
+                res = media_svc.assemble_song(
+                    prompt, out_path=out_path,
+                    work_dir=__import__("os").path.join(run_dir,
+                                                        "song_work"))
+            else:  # CREATE_VOICE -> speech synthesis (TTS)
+                from swarm_engine.services import voice as voice_svc
+                res = voice_svc.speak(prompt, out_path=out_path)
+        except (ImportError, CapabilityUnavailable) as exc:
+            # Substrate genuinely absent: honest "unavailable", not a fake.
+            outcome.success = True
+            outcome.value = dict(detail, **{
+                "answer": (f"I can't generate {intent.value[7:]} right now: "
+                           f"the media substrate isn't available "
+                           f"({type(exc).__name__})."),
+                "refusal": "media_unavailable",
+            })
+            self._trace(outcome, Stage.UNDERSTAND, True,
+                        f"{intent.value} substrate unavailable: {exc!r}"[:250])
+            return outcome
+        except Exception as exc:  # honest, never silent
+            outcome.success = False
+            outcome.error = (f"{intent.value} generation raised "
+                             f"{type(exc).__name__}: {exc}")
+            self._trace(outcome, Stage.UNDERSTAND, False, outcome.error)
+            return outcome
+        if not res.get("ok"):
+            outcome.success = False
+            outcome.error = (f"{intent.value} substrate refused: "
+                             f"{res.get('error')}")
+            outcome.value = dict(detail, **{"refusal": "media_refused"})
+            self._trace(outcome, Stage.UNDERSTAND, False, outcome.error)
+            return outcome
+        import os as _os
+        outcome.success = True
+        outcome.value = dict(detail, **{
+            "answer": (f"Generated {res.get('out_path', out_path)} "
+                       f"({_os.path.getsize(res.get('out_path', out_path))} "
+                       f"bytes)."),
+            "path": res.get("out_path", out_path),
+            "bounds": res.get("bounds", []),
+            "substrate": res,
+        })
+        self._trace(outcome, Stage.UNDERSTAND, True,
+                    f"{intent.value} ok path={res.get('out_path', out_path)}")
         return outcome
 
     async def _objective_verify(

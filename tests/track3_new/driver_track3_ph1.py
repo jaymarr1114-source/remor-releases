@@ -35,7 +35,7 @@ def phase1(workdir):
 
     # -- admit the sort capability through the real admission path --------
     adm = eng.admission.admit(goal=SORT_GOAL, plan=dict(SORT_PLAN),
-                              name="sort_numbers")
+                              name="sort_numbers", caller=eng.oracle)
     check("capability admitted", adm.ok,
           f"id={getattr(adm, 'capability_id', None)}")
     cap_id = adm.capability_id

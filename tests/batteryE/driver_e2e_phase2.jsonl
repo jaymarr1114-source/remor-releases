@@ -1,0 +1,9 @@
+{"name": "L.rehydrate-audit", "pass": true, "detail": ""}
+{"name": "L.X-preserved", "pass": true, "detail": ""}
+{"name": "L.Y-preserved", "pass": true, "detail": ""}
+{"name": "L.Z-preserved", "pass": true, "detail": ""}
+{"name": "L.Z-provenance", "pass": true, "detail": "['exp_3bb6608f3e6ed35d', 'exp_d2a88536e1f2a785']"}
+{"name": "L.Z-runs-fresh", "pass": true, "detail": "ratios=[0.139, 0.278, 0.163]"}
+{"name": "L.Z-trust", "pass": true, "detail": "TRUSTED"}
+{"name": "L.A-destroyed", "pass": true, "detail": ""}
+{"name": "L.B-retired", "pass": true, "detail": ""}

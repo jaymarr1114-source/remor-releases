@@ -749,6 +749,19 @@ class AcquisitionOrchestrator:
                     if isinstance(_val, list):
                         _seen_lists.append(_val)
             _synthetic = []
+            # Novelty transform for unseen-input probes. Defined once and
+            # used by every probe branch below so scalar, numeric, and
+            # list inputs all get unseen-input coverage.
+            def _nov(v):
+                if isinstance(v, bool):
+                    return not v
+                if isinstance(v, int):
+                    return v + 1009
+                if isinstance(v, float):
+                    return v + 1009.5
+                if isinstance(v, str):
+                    return v + "_novel"
+                return v
             _num_seen = [_k for _k in _seen_keys
                          if isinstance(_k, (int, float))
                          and not isinstance(_k, bool)]
@@ -761,20 +774,36 @@ class AcquisitionOrchestrator:
                     _cand = _mx + _step * _i
                     if _cand not in _seen_keys:
                         _synthetic.append(_cand)
+            # 2026-09-26 (sweep): parity for non-numeric scalar inputs. The
+            # numeric branch above only fires when EVERY seen key is
+            # numeric; a string-keyed (or bool-keyed) table previously
+            # received NO unseen probe and sailed through the gate, while
+            # an identical numeric-keyed table was rejected -- the gate's
+            # "pure lookup is refused as non-generalizing" contract did
+            # not hold by input kind. Apply _nov per seen scalar key so a
+            # pure lookup returns null on the novel key and is refused
+            # here too. Kinds _nov cannot perturb (tuples, None, ...)
+            # collide with the seen set and contribute no probe -- the
+            # same no-coverage posture as before, never a false probe.
+            for _k in sorted(_seen_keys, key=repr):
+                if isinstance(_k, (list, dict)):
+                    continue
+                try:
+                    _cand = _nov(_k)
+                except Exception:
+                    continue
+                try:
+                    _seen_hit = _cand in _seen_keys
+                except TypeError:
+                    _seen_hit = True
+                if not _seen_hit and _cand not in _synthetic:
+                    _synthetic.append(_cand)
+                    if len(_synthetic) >= 2:
+                        break
             # 2026-09-22 (R5): parity for list inputs. A pure table over list
             # keys returns null on an unseen list just as on an unseen scalar.
             # The probe must be SHAPE-FAITHFUL (same element kinds, novel
             # values) or it would false-reject shape-sensitive capabilities.
-            def _nov(v):
-                if isinstance(v, bool):
-                    return not v
-                if isinstance(v, int):
-                    return v + 1009
-                if isinstance(v, float):
-                    return v + 1009.5
-                if isinstance(v, str):
-                    return v + "_novel"
-                return v
             for _lst in _seen_lists:
                 try:
                     if _lst and all(isinstance(e, dict) for e in _lst):
@@ -828,14 +857,40 @@ class AcquisitionOrchestrator:
         return True, f"heldout_passed:{len(heldout)}"
 
     def _reject_capability(self, capability_id: str, reason: str) -> None:
-        """Quarantine/reject a capability that failed held-out admission."""
+        """Quarantine/reject a capability that failed held-out admission.
+
+        Delegates to the single supported quarantine path
+        (synthesis.integrity.quarantine_everywhere): statuses alone do not
+        gate execution -- the registry does -- so a rejection must
+        unregister the capability's primitives, drop its exact-goal
+        bindings, and quarantine its acquired-code entry, not just flip
+        the store row. Without this a held-out-rejected capability stayed
+        registered and callable in-process (and its goal binding
+        survived), i.e. the rejection withdrew nothing but the row.
+        """
+        try:
+            from swarm_engine.synthesis.integrity import (
+                quarantine_everywhere)
+            quarantine_everywhere(
+                self.engine, capability_id,
+                f"held-out admission rejected: {reason}")
+            return
+        except Exception:
+            pass
+        # Fallback: store-row quarantine only (pre-existing behavior) when
+        # the integrity module cannot be reached.
         try:
             if hasattr(self.engine.capabilities, "set_status"):
                 self.engine.capabilities.set_status(capability_id, "quarantined")
             if hasattr(self.engine.capabilities, "log"):
                 self.engine.capabilities.log(capability_id, "heldout_rejected", reason)
             # Unbind from goal if bound
-            if hasattr(self.engine.capabilities, "unbind_goal_if"):
+            try:
+                for g, cid in list(
+                        self.engine.capabilities.goal_bindings().items()):
+                    if cid == capability_id:
+                        self.engine.capabilities.unbind_goal_if(g, capability_id)
+            except Exception:
                 pass
         except Exception:
             pass
@@ -1109,7 +1164,7 @@ class AcquisitionOrchestrator:
         from swarm_engine.synthesis.admission import SmokeTest
         smoke = SmokeTest(args=dict(spec.examples[0][0]),
                           expect=spec.examples[0][1])
-        verdict = self.engine.admission.admit(
+        verdict = self.engine.admit_as_engine(
             spec.description or node.name, plan, smoke=smoke, name=node.name)
         if not verdict.ok:
             return False, f"admission refused: {verdict.stage}", ""
@@ -1241,7 +1296,7 @@ class AcquisitionOrchestrator:
         }
         from swarm_engine.synthesis.admission import SmokeTest
         smoke = SmokeTest(args=dict(examples[0][0]), expect=examples[0][1])
-        verdict = self.engine.admission.admit(spec.description, plan, smoke=smoke)
+        verdict = self.engine.admit_as_engine(spec.description, plan, smoke=smoke)
         if not verdict.ok:
             return False, f"pipeline admission refused: {verdict.stage}", ""
         try:
@@ -1352,7 +1407,7 @@ class AcquisitionOrchestrator:
         smoke = None
         if spec.examples:
             smoke = SmokeTest(args=dict(spec.examples[0][0]), expect=spec.examples[0][1])
-        verdict = self.engine.admission.admit(spec.description, proposal.plan, smoke=smoke)
+        verdict = self.engine.admit_as_engine(spec.description, proposal.plan, smoke=smoke)
         if not verdict.ok:
             return False, f"admission refused: {verdict.stage}", ""
         self.engine.capabilities.bind_goal(spec.description, verdict.capability_id)
@@ -1468,7 +1523,7 @@ class AcquisitionOrchestrator:
         # reproduce exact outputs; the examples are the evidence.
         from swarm_engine.synthesis.admission import SmokeTest
         first_args, first_expect = spec.examples[0]
-        verdict = self.engine.admission.admit(
+        verdict = self.engine.admit_as_engine(
             spec.description, plan,
             smoke=SmokeTest(args=dict(first_args), expect=first_expect))
         if not verdict.ok:
@@ -1556,7 +1611,7 @@ class AcquisitionOrchestrator:
         expect = run.get("value")
         from swarm_engine.synthesis.admission import SmokeTest
         try:
-            verdict = self.engine.admission.admit(
+            verdict = self.engine.admit_as_engine(
                 goal, plan,
                 smoke=SmokeTest(args=dict(smoke_args), expect=expect))
         except Exception:
@@ -1855,7 +1910,7 @@ class AcquisitionOrchestrator:
         from swarm_engine.synthesis.admission import SmokeTest
         first_args, first_expect = spec.examples[0]
         try:
-            verdict = self.engine.admission.admit(
+            verdict = self.engine.admit_as_engine(
                 spec.description, plan,
                 smoke=SmokeTest(args=dict(first_args), expect=first_expect))
         except Exception as exc:
@@ -2117,7 +2172,7 @@ class AcquisitionOrchestrator:
         from swarm_engine.synthesis.admission import SmokeTest
         first_args, first_expect = spec.examples[0]
         try:
-            verdict = self.engine.admission.admit(
+            verdict = self.engine.admit_as_engine(
                 spec.description, plan,
                 smoke=SmokeTest(args=dict(first_args), expect=first_expect))
         except Exception as exc:
@@ -2453,7 +2508,7 @@ class AcquisitionOrchestrator:
         from swarm_engine.synthesis.admission import SmokeTest
         first_args, first_expect = spec.examples[0]
         try:
-            verdict = self.engine.admission.admit(
+            verdict = self.engine.admit_as_engine(
                 spec.description, plan,
                 smoke=SmokeTest(args=dict(first_args), expect=first_expect))
         except Exception as exc:
@@ -2727,7 +2782,7 @@ class AcquisitionOrchestrator:
         from swarm_engine.synthesis.admission import SmokeTest
         first_args, first_expect = spec.examples[0]
         try:
-            verdict = self.engine.admission.admit(
+            verdict = self.engine.admit_as_engine(
                 spec.description, plan,
                 smoke=SmokeTest(args=dict(first_args), expect=first_expect))
         except Exception as exc:
@@ -3036,7 +3091,7 @@ class AcquisitionOrchestrator:
         from swarm_engine.synthesis.admission import SmokeTest
         first_args, first_expect = spec.examples[0]
         try:
-            verdict = self.engine.admission.admit(
+            verdict = self.engine.admit_as_engine(
                 spec.description, plan,
                 smoke=SmokeTest(args=dict(first_args), expect=first_expect))
         except Exception as exc:
@@ -3127,7 +3182,7 @@ class AcquisitionOrchestrator:
         from swarm_engine.synthesis.admission import SmokeTest
         first_args, first_expect = spec.examples[0]
         try:
-            verdict = self.engine.admission.admit(
+            verdict = self.engine.admit_as_engine(
                 spec.description, plan,
                 smoke=SmokeTest(args=dict(first_args), expect=first_expect))
         except Exception as exc:
@@ -3531,7 +3586,7 @@ class AcquisitionOrchestrator:
         # exact outputs; the examples are the evidence.
         from swarm_engine.synthesis.admission import SmokeTest
         first_args, first_expect = spec.examples[0]
-        verdict = self.engine.admission.admit(
+        verdict = self.engine.admit_as_engine(
             spec.description, plan,
             smoke=SmokeTest(args=dict(first_args), expect=first_expect))
         if not verdict.ok:
@@ -3671,7 +3726,7 @@ class AcquisitionOrchestrator:
                 from swarm_engine.synthesis.admission import SmokeTest
                 first_args, first_expect = spec.examples[0]
                 smoke = SmokeTest(args=dict(first_args), expect=first_expect)
-                verdict = self.engine.admission.admit(spec.description, result.plan, smoke=smoke)
+                verdict = self.engine.admit_as_engine(spec.description, result.plan, smoke=smoke)
                 if verdict.ok:
                     ok, detail = self._heldout_admission_gate(spec, verdict.capability_id)
                     if not ok:
@@ -3801,7 +3856,7 @@ class AcquisitionOrchestrator:
                 if not (run.get("success") and run.get("value") == expect):
                     break
             else:
-                adm = self.engine.admission.admit(
+                adm = self.engine.admit_as_engine(
                     spec.description or node.name, plan,
                     smoke=SmokeTest(args=dict(first_args), expect=first_expect),
                     name=node.name)
@@ -3841,7 +3896,7 @@ class AcquisitionOrchestrator:
             if not (run.get("success") and run.get("value") == expect):
                 return False, (f"induced table fails behavioural check on "
                                f"{args}: got {run.get('value')!r}"), ""
-        adm = self.engine.admission.admit(
+        adm = self.engine.admit_as_engine(
             spec.description or node.name, plan,
             smoke=SmokeTest(args=dict(first_args), expect=first_expect),
             name=node.name)

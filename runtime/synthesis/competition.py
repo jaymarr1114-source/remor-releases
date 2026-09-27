@@ -215,17 +215,37 @@ class CompetitionPool:
             if competitor.capability_id == result.winner:
                 continue
             try:
-                current = self.engine.lifecycle.state_of(competitor.capability_id)
-                if current.value not in ("deprecated", "quarantined"):
-                    self.engine.lifecycle.transition(
-                        competitor.capability_id,
-                        self.engine.lifecycle.state_of(competitor.capability_id),
-                        reason="", force=True)  # no-op if already terminal
-                    from swarm_engine.governance.lifecycle import LifecycleState
-                    self.engine.lifecycle.transition(
-                        competitor.capability_id, LifecycleState.DEPRECATED,
-                        reason=f"lost capability competition for {goal!r} to "
-                               f"{result.winner}", force=True)
+                self._demote_loser(goal, result.winner,
+                                   competitor.capability_id)
             except Exception:
                 pass  # lifecycle bookkeeping failure must not undo the promotion
         return result
+
+    def _demote_loser(self, goal: str, winner_id: str,
+                      loser_id: str) -> None:
+        """Deprecate a competition loser in the lifecycle graph.
+
+        The forced DEPRECATED hop IS the demotion -- there is deliberately
+        no "no-op" self-transition first (self-transitions are illegal,
+        and the force hatch only reaches fail-closed targets, so the old
+        self-transition aborted the whole block via IllegalTransition and
+        losers were never deprecated). A LifecycleIntegrityError from the
+        pre-check (state row deleted out of band) does not skip the
+        demotion either: the forced hop is itself the governed heal path
+        -- CapabilityLifecycle.transition reconstructs the row from
+        history -- so the loser still leaves the effectively-active set
+        instead of staying silently routable.
+        """
+        from swarm_engine.governance.lifecycle import (
+            LifecycleState, LifecycleIntegrityError)
+        try:
+            current = self.engine.lifecycle.state_of(loser_id)
+        except LifecycleIntegrityError:
+            current = None  # row deleted out of band; forced hop heals it
+        if current is not None and current.value in ("deprecated",
+                                                     "quarantined"):
+            return
+        self.engine.lifecycle.transition(
+            loser_id, LifecycleState.DEPRECATED,
+            reason=f"lost capability competition for {goal!r} to {winner_id}",
+            force=True)

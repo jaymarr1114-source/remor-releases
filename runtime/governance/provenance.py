@@ -282,18 +282,53 @@ class ProvenanceStore:
 
     # -- writing ------------------------------------------------------------
     def record(self, record: ProvenanceRecord) -> ProvenanceRecord:
+        """Register a capability's provenance (or refresh its description).
+
+        Trust and evidence are LEDGER state, not description: re-recording
+        an existing capability_id never overwrites trust, successes, or
+        failures. A re-acquired identical artifact inherits the ledger's
+        trust instead of resetting it (previously INSERT OR REPLACE
+        silently demoted e.g. TRUSTED/40-successes back to TESTED/0 with
+        no chained transition -- an out-of-band trust write through the
+        sanctioned API). Trust moves only via set_trust(); a re-record
+        that requests a different trust is logged loudly, not applied.
+        """
+        existing = self.get(record.capability_id)
         with self._conn() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO provenance
-                (capability_id, origin, trust, source, parents, primitives_used,
-                 effects, created_at, successes, failures)
-                VALUES (?,?,?,?,?,?,?,?,?,?)""", (
-                record.capability_id, record.origin.value, record.trust.value,
-                record.source, json.dumps(record.parents),
-                json.dumps(record.primitives_used), json.dumps(record.effects),
-                record.created_at, record.successes, record.failures))
-        self.log(record.capability_id, "recorded",
-                 f"origin={record.origin.value} trust={record.trust.name}")
+            if existing is None:
+                conn.execute("""
+                    INSERT INTO provenance
+                    (capability_id, origin, trust, source, parents, primitives_used,
+                     effects, created_at, successes, failures)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""", (
+                    record.capability_id, record.origin.value, record.trust.value,
+                    record.source, json.dumps(record.parents),
+                    json.dumps(record.primitives_used), json.dumps(record.effects),
+                    record.created_at, record.successes, record.failures))
+            else:
+                conn.execute("""
+                    UPDATE provenance
+                    SET origin=?, source=?, parents=?, primitives_used=?,
+                        effects=?
+                    WHERE capability_id=?""", (
+                    record.origin.value, record.source,
+                    json.dumps(record.parents),
+                    json.dumps(record.primitives_used),
+                    json.dumps(record.effects), record.capability_id))
+        if existing is None:
+            self.log(record.capability_id, "recorded",
+                     f"origin={record.origin.value} trust={record.trust.name}")
+        elif existing.trust != record.trust:
+            self.log(record.capability_id, "record_trust_preserved",
+                     f"re-record requested trust={record.trust.name}; "
+                     f"kept ledger trust={existing.trust.name} "
+                     f"successes={existing.successes} "
+                     f"failures={existing.failures} "
+                     f"(trust changes only via set_trust)")
+        else:
+            self.log(record.capability_id, "recorded",
+                     f"origin={record.origin.value} trust={record.trust.name} "
+                     f"(re-recorded; ledger trust/evidence preserved)")
         return record
 
     def log(self, capability_id: str, event: str, detail: str = "") -> None:
@@ -324,12 +359,16 @@ class ProvenanceStore:
             logged_head = self.oracle_registry.current_trust(capability_id)
             # If the log already disagrees with the row, the row was mutated
             # out of band: do not stack a transition on a corrupted base.
+            # The appended transition starts from the VERIFIED LOG HEAD,
+            # never the tampered row's claimed state (the row's word is
+            # exactly what is under suspicion).
             if (logged_head is not None and current is not None
                     and logged_head != current.trust.name):
                 self.log(capability_id, "trust_tamper_detected",
                          f"provenance row trust={current.trust.name} != "
                          f"transition log head={logged_head}: quarantining")
                 level = TrustLevel.QUARANTINED
+                from_state = logged_head
                 reason = (reason + " [tamper detected: row disagreed with "
                           "transition log]").strip()
             trans_id = handle.transition_trust(
@@ -362,12 +401,39 @@ class ProvenanceStore:
         if head is None:
             return True, "no transitions recorded for capability"
         if current is None or current.trust.name != head:
-            self._quarantine_raw(
-                capability_id,
+            self._quarantine_chained(
+                capability_id, head,
                 f"trust row ({current.trust.name if current else 'missing'}) "
                 f"!= transition log head ({head})")
             return False, "trust row disagrees with transition log: quarantined"
         return True, "trust row matches transition log head"
+
+    def _quarantine_chained(self, capability_id: str,
+                            log_head: Optional[str], reason: str) -> None:
+        """Quarantine as an authorized, attributed, chained event.
+
+        Used when the transition log itself is intact but the provenance
+        row disagrees with the log head (out-of-band row edit). The old
+        _quarantine_raw wrote the trust flip as a bare UPDATE, which left
+        row != log head permanently: every later audit_trust/set_trust
+        then reported FRESH tampering caused by the store's own honest
+        quarantine, and a legitimate re-admission was silently downgraded.
+        Appending head -> QUARANTINED keeps row and head in agreement, so
+        the quarantine is loud once, not a permanent false tamper alarm.
+        """
+        handle = self.engine_oracle
+        if handle is None:
+            self._quarantine_raw(
+                capability_id,
+                reason + " [no oracle authority available: unchained]")
+            return
+        trans_id = handle.transition_trust(
+            capability_id, log_head, TrustLevel.QUARANTINED.name, reason)
+        with self._conn() as conn:
+            conn.execute("UPDATE provenance SET trust=? WHERE capability_id=?",
+                         (TrustLevel.QUARANTINED.value, capability_id))
+        self.log(capability_id, "trust_tamper_detected",
+                 f"{reason[:400]} [transition={trans_id}]")
 
     def _quarantine_raw(self, capability_id: str, reason: str) -> None:
         with self._conn() as conn:

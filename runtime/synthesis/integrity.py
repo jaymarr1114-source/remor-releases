@@ -310,10 +310,14 @@ def effective_status(engine, capability_id: str) -> Dict[str, Any]:
 
 
 def quarantine_everywhere(engine, capability_id: str,
-                          reason: str) -> Dict[str, Any]:
+                          reason: str, *,
+                          caller: Any = None) -> Dict[str, Any]:
     """Quarantine across all three status systems at once, with the
     reason logged in each. This is the only supported way to
     quarantine: it cannot leave the systems disagreeing.
+
+    caller: REQUIRED -- the caller must hold 'agent:quarantine'.
+    Unauthenticated or unauthorized callers are refused (default-deny).
 
     2026-09-19: also unregisters the capability's acquired primitive(s)
     -- previously the statuses flipped but the primitive stayed callable,
@@ -322,7 +326,18 @@ def quarantine_everywhere(engine, capability_id: str,
     (dependents become `dependency_quarantined`, a derived state eligible
     for automatic recovery, not an epistemic withdrawal).
     """
-    actions: Dict[str, Any] = {"reason": reason}
+    from swarm_engine.governance.caller_authorization import (
+        AgentDirectory, AuthorizationError, require_authorized)
+    from swarm_engine.governance.oracle_binding import DECISION_QUARANTINE
+    oreg = getattr(engine, "oracle_registry", None)
+    if oreg is None:
+        raise AuthorizationError(
+            "quarantine_everywhere refused: engine has no oracle registry "
+            "-- caller authorization cannot be verified")
+    authed = require_authorized(
+        oreg, AgentDirectory(oreg), caller, DECISION_QUARANTINE,
+        "quarantine_everywhere", target=capability_id)
+    actions: Dict[str, Any] = {"reason": reason, "caller": authed}
     engine.capabilities.set_status(capability_id, "quarantined")
     actions["store"] = "quarantined"
     # Drop exact-goal bindings to this id so recover can bind a live
@@ -447,11 +462,20 @@ def _unregister_capability_primitives(engine, capability_id: str) -> list:
 
 
 def restore_everywhere(engine, capability_id: str, *,
-                       authority=None, reason: str = "",
+                       caller: Any = None, reason: str = "",
                        smoke=None) -> Dict[str, Any]:
     """Governed inverse of quarantine_everywhere: the 'restore path that
     inverts the revocation' named (but never implemented) by
     capability_store.py's deliberate-quarantine comment.
+
+    caller: REQUIRED -- the caller must hold BOTH 'agent:restore' (the
+    restore itself) and 'trust:transition' (the trust hop it entails).
+    Authentication is by token, never by a bare producer_id attribute:
+    the old ``authority`` handle was forgeable -- any object with a
+    producer_id attribute passed the check without proving it holds the
+    credential. The HTTP adapter previously passed the ENGINE's own
+    handle for every HTTP caller; it now forwards the HTTP caller's own
+    credentials.
 
     This is NOT a status flip. The persisted plan is re-verified through the
     real admission path (type check, effect ceiling, permission check, and an
@@ -475,7 +499,8 @@ def restore_everywhere(engine, capability_id: str, *,
         audit_all's fixpoint recovery);
       * it was not epistemically revoked (vindication path only -- the
         epistemic guard in admit() is never bypassed);
-      * an authority holding 'trust:transition' is supplied;
+      * the caller holds 'agent:restore' AND 'trust:transition'
+        (token-authenticated);
       * the persisted plan still fingerprints to its id (else corruption);
       * its goal binding is not held by another ACTIVE capability.
 
@@ -483,13 +508,32 @@ def restore_everywhere(engine, capability_id: str, *,
     unregisters the primitive, so the three systems stay consistent and the
     capability cannot run half-restored (fail closed).
     """
-    from swarm_engine.governance.oracle_binding import DECISION_TRUST_TRANSITION
+    from swarm_engine.governance.caller_authorization import (
+        AgentDirectory, AuthorizationError, require_all,
+        _engine_caller_context)
+    from swarm_engine.governance.oracle_binding import (
+        DECISION_RESTORE, DECISION_TRUST_TRANSITION)
     from swarm_engine.synthesis.admission import Verdict
 
     actions: Dict[str, Any] = {"capability_id": capability_id,
                                "reason": reason}
     if not reason:
         raise RestoreRefused("restore requires a non-empty reason (audited)")
+
+    oreg = getattr(engine, "oracle_registry", None)
+    if oreg is None:
+        raise AuthorizationError(
+            "restore_everywhere refused: engine has no oracle registry "
+            "-- caller authorization cannot be verified")
+    # The caller must hold BOTH 'agent:restore' and 'trust:transition'.
+    # Token-authenticated: a forged handle with a bare producer_id no
+    # longer passes.
+    authed = require_all(
+        oreg, AgentDirectory(oreg), caller,
+        (DECISION_RESTORE, DECISION_TRUST_TRANSITION),
+        "restore_everywhere", target=capability_id)
+    actions["authority"] = authed
+    actions["caller"] = authed
 
     rec = engine.capabilities.get(capability_id)
     if rec is None:
@@ -513,20 +557,6 @@ def restore_everywhere(engine, capability_id: str, *,
         raise RestoreRefused(
             "epistemically revoked: restore refused; vindication path only")
     actions["epistemic_clear"] = True
-
-    if authority is None:
-        raise RestoreRefused(
-            "restore requires an authorized producer (authority=None)")
-    producer_id = getattr(authority, "producer_id", None)
-    if not producer_id:
-        raise RestoreRefused("authority has no producer_id")
-    oreg = getattr(engine, "oracle_registry", None)
-    if oreg is not None and not oreg.producer_authorized(
-            producer_id, DECISION_TRUST_TRANSITION):
-        raise RestoreRefused(
-            f"producer {producer_id!r} lacks 'trust:transition' authority: "
-            "restore refused")
-    actions["authority"] = producer_id
 
     # Integrity: the persisted plan must fingerprint to its own id, exactly
     # as admission's reuse stage demands. A corrupted stored plan must NOT
@@ -562,11 +592,14 @@ def restore_everywhere(engine, capability_id: str, *,
     # re-binds the goal, and re-registers acquired.<id> via the same
     # registration path fresh admission uses. _restore_reverification=True
     # skips ONLY admission's 0c deliberate-quarantine guard -- this restore
-    # has already been authorized (trust:transition authority checked
+    # has already been authorized (agent:restore + trust:transition checked
     # above); the epistemic guard and all other stages still apply.
+    # Engine-mediated: the engine's own caller context, so admit() records
+    # the engine (which IS performing this re-verification) as supplier;
+    # the originating caller is in actions["authority"]/reason.
     admit_result = engine.admission.admit(
         goal=rec.goal or rec.name, plan=dict(rec.plan),
-        smoke=smoke, supplier_id=producer_id,
+        smoke=smoke, caller=_engine_caller_context(engine),
         _restore_reverification=True)
     actions["admission_verdict"] = admit_result.verdict
     actions["admission_stage"] = admit_result.stage
@@ -614,14 +647,16 @@ def restore_everywhere(engine, capability_id: str, *,
             current = nxt
         actions["lifecycle_walk"] = walked
 
-        # Trust: governed transition through the tamper-evident log.
-        # set_trust re-checks authority itself (defense in depth).
+        # Trust: governed transition through the tamper-evident log,
+        # executed by the engine's own instrument (set_trust defaults to
+        # the store's engine handle) and attributed to the engine producer.
+        # The external caller never supplies trust authority directly --
+        # it was already required to hold 'trust:transition' at the gate.
         _ensure_provenance(engine, capability_id)
         engine.provenance.set_trust(
             capability_id, TrustLevel.TRUSTED,
-            f"restored_everywhere: {reason}; re-verified "
-            f"{admit_result.verdict} at {admit_result.stage}",
-            authority=authority)
+            f"restored_everywhere by {authed}: {reason}; re-verified "
+            f"{admit_result.verdict} at {admit_result.stage}")
         actions["trust"] = TrustLevel.TRUSTED.value
     except RestoreRefused:
         raise
@@ -639,7 +674,7 @@ def restore_everywhere(engine, capability_id: str, *,
             "left quarantined")
 
     engine.capabilities.log(capability_id, "restored_everywhere",
-                            json.dumps({"authority": producer_id,
+                            json.dumps({"authority": authed,
                                         "reason": reason,
                                         "admission_verdict": admit_result.verdict,
                                         "admission_stage": admit_result.stage,

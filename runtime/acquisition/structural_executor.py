@@ -112,10 +112,15 @@ def validate_callable_candidate(
 class StructuralRepresentationExecutor:
     """Entrypoint for Strategy.STRUCTURAL."""
 
-    def __init__(self, registry=None, composer=None, admission=None):
+    def __init__(self, registry=None, composer=None, admission=None,
+                 caller=None):
         self.registry = registry
         self.composer = composer
         self.admission = admission
+        # Caller authorization: the engine passes its own caller context
+        # so the admission below is attributed. Without a caller the
+        # admit() refuses (default-deny).
+        self.caller = caller
 
     def execute(self, spec: Any) -> StructuralAcquisitionAttempt:
         target = dict(getattr(spec, "acquisition_target", None) or {})
@@ -188,7 +193,8 @@ class StructuralRepresentationExecutor:
                     name = f"structural_{cand.op}_" + "_".join(
                         f"{k}{v}" for k, v in sorted((cand.bound or {}).items()))
                     verdict = self.admission.admit(
-                        goal=str(goal), plan=plan, smoke=smoke, name=name[:80])
+                        goal=str(goal), plan=plan, smoke=smoke, name=name[:80],
+                        caller=self.caller)
                     admission_results.append({
                         "candidate": cand.as_dict() if hasattr(cand, "as_dict") else cand,
                         "verdict": verdict.verdict,

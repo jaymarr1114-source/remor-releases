@@ -10,7 +10,7 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pylib"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "pylib"))
 
 from swarm_engine.core.engine import SwarmEngine
 from swarm_engine.synthesis.admission import Verdict
@@ -42,8 +42,10 @@ CONCAT_PLAN = {
 def main():
     db = os.path.join(tempfile.mkdtemp(prefix="router_", dir=SCRATCH), "eng.db")
     eng = SwarmEngine(db_path=db)
-    r1 = eng.admission.admit(goal="add two numbers together", plan=dict(ADD_PLAN))
-    r2 = eng.admission.admit(goal="concatenate two strings", plan=dict(CONCAT_PLAN))
+    r1 = eng.admission.admit(goal="add two numbers together", plan=dict(ADD_PLAN),
+                            caller=eng.oracle)
+    r2 = eng.admission.admit(goal="concatenate two strings", plan=dict(CONCAT_PLAN),
+                            caller=eng.oracle)
     assert r1.verdict == Verdict.ADMITTED and r2.verdict == Verdict.ADMITTED
     add_id, concat_id = r1.capability_id, r2.capability_id
 
@@ -88,7 +90,8 @@ def main():
     # quarantined capability is not routable (goal binding was dropped by
     # quarantine_everywhere, so the router reports unknown_intent --
     # either way it must not route)
-    quarantine_everywhere(eng, add_id, "router test quarantine")
+    quarantine_everywhere(eng, add_id, "router test quarantine",
+                          caller=eng.oracle)
     rq = router.route("add two numbers together")
     check("route: quarantined capability refused",
           not rq.ok and rq.refusal in ("capability_unavailable", "unknown_intent"),

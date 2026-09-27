@@ -31,6 +31,12 @@ def check(name, cond):
 
 WORK = os.path.join(_WORK_ROOT, "agent_org_t1")
 shutil.rmtree(WORK, ignore_errors=True)
+# The anchor journal lives at <WORK>/../anchor_store (sibling of the DB
+# dir, per default_anchor_paths), so clearing WORK alone leaves a stale
+# journal whose heads no longer match the fresh deployment -> boot
+# correctly refuses with AnchorMismatch. A fresh deploy_org needs a fresh
+# journal; clear the sibling too.
+shutil.rmtree(os.path.join(_WORK_ROOT, "anchor_store"), ignore_errors=True)
 
 # 1. codec round-trips (run at import of the test script, not silently)
 r = self_check()

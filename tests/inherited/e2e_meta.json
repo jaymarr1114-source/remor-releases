@@ -1,0 +1,11 @@
+{
+  "workdir": "/home/hatch/workspace/remor_convergence/canonical/tests/inherited/work/batteryE/ao_e2e_c_yrch58/work",
+  "A": "agt_f2cf5be80e332946",
+  "B": "agt_0443c4d32316303a",
+  "expX": "exp_96be210af2bfc7bd",
+  "expY": "exp_7dd7113e5e9fa1e3",
+  "expZ": "exp_9b1a7b612b637320",
+  "techX": "chunk_dedup",
+  "techY": "rle",
+  "elapsed_s": 42.2
+}

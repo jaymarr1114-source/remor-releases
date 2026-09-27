@@ -17,11 +17,20 @@ Routing policy (fail closed):
      normalized request text exactly matches a bound goal AND that
      capability is effectively active (tri-system), route via "exact_goal".
   3. Otherwise structural ranking over effectively-active candidates:
-     - no candidate at/above min_score -> refuse "unknown_intent";
-     - top candidate wins only if unambiguous: either it is the sole
-       candidate or its lead over the runner-up is >= ambiguity_margin;
+     - a top candidate at/above min_score wins only if unambiguous
+       (sole candidate, or lead over runner-up >= ambiguity_margin);
        otherwise refuse "ambiguous_intent".
-  4. A routed capability is identified by validated capability_id only.
+  4. Effect fallback: if effects were inferred from the request text but
+     no candidate reached min_score, select the effectively-active
+     candidate whose plan-declared effects (the acquisition.intent
+     lexicon namespace, e.g. "media_image") best match the inferred
+     effects, instead of refusing "unknown_intent". Deterministic
+     tie-break, recorded in the reasons: largest declared∩inferred
+     overlap, then fewest declared effects beyond the inferred set
+     (specificity), then lexicographically smallest capability_id.
+     Routes via "effect_fallback". No inferred effects -> still
+     "unknown_intent".
+  5. A routed capability is identified by validated capability_id only.
      The router never resolves caller-supplied callables, names, or paths.
 
 "Effectively active" means integrity.effective_status(...) == "active"
@@ -48,7 +57,7 @@ class RouteResult:
     ok: bool
     capability_id: Optional[str] = None
     capability_name: Optional[str] = None
-    via: Optional[str] = None          # "exact_goal" | "structural"
+    via: Optional[str] = None          # "exact_goal" | "structural" | "effect_fallback"
     score: float = 0.0
     effects: List[str] = field(default_factory=list)
     reasons: List[str] = field(default_factory=list)
@@ -94,6 +103,61 @@ class IntentRouter:
                 out.append(rec)
         return out
 
+    # -- effect fallback --------------------------------------------------
+    @staticmethod
+    def _declared_plan_effects(rec) -> set:
+        """Lexicon-namespace effects a capability's admitted plan declares.
+
+        Reads the plan's own "effects" key (e.g. ["media_image"] as
+        declared by media_plan()). Records whose plans predate the
+        declaration declare nothing and can never match here.
+        """
+        try:
+            plan = rec.plan or {}
+        except Exception:
+            return set()
+        eff = plan.get("effects") or []
+        return {str(e) for e in eff if isinstance(e, str)}
+
+    def _effect_fallback(self, text: str, effects: List[str],
+                         candidates: List[Any],
+                         reasons: List[str]) -> Optional[RouteResult]:
+        """Route by declared plan effects when structural scoring fails.
+
+        Returns a RouteResult, or None when no effectively-active
+        candidate declares any of the inferred effects (caller then
+        refuses unknown_intent as before).
+        """
+        inferred = set(effects)
+        scored = []
+        for rec in candidates:
+            declared = self._declared_plan_effects(rec)
+            overlap = declared & inferred
+            if not overlap:
+                continue
+            scored.append((rec, declared, overlap))
+        if not scored:
+            return None
+        # Deterministic, recorded tie-break: largest overlap, then most
+        # specific (fewest declared effects beyond the inferred set),
+        # then smallest capability_id (total order -- exactly one winner).
+        scored.sort(key=lambda t: (-len(t[2]), len(t[1] - inferred),
+                                   t[0].capability_id))
+        rec, declared, overlap = scored[0]
+        cap_id = rec.capability_id
+        full = self.engine.capabilities.get(cap_id)
+        r2 = list(reasons) + [
+            f"effect fallback: inferred_effects={sorted(inferred)}; "
+            f"{cap_id[:12]}... declares {sorted(declared)} "
+            f"(overlap {sorted(overlap)}); tie-break: overlap desc, "
+            f"specificity asc, capability_id asc; "
+            f"{len(scored)} effect-matching candidate(s) considered",
+        ]
+        return RouteResult(
+            ok=True, capability_id=cap_id,
+            capability_name=getattr(full, "name", None),
+            via="effect_fallback", score=0.0, effects=effects,
+            reasons=r2)
     # -- routing ----------------------------------------------------------
     def route(self, text: str) -> RouteResult:
         if not isinstance(text, str):
@@ -146,6 +210,14 @@ class IntentRouter:
             registry=self.engine.primitives,
             min_score=self.min_score)
         if not scored:
+            if effects:
+                fb = self._effect_fallback(stripped, effects, candidates,
+                                           reasons)
+                if fb is not None:
+                    return fb
+                reasons = reasons + ["effect fallback: no effectively-active "
+                                     "capability declares any of the "
+                                     "inferred effects"]
             return RouteResult(ok=False, refusal="unknown_intent",
                                effects=effects,
                                reasons=reasons + [

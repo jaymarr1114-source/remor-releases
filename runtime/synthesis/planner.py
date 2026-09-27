@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from swarm_engine.primitives.core import (
     ANY, BOOL, DICT, LIST, NUM, STR, Effect, PrimitiveRegistry, TypeSpec, Kind,
+)
+from swarm_engine.synthesis.semantic_frames import (
+    IntentFrame, parse_frame,
 )
 
 _KIND_NAMES = {Kind.INT: "int", Kind.FLOAT: "float", Kind.NUM: "num",
@@ -54,25 +57,42 @@ class PlanProposal:
 
 
 # ---------------------------------------------------------------------------
-# GOAL PARSING
+# GOAL PARSING (NL semantic layer: frame-derived, keyword hints retired)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Goal:
     """A normalised request. `raw` is what the caller said; everything else is
-    what the planner managed to extract from it."""
+    what the semantic frame layer extracted from it.
+
+    `frame` is the IntentFrame this goal was derived from (None only for
+    goals built by hand, e.g. in tests). `actionable` is False when the
+    frame is AMBIGUOUS or UNKNOWN: the goal carries no reliable meaning,
+    so NL entry points (the task-interface UNDERSTAND stage) must fail
+    closed instead of misrouting. Programmatic callers that pass purpose
+    fragments (codegen purposes like "random number generator") still get
+    the legacy keyword-hint extraction for verbs/nouns/wants_type, so
+    their behavior is unchanged -- the flag is what distinguishes "no
+    grammatical parse" from "a real request".
+    """
     raw: str
     verbs: List[str] = field(default_factory=list)
     nouns: List[str] = field(default_factory=list)
     numbers: List[float] = field(default_factory=list)
     quoted: List[str] = field(default_factory=list)
     wants_type: TypeSpec = ANY
+    actionable: bool = True
+    frame: Optional[IntentFrame] = None
 
     @property
     def text(self) -> str:
         return self.raw.lower()
 
 
+# Legacy keyword-hint tables. Kept ONLY as the fallback for non-actionable
+# frames (purpose fragments and other unparseable text): for those, the old
+# bag-of-words extraction is the best available signal and must not change
+# behavior. Actionable frames never consult these.
 _VERB_HINTS = {
     "sum", "add", "total", "average", "mean", "median", "count", "max", "min",
     "sort", "filter", "group", "map", "reduce", "join", "merge", "split",
@@ -91,11 +111,13 @@ _OUTPUT_HINTS = [
 ]
 
 
-def parse_goal(raw: str) -> Goal:
-    g = Goal(raw=raw)
+def _legacy_hints(g: Goal, raw: str) -> None:
+    """The pre-semantic keyword-hint extraction, verbatim.
+
+    Used only when the frame is AMBIGUOUS/UNKNOWN, so programmatic callers
+    passing fragments see exactly the old values.
+    """
     low = raw.lower()
-    g.quoted = re.findall(r"[\"']([^\"']+)[\"']", raw)
-    g.numbers = [float(n) for n in re.findall(r"-?\d+\.?\d*", raw)]
     words = re.findall(r"[a-z_]+", low)
     g.verbs = [w for w in words if w in _VERB_HINTS]
     g.nouns = [w for w in words if w not in _VERB_HINTS and len(w) > 3]
@@ -103,6 +125,77 @@ def parse_goal(raw: str) -> Goal:
         if pat.search(low):
             g.wants_type = spec
             break
+
+
+def _frame_verbs(frame: IntentFrame, raw: str) -> List[str]:
+    """The frame's predicate: the verb-class head of the request.
+
+    For imperative mood the grammar already established verb-first
+    structure, so the head verb is the first word token (after a polite
+    'please'). Other moods have no predicate head to report.
+    """
+    if frame.mood != "imperative":
+        return []
+    toks = re.findall(r"[A-Za-z]+", raw)
+    if not toks:
+        return []
+    head = toks[0].lower()
+    if head == "please" and len(toks) > 1:
+        head = toks[1].lower()
+    return [head]
+
+
+def _frame_nouns(frame: IntentFrame) -> List[str]:
+    """Entity keywords: content words drawn from the frame's entities.
+
+    Unlike the old bag-of-words noun list, these come from the parsed
+    meaning (purpose, prompt, question, goal_text, language, ...), not
+    from raw text -- scaffolding words ("what", "able", "terms") never
+    appear because the grammar never put them in a slot.
+    """
+    out: List[str] = []
+    seen: set = set()
+    for value in (frame.entities or {}).values():
+        if not isinstance(value, str):
+            continue
+        for w in re.findall(r"[a-z]+", value.lower()):
+            if len(w) > 3 and w not in seen:
+                seen.add(w)
+                out.append(w)
+    return out
+
+
+def parse_goal(raw: str) -> Goal:
+    """Parse a goal through the semantic frame layer.
+
+    The IntentFrame is the single source of meaning: verbs come from the
+    frame's predicate (verb-class head), nouns from the frame's entity
+    keywords, wants_type from the frame's output_type; numbers and quoted
+    spans use the pre-existing structural extractors.
+
+    AMBIGUOUS/UNKNOWN frames yield a Goal with actionable=False: downstream
+    NL entry points fail closed on the flag instead of misrouting. The
+    frame-derived verbs/nouns are cleared first and then _legacy_hints
+    repopulates them with the legacy keyword-hint extraction, so
+    programmatic fragment callers (codegen purposes) behave exactly as
+    before.
+    """
+    g = Goal(raw=raw)
+    # Structural extractors (unchanged): quoted spans and numbers are
+    # surface facts, not interpretations.
+    g.quoted = re.findall(r"[\"']([^\"']+)[\"']", raw)
+    g.numbers = [float(n) for n in re.findall(r"-?\d+\.?\d*", raw)]
+    frame = parse_frame(raw)
+    g.frame = frame
+    if not frame.actionable:
+        g.actionable = False
+        g.verbs = []
+        g.nouns = []
+        _legacy_hints(g, raw)
+        return g
+    g.verbs = _frame_verbs(frame, raw)
+    g.nouns = _frame_nouns(frame)
+    g.wants_type = frame.output_type
     return g
 
 
@@ -118,6 +211,20 @@ class Template:
     requires: Sequence[str]          # primitive names that must exist
     build: Any                       # Callable[[Goal, PrimitiveRegistry], dict]
     weight: float = 1.0
+    # Head-action words this template's reading can realize. Defaults to the
+    # keyword tokens; the aggregation builders ALSO bind an aggregation word
+    # from the goal text (e.g. "sum of values above 5" -> computation.sum),
+    # so the composition templates extend this with _AGGREGATION_HEAD_WORDS.
+    # The stuffing detector consults it: a template whose reading realizes
+    # neither the matched keywords' action nor any head word is excluded.
+    head_words: FrozenSet[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if not self.head_words:
+            toks = set()
+            for k in self.keywords:
+                toks.update(re.findall(r"[a-z]+", k.lower()))
+            self.head_words = frozenset(toks)
 
     def score(self, goal: Goal) -> float:
         # Token-boundary matching prevents false positives such as
@@ -136,11 +243,75 @@ class Template:
         return min(1.0, (hits / len(self.keywords)) * self.weight + 0.35)
 
 
+# Head-action vocabulary bound by the aggregation builders (build_aggregate
+# and build_filter_aggregate scan the goal text for these words to pick the
+# aggregation op). A goal like "sum of values above 5" is headed by "sum":
+# filter_aggregate matches on "above", but its reading genuinely realizes
+# the head action via the aggregation word -- so these words count as
+# realized head actions for the aggregation templates, and the stuffing
+# detector must not exclude such a composition reading.
+_AGGREGATION_HEAD_WORDS = frozenset({
+    "average", "mean", "total", "sum", "count",
+    "maximum", "max", "minimum", "min", "product",
+})
+
+
+def _hint_toksets(hint_words: set) -> List[frozenset]:
+    """Tokenise hint words once per search for the steering check below."""
+    out = []
+    for w in hint_words:
+        toks = frozenset(re.findall(r"[a-z]+", w.lower()))
+        if toks:
+            out.append(toks)
+    return out
+
+
+def _hint_steers(hint_toksets: List[frozenset], prim_name: str) -> bool:
+    """Token-boundary hint steering (the same boundary the template tier got
+    for Defect #1, applied to primitive names).
+
+    A hint steers a primitive only when every token of the hint appears as a
+    whole token of the primitive's snake_case name. Raw substring matching
+    (``w in p.name``) let unrelated primitives jump the queue: the hint
+    "value" promoted "values", "sum" promoted "cumsum", "record" promoted
+    "profile_records", "name" promoted "rename". Steering is ordering-only,
+    so a false steer is enough to emit the wrong plan -- _search returns on
+    first success and the correct primitive is never tried.
+    """
+    name_toks = set(re.findall(r"[a-z]+", prim_name.lower()))
+    return any(h <= name_toks for h in hint_toksets)
+
+
 def _first_available(reg: PrimitiveRegistry, *candidates: str) -> Optional[str]:
     for c in candidates:
         if c in reg:
             return c
     return None
+
+
+# Delexical ("light") verbs: grammatical predicates that carry no action
+# semantics of their own ("get the average", "set the value"). They are
+# carved out of the head-verb contradiction check below so genuine phrasing
+# keeps its template; only "get"/"set" are bare primitive names today, the
+# rest future-proof the set if primitives are registered under them.
+_LIGHT_VERBS = frozenset({
+    "get", "set", "take", "make", "do", "have", "give", "put", "use",
+})
+
+
+def _head_word(raw: str) -> str:
+    """The goal's predicate head: first word token (after a polite 'please').
+
+    Mirrors _frame_verbs so the detector and the frame layer agree on what
+    the goal's action word is.
+    """
+    toks = re.findall(r"[A-Za-z]+", raw)
+    if not toks:
+        return ""
+    head = toks[0].lower()
+    if head == "please" and len(toks) > 1:
+        head = toks[1].lower()
+    return head
 
 
 class TemplatePlanner:
@@ -228,6 +399,50 @@ class TemplatePlanner:
             what="planner template %r" % (tpl.name,))
         return bound(goal, self.reg)
 
+    def _template_contradicts_head(self, tmpl: Template, goal: Goal) -> bool:
+        """Stuffing detector: does this template's keyword reading contradict
+        the goal's own predicate?
+
+        A template match is a deliberate reading of intent -- but keyword
+        stuffing ("negate the number sum total", "reverse the list of values
+        sum total average") can make a template fire on stray nouns while the
+        goal's action word names a *different* primitive entirely. When the
+        head verb is itself a registered primitive name (a real action, not a
+        light verb like "get") and NONE of the template's matched keywords
+        covers it, the template is misreading the goal: it is skipped so it
+        cannot outrank the search tier on tiering alone.
+
+        Why not a score bar: a genuine single-keyword match ("compute the
+        average of the list" -> aggregate 0.477) and a stuffed single-keyword
+        match ("negate the number sum" -> aggregate 0.477) score IDENTICALLY --
+        no threshold separates them. The head verb is the only signal that
+        does. A non-contradicted template still outranks search absolutely;
+        that asymmetry is by design (deliberate reading > blind walk).
+        """
+        head = _head_word(goal.raw)
+        if not head or head in _LIGHT_VERBS:
+            return False
+        if head not in set(self.reg.names()):
+            return False
+        low = goal.text.lower()
+        matched = [k for k in tmpl.keywords
+                   if re.search(r"(?<![a-z])" + re.escape(k.lower()) + r"(?![a-z])",
+                                low)]
+        # Covered: the template fired on the head action itself (equality or
+        # either-way containment, e.g. head "sort" vs keyword "sort"), or the
+        # head word is one the template's build can realize even without it
+        # being a matched keyword -- the composition templates bind an
+        # aggregation word from the goal text ("sum of values above 5":
+        # filter_aggregate matches "above", but its plan genuinely computes
+        # the head action "sum"). Only when NEITHER holds is the reading a
+        # contradiction: the head names a real primitive the plan will not
+        # perform, which is exactly the stuffing signature.
+        if any(head == k or head in k or k in head for k in matched):
+            return False
+        if head in tmpl.head_words:
+            return False
+        return True
+
     def plan(self, goal: Goal) -> Optional[PlanProposal]:
         scored = []
         for t in self.templates:
@@ -242,8 +457,13 @@ class TemplatePlanner:
         scored.sort(key=lambda x: -x[0])
         # Try builders in score order; a high-scoring template whose build()
         # returns None (e.g. composition template missing a required signal)
-        # must not block a lower-scoring but valid template.
+        # must not block a lower-scoring but valid template. A template whose
+        # keyword reading contradicts the goal's head verb (stuffing
+        # detector) is skipped the same way: its intent reading is invalid,
+        # so it must not outrank the search tier.
         for best_score, best in scored:
+            if self._template_contradicts_head(best, goal):
+                continue
             # O20: the winning template's build callable is re-verified
             # against its registration (and the match recorded) in bound
             # mode; legacy direct call otherwise.
@@ -299,10 +519,12 @@ class TemplatePlanner:
                 "output": {"$step": "s1"},
             }
 
-        self.add(Template("aggregate",
-                          ["average", "mean", "median", "sum", "total", "count",
-                           "product", "max", "min", "maximum", "minimum"],
-                          [], build_aggregate, weight=1.4), _engine_builtin=True)
+        _agg_kw = ("average", "mean", "median", "sum", "total", "count",
+                   "product", "max", "min", "maximum", "minimum")
+        self.add(Template("aggregate", _agg_kw,
+                          [], build_aggregate, weight=1.4,
+                          head_words=frozenset(_agg_kw) | _AGGREGATION_HEAD_WORDS),
+                 _engine_builtin=True)
 
         # --- filter then aggregate ----------------------------------------
         def build_filter_aggregate(goal: Goal, r: PrimitiveRegistry):
@@ -347,10 +569,12 @@ class TemplatePlanner:
                 "defaults": {"threshold": threshold},
             }
 
-        self.add(Template("filter_aggregate",
-                          ["filter", "above", "below", "over", "under",
-                           "greater", "more than", "at least"],
-                          [], build_filter_aggregate, weight=1.2), _engine_builtin=True)
+        _fagg_kw = ("filter", "above", "below", "over", "under",
+                    "greater", "more than", "at least")
+        self.add(Template("filter_aggregate", _fagg_kw,
+                          [], build_filter_aggregate, weight=1.2,
+                          head_words=frozenset(_fagg_kw) | _AGGREGATION_HEAD_WORDS),
+                 _engine_builtin=True)
 
         # --- sort / rank ---------------------------------------------------
         def build_sort(goal: Goal, r: PrimitiveRegistry):
@@ -440,14 +664,17 @@ class TemplatePlanner:
                 "output": {"$step": "s2"},
             }
 
+        _aou_kw = ("unique", "distinct", "dedup",
+                   "product", "sum", "total", "max", "min", "maximum", "minimum",
+                   "average", "mean")
         self.add(Template(
             "aggregate_of_unique",
             # Requires hits from both families; score only rises when both
             # unique-signal and aggregate-signal tokens are present.
-            ["unique", "distinct", "dedup",
-             "product", "sum", "total", "max", "min", "maximum", "minimum",
-             "average", "mean"],
-            [], build_aggregate_of_unique, weight=2.0), _engine_builtin=True)
+            _aou_kw,
+            [], build_aggregate_of_unique, weight=2.0,
+            head_words=frozenset(_aou_kw) | _AGGREGATION_HEAD_WORDS),
+            _engine_builtin=True)
 
         # --- group and count ------------------------------------------------
         def build_group(goal: Goal, r: PrimitiveRegistry):
@@ -647,9 +874,13 @@ class BackwardPlanner:
         candidates = self.reg.producing(target)
         if not allow_effects:
             candidates = [p for p in candidates if p.pure]
-        # prefer primitives whose name echoes the goal's own words
+        # Prefer primitives whose name echoes the goal's own words --
+        # token-boundary only (see _hint_steers): a hint steers when its
+        # tokens are whole tokens of the primitive's name, never on a raw
+        # substring. Steering is ordering-only, never filtering.
+        hint_toksets = _hint_toksets(hint_words)
         candidates.sort(key=lambda p: (
-            0 if any(w in p.name for w in hint_words) else 1,
+            0 if _hint_steers(hint_toksets, p.name) else 1,
             len(p.inputs),
         ))
 
@@ -658,7 +889,7 @@ class BackwardPlanner:
             prereq: List[Tuple[str, Dict[str, Any]]] = []
             ok = True
             for aname, aspec in prim.inputs.items():
-                bound = self._bind(aspec, available)
+                bound = self._bind(aname, aspec, available)
                 if bound is not None:
                     args[aname] = bound
                     continue
@@ -675,7 +906,17 @@ class BackwardPlanner:
         return None
 
     @staticmethod
-    def _bind(spec: TypeSpec, available: Dict[str, TypeSpec]) -> Optional[Dict[str, Any]]:
+    def _bind(aname: str, spec: TypeSpec,
+              available: Dict[str, TypeSpec]) -> Optional[Dict[str, Any]]:
+        # Name-first binding (2026-09-27, M1 shakedown DEFECT-2): a
+        # primitive's input names are part of its contract. Purely
+        # type-directed binding collapsed every same-typed input onto the
+        # first type-compatible parameter (std->mean, clip->mean), so the
+        # composed plan executed "successfully" while computing the wrong
+        # function. Prefer the same-named parameter when its type fits;
+        # fall back to type-only binding when no name matches.
+        if aname in available and spec.accepts(available[aname]):
+            return {"$param": aname}
         for pname, pspec in available.items():
             if spec.accepts(pspec):
                 return {"$param": pname}

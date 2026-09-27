@@ -24,12 +24,19 @@ Classification:
   * Symlink *inside* the root that points *inside* the root: allowed and
     works — PROVEN.
   * Writes through an escaping symlink refused: PROVEN for the static
-    case (realpath is evaluated at check time and at open time the same
-    check applies). TOCTOU between check and open (symlink swapped
-    mid-call by a local attacker on a shared filesystem) is BOUNDED:
-    there is no atomic check-and-open in the stdlib path API; an HTTP
-    server would need a per-root lock or O_NOFOLLOW dance for the
-    hostile-local-attacker case.
+    case. TOCTOU between check and open (symlink swapped mid-call by a
+    local attacker on a shared filesystem): PROVEN closed — every public
+    operation opens through _open_resolved(), which pins the parent
+    directory (O_DIRECTORY|O_NOFOLLOW + /proc/self/fd verification) and
+    opens the final component with openat(parent_fd, base,
+    O_NOFOLLOW|...), so no path-string decision is made after the pin. A
+    final component that became a symlink after the check is refused
+    with "symlink encountered at open (possible race)". Mutating ops
+    additionally hold a per-instance RLock across resolve->open->verify.
+    _resolve() itself is fail-closed on mid-resolution races. Linux
+    dependency: /proc/self/fd introspection; unavailable → fail closed.
+    Residual: an attacker able to replace the scope root's parent is out
+    of scope.
 
 Archive inspection (this module, QUEUED-2):
   * list_archive: entry names/sizes/flags as stored; `safe` preview per
@@ -48,9 +55,11 @@ Archive inspection (this module, QUEUED-2):
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import stat as stat_module
 import threading
 import time
 import zipfile
@@ -59,6 +68,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 class PathEscapeError(Exception):
     """Raised internally when a request escapes the scope root."""
+
+
+class _AtomicOpenRefused(Exception):
+    """Internal: the atomic open/verify sequence refused the path.
+
+    Carries the public-facing error message.
+    """
+
+
+#: Refusal reason when O_NOFOLLOW trips at open time.
+ELOOP_REFUSAL = "symlink encountered at open (possible race)"
 
 
 # -- archive inspection -------------------------------------------------
@@ -129,6 +149,10 @@ class ScopedFileService:
         self._writable = bool(writable)
         self._refusals: List[Dict[str, Any]] = []
         self._refusal_lock = threading.Lock()
+        # Serializes the resolve->open->verify sequence of MUTATING ops
+        # against other in-process threads. Cross-process attackers are
+        # handled by O_NOFOLLOW + fd pinning, not by this lock.
+        self._write_lock = threading.RLock()
 
     # -- path resolution -------------------------------------------------
     def _resolve(self, rel: Optional[str]) -> str:
@@ -142,7 +166,13 @@ class ScopedFileService:
         if os.path.isabs(rel):
             raise PathEscapeError("absolute paths are not allowed")
         joined = os.path.join(self._root, rel)
-        real = os.path.realpath(joined)
+        try:
+            real = os.path.realpath(joined)
+        except OSError:
+            # A component vanished mid-resolution (local attacker flapping
+            # entries, or a concurrent rename): fail closed, never serve
+            # a half-resolved path.
+            raise PathEscapeError("path could not be resolved (possible race)")
         try:
             common = os.path.commonpath([self._root, real])
         except ValueError:
@@ -157,50 +187,215 @@ class ScopedFileService:
         rel = os.path.relpath(real, self._root)
         return "" if rel == "." else rel
 
+    # -- atomic open + fd verification -----------------------------------
+    def _fd_realpath(self, fd: int) -> str:
+        """Canonical path of an open fd via /proc/self/fd.
+
+        Raises _AtomicOpenRefused (fail closed) when the introspection
+        is unavailable — we never proceed unverified.
+        """
+        try:
+            target = os.readlink("/proc/self/fd/%d" % fd)
+        except OSError:
+            raise _AtomicOpenRefused(
+                "cannot verify opened file descriptor "
+                "(/proc/self/fd unavailable on this platform)"
+            )
+        if target.endswith(" (deleted)"):
+            target = target[: -len(" (deleted)")]
+        return os.path.realpath(target)
+
+    def _fd_in_scope(self, fd: int) -> bool:
+        """True iff the open fd's canonical path is inside the scope root."""
+        real = self._fd_realpath(fd)  # fail-closed on introspection failure
+        try:
+            common = os.path.commonpath([self._root, real])
+        except ValueError:
+            return False
+        return common == self._root
+
+    def _symlink_refusal(self, exc: OSError, lstat) -> Optional[_AtomicOpenRefused]:
+        """Map an open-time OSError to the symlink refusal when the open
+        failed because the trailing component is a symlink.
+
+        Linux reports ELOOP for O_NOFOLLOW on a symlink -- EXCEPT when
+        O_DIRECTORY is also set, in which case a trailing symlink reports
+        ENOTDIR. The lstat (a zero-arg callable) is message-only: the
+        refusal stands regardless of what it says; it only picks the
+        honest reason string. Returns an _AtomicOpenRefused, or None when
+        the error is not a symlink refusal.
+        """
+        if exc.errno == errno.ELOOP:
+            return _AtomicOpenRefused(ELOOP_REFUSAL)
+        if exc.errno == errno.ENOTDIR:
+            try:
+                st = lstat()
+            except OSError:
+                st = None
+            if st is not None and stat_module.S_ISLNK(st.st_mode):
+                return _AtomicOpenRefused(ELOOP_REFUSAL)
+        return None
+
+    def _open_verified_parent(self, resolved: str) -> int:
+        """Open dirname(resolved) with O_DIRECTORY|O_NOFOLLOW and verify
+        the fd really is that canonical directory.
+
+        Returns the fd (caller must close). Raises _AtomicOpenRefused.
+        """
+        parent = os.path.dirname(resolved)
+        try:
+            fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            refused = self._symlink_refusal(exc, lambda: os.lstat(parent))
+            if refused is not None:
+                raise refused
+            raise _AtomicOpenRefused(
+                "cannot open parent directory: %s" % (exc.strerror or exc)
+            )
+        try:
+            # The parent is derived from realpath(resolved): fully canonical.
+            # Any deviation means a component was swapped between _resolve()
+            # and open(). (No scope-containment demand here: when
+            # resolved == root, the parent is the root's own parent.)
+            if self._fd_realpath(fd) != parent:
+                raise _AtomicOpenRefused(
+                    "opened directory is not the resolved parent "
+                    "(possible race)"
+                )
+            return fd
+        except _AtomicOpenRefused:
+            os.close(fd)
+            raise
+
+    def _open_resolved(
+        self, resolved: str, flags: int, mode: int = 0o666
+    ) -> int:
+        """Atomically open a _resolve()d path and verify the opened fd.
+
+        The parent directory is pinned (opened + verified first); the final
+        component is opened with openat(parent_fd, base, O_NOFOLLOW|flags),
+        so no path-string decision happens after the pin. The opened fd's
+        canonical path is re-checked for scope containment before return.
+
+        Raises _AtomicOpenRefused with a public error message, or OSError
+        for ordinary filesystem failures (ENOENT, EISDIR, ...).
+        """
+        open_flags = flags | os.O_NOFOLLOW
+        if resolved == self._root:
+            # Opening the scope root itself: open directly, then verify the
+            # fd really is the root.
+            try:
+                fd = os.open(resolved, open_flags, mode)
+            except OSError as exc:
+                refused = self._symlink_refusal(exc, lambda: os.lstat(resolved))
+                if refused is not None:
+                    raise refused
+                raise
+            try:
+                if self._fd_realpath(fd) != self._root:
+                    raise _AtomicOpenRefused(
+                        "opened path is not the scope root (possible race)"
+                    )
+                return fd
+            except _AtomicOpenRefused:
+                os.close(fd)
+                raise
+        base = os.path.basename(resolved)
+        if not base or base in (".", "..") or "/" in base:
+            raise _AtomicOpenRefused("invalid path component")
+        parent_fd = self._open_verified_parent(resolved)
+        try:
+            try:
+                fd = os.open(base, open_flags, mode, dir_fd=parent_fd)
+            except OSError as exc:
+                refused = self._symlink_refusal(
+                    exc, lambda: os.lstat(base, dir_fd=parent_fd)
+                )
+                if refused is not None:
+                    raise refused
+                raise
+            try:
+                if not self._fd_in_scope(fd):
+                    raise _AtomicOpenRefused(
+                        "opened file left the scoped root (possible race)"
+                    )
+                return fd
+            except _AtomicOpenRefused:
+                os.close(fd)
+                raise
+        finally:
+            os.close(parent_fd)
+
     # -- read ------------------------------------------------------------
     def list_dir(self, rel: str = "") -> Dict[str, Any]:
         try:
-            path = self._resolve(rel)
+            resolved = self._resolve(rel)
         except PathEscapeError as exc:
             return {"ok": False, "error": str(exc)}
-        if not os.path.exists(path):
-            return {"ok": False, "error": "not found"}
-        if not os.path.isdir(path):
-            return {"ok": False, "error": "not a directory"}
-        entries: List[Dict[str, Any]] = []
-        with os.scandir(path) as it:
-            for de in it:
-                try:
-                    st = de.stat(follow_symlinks=True)
-                except OSError:
-                    continue
-                is_dir = de.is_dir(follow_symlinks=True)
-                entries.append(
-                    {
-                        "name": de.name,
-                        "rel": os.path.join(self._rel_of(path), de.name)
-                        if self._rel_of(path)
-                        else de.name,
-                        "is_dir": is_dir,
-                        "size_bytes": 0 if is_dir else st.st_size,
-                        "mtime": st.st_mtime,
-                    }
-                )
+        try:
+            fd = self._open_resolved(
+                resolved, os.O_RDONLY | os.O_DIRECTORY
+            )
+        except _AtomicOpenRefused as exc:
+            return {"ok": False, "error": str(exc)}
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return {"ok": False, "error": "not found"}
+            if exc.errno == errno.ENOTDIR:
+                return {"ok": False, "error": "not a directory"}
+            return {"ok": False, "error": f"unreadable: {exc.strerror or exc}"}
+        try:
+            # fd-based scandir: entries are resolved relative to the pinned
+            # dir fd, so a post-open swap cannot redirect the listing.
+            # (Closing the iterator does NOT close our fd; we close it.)
+            entries: List[Dict[str, Any]] = []
+            it = os.scandir(fd)
+            try:
+                for de in it:
+                    try:
+                        st = de.stat(follow_symlinks=True)
+                    except OSError:
+                        continue
+                    is_dir = de.is_dir(follow_symlinks=True)
+                    entries.append(
+                        {
+                            "name": de.name,
+                            "rel": os.path.join(self._rel_of(resolved), de.name)
+                            if self._rel_of(resolved)
+                            else de.name,
+                            "is_dir": is_dir,
+                            "size_bytes": 0 if is_dir else st.st_size,
+                            "mtime": st.st_mtime,
+                        }
+                    )
+            finally:
+                it.close()
+        finally:
+            os.close(fd)
         entries.sort(key=lambda e: (not e["is_dir"], e["name"]))
-        return {"ok": True, "entries": entries, "rel": self._rel_of(path)}
+        return {"ok": True, "entries": entries, "rel": self._rel_of(resolved)}
 
     def stat(self, rel: str) -> Dict[str, Any]:
         try:
-            path = self._resolve(rel)
+            resolved = self._resolve(rel)
         except PathEscapeError as exc:
             return {"ok": False, "error": str(exc)}
-        if not os.path.exists(path):
-            return {"ok": False, "error": "not found"}
-        st = os.stat(path)  # follows symlinks: target was contained
-        is_dir = os.path.isdir(path)
+        try:
+            fd = self._open_resolved(resolved, os.O_RDONLY)
+        except _AtomicOpenRefused as exc:
+            return {"ok": False, "error": str(exc)}
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return {"ok": False, "error": "not found"}
+            return {"ok": False, "error": f"unreadable: {exc.strerror or exc}"}
+        try:
+            st = os.fstat(fd)
+        finally:
+            os.close(fd)
+        is_dir = stat_module.S_ISDIR(st.st_mode)
         return {
             "ok": True,
-            "rel": self._rel_of(path),
+            "rel": self._rel_of(resolved),
             "is_dir": is_dir,
             "size_bytes": 0 if is_dir else st.st_size,
             "mtime": st.st_mtime,
@@ -208,34 +403,54 @@ class ScopedFileService:
 
     def read_text(self, rel: str, max_bytes: int = 200_000) -> Dict[str, Any]:
         try:
-            path = self._resolve(rel)
+            resolved = self._resolve(rel)
         except PathEscapeError as exc:
             return {"ok": False, "error": str(exc)}
-        if not os.path.exists(path):
-            return {"ok": False, "error": "not found"}
-        if os.path.isdir(path):
-            return {"ok": False, "error": "not a file"}
         try:
-            size = os.path.getsize(path)
-        except OSError:
+            fd = self._open_resolved(resolved, os.O_RDONLY)
+        except _AtomicOpenRefused as exc:
+            return {"ok": False, "error": str(exc)}
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return {"ok": False, "error": "not found"}
             return {"ok": False, "error": "unreadable"}
-        if size > max_bytes:
-            return {
-                "ok": False,
-                "error": f"file too large ({size} bytes > {max_bytes} byte limit)",
-            }
         try:
-            with open(path, "rb") as fh:
-                data = fh.read()
-        except OSError:
-            return {"ok": False, "error": "unreadable"}
+            st = os.fstat(fd)
+            if stat_module.S_ISDIR(st.st_mode):
+                return {"ok": False, "error": "not a file"}
+            if st.st_size > max_bytes:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"file too large ({st.st_size} bytes > "
+                        f"{max_bytes} byte limit)"
+                    ),
+                }
+            buf = bytearray()
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                buf += chunk
+                if len(buf) > max_bytes:
+                    # Grew between fstat and read: refuse, never serve partial.
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"file too large ({len(buf)} bytes > "
+                            f"{max_bytes} byte limit)"
+                        ),
+                    }
+            data = bytes(buf)
+        finally:
+            os.close(fd)
         if b"\x00" in data:
             return {"ok": False, "error": "binary file (contains NUL bytes)"}
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             return {"ok": False, "error": "binary file (not valid UTF-8)"}
-        return {"ok": True, "rel": self._rel_of(path), "content": text}
+        return {"ok": True, "rel": self._rel_of(resolved), "content": text}
 
     # -- write -----------------------------------------------------------
     def write_text(self, rel: str, content: str) -> Dict[str, Any]:
@@ -243,44 +458,149 @@ class ScopedFileService:
             return {"ok": False, "error": "read-only scope"}
         if not isinstance(content, str):
             return {"ok": False, "error": "content must be a string"}
-        try:
-            path = self._resolve(rel)
-        except PathEscapeError as exc:
-            return {"ok": False, "error": str(exc)}
-        if os.path.isdir(path):
-            return {"ok": False, "error": "not a file"}
-        # Re-resolve at open time: the parent dir must itself be in scope
-        # (a symlink parent that escapes is already refused by _resolve).
-        try:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-        except OSError as exc:
-            return {"ok": False, "error": f"write failed: {exc.strerror or exc}"}
-        st = os.stat(path)
-        return {
-            "ok": True,
-            "rel": self._rel_of(path),
-            "size_bytes": st.st_size,
-            "mtime": st.st_mtime,
-        }
+        # Serialize in-process resolve->open->verify against other threads.
+        with self._write_lock:
+            try:
+                resolved = self._resolve(rel)
+            except PathEscapeError as exc:
+                return {"ok": False, "error": str(exc)}
+            try:
+                fd = self._open_resolved(
+                    resolved,
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0o666,
+                )
+            except _AtomicOpenRefused as exc:
+                return {"ok": False, "error": str(exc)}
+            except OSError as exc:
+                if exc.errno == errno.EISDIR:
+                    return {"ok": False, "error": "not a file"}
+                return {
+                    "ok": False,
+                    "error": f"write failed: {exc.strerror or exc}",
+                }
+            try:
+                st = os.fstat(fd)
+                if stat_module.S_ISDIR(st.st_mode):
+                    return {"ok": False, "error": "not a file"}
+                data = content.encode("utf-8")
+                view = memoryview(data)
+                while view:
+                    n = os.write(fd, view)
+                    view = view[n:]
+                st = os.fstat(fd)
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "error": f"write failed: {exc.strerror or exc}",
+                }
+            finally:
+                os.close(fd)
+            return {
+                "ok": True,
+                "rel": self._rel_of(resolved),
+                "size_bytes": st.st_size,
+                "mtime": st.st_mtime,
+            }
 
     def mkdir(self, rel: str) -> Dict[str, Any]:
         if not self._writable:
             return {"ok": False, "error": "read-only scope"}
-        try:
-            path = self._resolve(rel)
-        except PathEscapeError as exc:
-            return {"ok": False, "error": str(exc)}
-        try:
-            os.makedirs(path, exist_ok=True)
-        except OSError as exc:
+        # Serialize in-process resolve->mutate against other threads.
+        with self._write_lock:
+            try:
+                resolved = self._resolve(rel)
+            except PathEscapeError as exc:
+                return {"ok": False, "error": str(exc)}
+            if resolved == self._root:
+                components: List[str] = []
+            else:
+                sub = os.path.relpath(resolved, self._root)
+                components = sub.split(os.sep)
+                # realpath-derived, so this cannot trigger; enforced anyway.
+                if any(c in ("", ".", "..") for c in components):
+                    return {"ok": False, "error": "path escapes the scoped root"}
+            try:
+                fd = self._mkdir_components(components)
+            except _AtomicOpenRefused as exc:
+                return {"ok": False, "error": str(exc)}
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "error": f"mkdir failed: {exc.strerror or exc}",
+                }
+            try:
+                st = os.fstat(fd)
+            finally:
+                os.close(fd)
             return {
-                "ok": False,
-                "error": f"mkdir failed: {exc.strerror or exc}",
+                "ok": True,
+                "rel": self._rel_of(resolved),
+                "mtime": st.st_mtime,
             }
-        st = os.stat(path)
-        return {"ok": True, "rel": self._rel_of(path), "mtime": st.st_mtime}
 
+    def _mkdir_components(self, components: List[str]) -> int:
+        """Create/walk components one level at a time, each relative to a
+        pinned, verified parent dir fd (mkdirat/openat, O_DIRECTORY|
+        O_NOFOLLOW). Any symlink component trips ELOOP and is refused.
+
+        Returns the fd of the final directory (caller closes).
+        Raises _AtomicOpenRefused or OSError.
+        """
+        try:
+            cur = os.open(
+                self._root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+        except OSError as exc:
+            refused = self._symlink_refusal(exc, lambda: os.lstat(self._root))
+            if refused is not None:
+                raise refused
+            raise
+        try:
+            if self._fd_realpath(cur) != self._root:
+                raise _AtomicOpenRefused(
+                    "scope root changed during mkdir (possible race)"
+                )
+            for comp in components:
+                if not comp or comp in (".", "..") or "/" in comp:
+                    raise _AtomicOpenRefused("invalid path component")
+                try:
+                    nxt = os.open(
+                        comp,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=cur,
+                    )
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(comp, 0o777, dir_fd=cur)
+                    except FileExistsError:
+                        pass  # raced into existence; the open below decides
+                    try:
+                        nxt = os.open(
+                            comp,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=cur,
+                        )
+                    except OSError as exc2:
+                        refused = self._symlink_refusal(
+                            exc2, lambda: os.lstat(comp, dir_fd=cur)
+                        )
+                        if refused is not None:
+                            raise refused
+                        raise
+                except OSError as exc:
+                    refused = self._symlink_refusal(
+                        exc, lambda: os.lstat(comp, dir_fd=cur)
+                    )
+                    if refused is not None:
+                        raise refused
+                    raise
+                os.close(cur)
+                cur = nxt
+            return cur
+        except BaseException:
+            os.close(cur)
+            raise
     # -- refusal log ---------------------------------------------------
     def _log_refusal(
         self, op: str, archive_rel: str, entry: Optional[str], reason: str

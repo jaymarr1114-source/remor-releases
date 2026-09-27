@@ -1,4 +1,4 @@
-{"name": "A.distinct-agents", "pass": true, "detail": "agt_0feb394491d963ec vs agt_e7f9c0f5fcd63870"}
+{"name": "A.distinct-agents", "pass": true, "detail": "agt_6f4e22c6a094b475 vs agt_81f72b66c77cadaa"}
 {"name": "A.distinct-substrates", "pass": true, "detail": ""}
 {"name": "A.distinct-provenance", "pass": true, "detail": ""}
 {"name": "A.distinct-producers", "pass": true, "detail": ""}
@@ -18,8 +18,8 @@
 {"name": "D.accept-rejected-work-refused", "pass": true, "detail": "VerificationFailed"}
 {"name": "D.accept-without-verdict-refused", "pass": true, "detail": "VerificationFailed"}
 {"name": "E.review-accepted", "pass": true, "detail": "all required evidence present"}
-{"name": "E.promoted", "pass": true, "detail": "exp_7ec489ebedd305bd"}
-{"name": "E.promoted-L2", "pass": true, "detail": "exp_7ec489ebedd305bd"}
+{"name": "E.promoted", "pass": true, "detail": "exp_84092a4d379ab918"}
+{"name": "E.promoted-L2", "pass": true, "detail": "exp_84092a4d379ab918"}
 {"name": "E.agent-destroyed", "pass": true, "detail": ""}
 {"name": "E.experience-survives-destruction", "pass": true, "detail": "1 experience records still retrievable"}
 {"name": "F.replacement-is-new-identity", "pass": true, "detail": ""}

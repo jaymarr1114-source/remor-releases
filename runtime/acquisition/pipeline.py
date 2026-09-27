@@ -186,17 +186,30 @@ class GapDetector:
         ]
         found: List[CapabilityRequirement] = []
         for name, keywords, effects in catalogue:
-            if not any(k in lowered for k in keywords):
+            matched = [k for k in keywords if k in lowered]
+            if not matched:
                 continue
+            # Coverage keeps its old contract: the BASE name and the full
+            # keyword tuple, so it neither starts covering nor starts
+            # missing anything it previously handled.
             if self._registry_covers(name, keywords):
                 continue
             merged = list(effects)
             for e in lexicon_effects:
                 if e not in merged:
                     merged.append(e)
+            # The identity-bearing name must discriminate: one catalogue
+            # entry (e.g. "translation") covers several keywords
+            # ("japanese", "spanish", ...), and "translate into japanese"
+            # vs "translate into spanish" are different missing
+            # capabilities. The name carries the matched keywords, so the
+            # same goal deterministically infers the same name (no
+            # spurious novelty) while different keywords get different
+            # names (registration identity + catalogue dedup stay honest).
+            identity = f"{name}:{'+'.join(sorted(matched))}"
             found.append(CapabilityRequirement(
-                name=name, description=goal,
-                keywords=[k for k in keywords if k in lowered] or list(keywords),
+                name=identity, description=goal,
+                keywords=matched,
                 required_effects=merged,
                 postconditions=list(posts) if "write_fs" in merged or "read_fs" in merged else []))
 

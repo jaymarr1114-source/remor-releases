@@ -52,14 +52,24 @@ def anchor_paths_for(workdir):
     return default_anchor_paths(os.path.join(workdir, "agent_org.db"))
 
 
-def install_auto_anchor(org, authority="track1:harness"):
-    """Re-anchor the journal tip after every legitimate store write."""
+def install_auto_anchor(org, authority=None, caller=None):
+    """Re-anchor the journal tip after every legitimate store write.
+
+    The org anchor is registry-bound: journal writes require an
+    authenticated caller holding 'agent:anchor_write'. The harness acts
+    as the engine operator (claimed authority = engine producer id).
+    """
+    from swarm_engine.governance.oracle_binding import ENGINE_PRODUCER_ID
     store, oreg = org.store, org.oregistry
     anchor = org.anchor
+    if caller is None:
+        caller = oreg.engine_handle()
+    if authority is None:
+        authority = ENGINE_PRODUCER_ID
 
     def _anchor_now():
         anchor.anchor(collect_anchor_heads(store, oreg),
-                      reason="verdict", authority=authority)
+                      reason="verdict", authority=authority, caller=caller)
 
     orig_insert = store.insert
 
@@ -85,9 +95,12 @@ def deploy_org(workdir, authority="track1:deploy"):
     """Boot a pristine org and run the explicit anchor deployment step."""
     org = RemorOrganization.boot(workdir)
     journal, key, _ = anchor_paths_for(workdir)
+    from swarm_engine.governance.oracle_binding import ENGINE_PRODUCER_ID
+    _eng = org.oregistry.engine_handle()
     digest = org.anchor.initialize(
-        collect_anchor_heads(org.store, org.oregistry), authority)
-    install_auto_anchor(org)
+        collect_anchor_heads(org.store, org.oregistry),
+        ENGINE_PRODUCER_ID, caller=_eng)
+    install_auto_anchor(org, authority=ENGINE_PRODUCER_ID, caller=_eng)
     print(f"ANCHOR-DEPLOY genesis={digest[:16]} journal={journal}",
           file=sys.stderr, flush=True)
     return org

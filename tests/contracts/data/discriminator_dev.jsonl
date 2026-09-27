@@ -1,0 +1,30 @@
+{"text": "hello", "label": "chat"}
+{"text": "good afternoon", "label": "chat"}
+{"text": "how are you doing", "label": "chat"}
+{"text": "thank you", "label": "chat"}
+{"text": "see you later", "label": "chat"}
+{"text": "who are you", "label": "chat"}
+{"text": "what is the capital of japan", "label": "chat"}
+{"text": "why is the ocean blue", "label": "chat"}
+{"text": "do you know the answer", "label": "chat"}
+{"text": "are you there", "label": "chat"}
+{"text": "create a shopping list", "label": "task"}
+{"text": "run the backup script", "label": "task"}
+{"text": "fix the typo in the readme", "label": "task"}
+{"text": "send mom a birthday card", "label": "task"}
+{"text": "could you find my keys", "label": "task"}
+{"text": "delete all drafts", "label": "task"}
+{"text": "translate this paragraph to french", "label": "task"}
+{"text": "schedule a meeting for friday", "label": "task"}
+{"text": "2 + 2", "label": "task"}
+{"text": "hey, can you write a parser for me?", "label": "task"}
+{"text": "the website is slow", "label": "ambiguous"}
+{"text": "is the database up?", "label": "ambiguous"}
+{"text": "i need help", "label": "ambiguous"}
+{"text": "what about that?", "label": "ambiguous"}
+{"text": "can you do me a favor?", "label": "ambiguous"}
+{"text": "the deploy failed", "label": "ambiguous"}
+{"text": "did the tests pass", "label": "ambiguous"}
+{"text": "this one?", "label": "ambiguous"}
+{"text": "not sure", "label": "ambiguous"}
+{"text": "can you check?", "label": "ambiguous"}

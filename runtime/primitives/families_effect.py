@@ -16,6 +16,8 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,6 +26,12 @@ from swarm_engine.primitives.core import (
     ANY, BOOL, BYTES, CALLABLE, DICT, FLOAT, INT, LIST, NUM, OPT, STR, TUPLE,
     UNION, Effect, ExecContext, Primitive, PrimitiveRegistry, infer,
 )
+
+# Interpreter for run_python, resolved once at module load (not per call):
+# prefer python3, then python, then the running process's own binary.
+# Hardcoded "python" breaks on hosts that only ship python3; this keeps the
+# same behavior where "python" exists and degrades gracefully elsewhere.
+_PYTHON_BIN = shutil.which("python3") or shutil.which("python") or sys.executable
 
 
 def _p(reg, name, family, fn, inputs, output, effects=(Effect.PURE,),
@@ -739,7 +747,7 @@ def register_process(reg: PrimitiveRegistry) -> None:
                     pass
         except Exception:
             pass
-        cmd = ["python", "-B", str(path)] + list(args or [])
+        cmd = [_PYTHON_BIN, "-B", str(path)] + list(args or [])
         completed = _sp.run(
             cmd, cwd=cwd or None, capture_output=True, text=True, timeout=float(timeout),
         )

@@ -50,7 +50,15 @@ _TRANSITIONS: Dict[LifecycleState, List[LifecycleState]] = {
     LifecycleState.ADMITTED: [LifecycleState.REGISTERED, LifecycleState.QUARANTINED],
     LifecycleState.REGISTERED: [LifecycleState.DEPLOYED, LifecycleState.QUARANTINED],
     LifecycleState.DEPLOYED: [LifecycleState.MONITORED, LifecycleState.QUARANTINED,
-                              LifecycleState.ROLLED_BACK],
+                              LifecycleState.ROLLED_BACK,
+                              # Re-admission after revocation/deletion: the
+                              # acquisition success path restarts its walk at
+                              # CANDIDATE, and from there it must re-pass
+                              # VALIDATING -> VERIFIED -> ADMITTED — so a
+                              # re-admitted capability re-runs validation
+                              # rather than skipping it. This edge is honest
+                              # precisely because nothing is jumped over.
+                              LifecycleState.CANDIDATE],
     LifecycleState.MONITORED: [LifecycleState.IMPROVED, LifecycleState.DEPLOYED,
                                LifecycleState.QUARANTINED, LifecycleState.DEPRECATED],
     LifecycleState.IMPROVED: [LifecycleState.VERSIONED, LifecycleState.QUARANTINED],
@@ -64,6 +72,30 @@ _TRANSITIONS: Dict[LifecycleState, List[LifecycleState]] = {
 
 class IllegalTransition(Exception):
     pass
+
+
+class LifecycleIntegrityError(Exception):
+    """The lifecycle store disagrees with its own history log.
+
+    Raised when lifecycle_state has no row for a capability that DOES have
+    history entries -- i.e. the state row was deleted out of band. The
+    previous behavior silently reported DISCOVERED, contradicting the
+    module's contract that nothing happens silently.
+    """
+
+
+# force=True may only jump TO fail-closed / retirement targets. Quarantine
+# and rollback must be reachable from ANY state (e.g. ROLLED_BACK has no
+# legal path to QUARANTINED, yet a rolled-back capability must still be
+# quarantinable), and competition losers are deprecated from whatever
+# state they sit in (runtime/synthesis/competition.py). Deprecation is a
+# retirement direction like quarantine/rollback -- it pulls a capability
+# out of service, never forward toward production. Forward-progress jumps
+# (DISCOVERED -> DEPLOYED, skipping validation) are never allowed, forced
+# or not. Every forced hop is still appended to the history log.
+_FORCE_TARGETS = frozenset({LifecycleState.QUARANTINED,
+                            LifecycleState.ROLLED_BACK,
+                            LifecycleState.DEPRECATED})
 
 
 @dataclass
@@ -108,16 +140,51 @@ class CapabilityLifecycle:
             row = conn.execute(
                 "SELECT state FROM lifecycle_state WHERE capability_id=?",
                 (capability_id,)).fetchone()
-        return LifecycleState(row["state"]) if row else LifecycleState.DISCOVERED
+        if row is None:
+            hist = self.history(capability_id)
+            if hist:
+                # The state row is gone but the history log proves this
+                # capability walked the lifecycle: out-of-band deletion.
+                # Reporting DISCOVERED here would be a silent lie, so fail
+                # closed and loud instead.
+                raise LifecycleIntegrityError(
+                    f"{capability_id}: lifecycle_state row missing but "
+                    f"{len(hist)} history entries exist (last: "
+                    f"{hist[-1].from_state.value}->{hist[-1].to_state.value}); "
+                    f"out-of-band deletion suspected")
+            return LifecycleState.DISCOVERED
+        return LifecycleState(row["state"])
 
     def transition(self, capability_id: str, to_state: LifecycleState,
                    reason: str = "", force: bool = False) -> Transition:
-        current = self.state_of(capability_id)
-        if not force and to_state not in _TRANSITIONS.get(current, []):
-            raise IllegalTransition(
-                f"{capability_id}: {current.value} -> {to_state.value} is not a "
-                f"legal transition (allowed: "
-                f"{[s.value for s in _TRANSITIONS.get(current, [])]})")
+        try:
+            current = self.state_of(capability_id)
+        except LifecycleIntegrityError:
+            # The state row was deleted out of band while history survives.
+            # Ordinary transitions stay refused (fail closed), but a FORCED
+            # hop to a fail-closed/retirement target is an emergency repair
+            # path -- quarantine_everywhere, rollback_with_lineage, and the
+            # competition deprecator all use it. Reconstruct the true
+            # current state from the last history hop and land the hop
+            # instead of leaving the lifecycle row missing (and every
+            # future state_of raising) forever: the recovery is recorded
+            # in the append-only log, so the deletion stays visible.
+            if not force or to_state not in _FORCE_TARGETS:
+                raise
+            hist = self.history(capability_id)
+            # hist is non-empty here: state_of only raises when it exists.
+            current = hist[-1].to_state
+            reason = (reason + " [recovered missing lifecycle_state row; "
+                      f"last history hop {hist[-1].from_state.value}->"
+                      f"{hist[-1].to_state.value}]").strip()
+        if to_state not in _TRANSITIONS.get(current, []):
+            if not force or to_state not in _FORCE_TARGETS:
+                legal = [s.value for s in _TRANSITIONS.get(current, [])]
+                forceable = sorted(s.value for s in _FORCE_TARGETS)
+                raise IllegalTransition(
+                    f"{capability_id}: {current.value} -> {to_state.value} "
+                    f"is not a legal transition (allowed: {legal}; "
+                    f"force=True only permits jumps to {forceable})")
 
         record = Transition(capability_id, current, to_state, reason)
         with self._conn() as conn:

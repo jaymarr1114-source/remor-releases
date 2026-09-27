@@ -98,6 +98,12 @@ class SmokeTest:
                 return bool(self.predicate(value)), "predicate"
             except Exception as exc:
                 return False, f"predicate raised {type(exc).__name__}: {exc}"
+        if isinstance(value, dict) and value.get("ok") is False:
+            # A refusal dict (e.g. {"ok": False, "error": ...} from a
+            # half-wired substrate) is never a pass. The default branch
+            # below scores any non-null value as passing, which admitted
+            # refusals as successes. Fail closed instead.
+            return False, "refusal-dict"
         if self.expect is not None:
             if isinstance(self.expect, float) and isinstance(value, (int, float)):
                 return abs(value - self.expect) < 1e-9, "float compare"
@@ -214,8 +220,17 @@ class AdmissionController:
               name: Optional[str] = None,
               epistemic_standing: Optional[Any] = None,
               supplier_id: Optional[str] = None,
-              _restore_reverification: bool = False) -> AdmissionResult:
+              _restore_reverification: bool = False,
+              caller: Any = None) -> AdmissionResult:
         """Admit a plan as a capability.
+
+        caller: REQUIRED -- a CallerContext, (agent_id, token) pair, or
+        engine oracle handle. The caller must hold
+        'agent:admit_capability'. Unauthenticated or unauthorized callers
+        are refused (default-deny). The recorded supplier is the
+        AUTHENTICATED caller: a caller-supplied supplier_id that disagrees
+        with the authenticated identity is a confused-deputy attempt and
+        is refused outright.
 
         supplier_id: who SUPPLIED the smoke oracle (the driver/caller whose
         expectation this is). It is recorded on the evaluation, distinct
@@ -231,6 +246,24 @@ class AdmissionController:
         by vindicating evidence" (audited recovery). Without it the guard
         fails closed, exactly as before.
         """
+        from swarm_engine.governance.caller_authorization import (
+            AgentDirectory, AuthorizationError, require_authorized)
+        from swarm_engine.governance.oracle_binding import (
+            DECISION_ADMIT_CAPABILITY)
+        if self.oracle_registry is None:
+            raise AuthorizationError(
+                "admit refused: admission controller has no oracle registry "
+                "-- caller authorization cannot be verified")
+        authed = require_authorized(
+            self.oracle_registry, AgentDirectory(self.oracle_registry),
+            caller, DECISION_ADMIT_CAPABILITY, "admit",
+            target=goal)
+        if supplier_id is not None and supplier_id != authed:
+            raise AuthorizationError(
+                f"admit refused: confused deputy -- claimed supplier "
+                f"{supplier_id!r} does not match authenticated caller "
+                f"{authed!r}")
+        supplier_id = authed
         started = time.time()
 
         def done(res: AdmissionResult) -> AdmissionResult:
@@ -338,6 +371,16 @@ class AdmissionController:
         if (not _restore_reverification
                 and existing is not None and existing.status == "quarantined"
                 and self.store._quarantine_was_deliberate(cap_id)):
+            # Audit the refused resurrection attempt: silent probing of a
+            # deliberately quarantined capability must leave a trace.
+            # "resurrection_refused" is in neither the deliberate nor the
+            # derived quarantine-event set, so it does not disturb
+            # _quarantine_was_deliberate's provenance scan.
+            self.store.log(cap_id, "resurrection_refused",
+                           "deliberate-quarantine guard (0c): identical "
+                           "re-admission refused; restore requires "
+                           "integrity.restore_everywhere with "
+                           "trust:transition authority")
             return done(AdmissionResult(
                 Verdict.REJECTED, "",
                 reasons=[f"capability {cap_id[:12]}... is deliberately "
@@ -620,7 +663,32 @@ class AdmissionController:
             for cid in sorted(ready):
                 if cid not in remaining:
                     continue
-                self._register_capability_as_primitive(cid, by_id[cid])
+                rec = by_id[cid]
+                # Admission -> execution binding (2026-09-27, Worker 2):
+                # never register a row whose plan does not fingerprint to
+                # its id. A swapped row would otherwise be promoted to an
+                # executable acquired.* primitive under an admitted
+                # identity -- the exact substitution this closes. The
+                # nl_dispatch path refuses such rows as
+                # "capability_tampered"; the boot path must agree, so the
+                # row is quarantined (corruption_detected keeps the
+                # deliberate-quarantine stickiness) and skipped instead.
+                # Recovery of the honest plan goes through the governed
+                # integrity.restore_everywhere path.
+                try:
+                    fp = plan_fingerprint(rec.plan)
+                except Exception:
+                    fp = None
+                if fp != cid:
+                    store.set_status(cid, "quarantined")
+                    store.log(cid, "corruption_detected",
+                              "rehydrate_all: stored plan does not "
+                              "fingerprint to its id; primitive registration "
+                              "refused -- unadmitted bytes cannot ride an "
+                              "admitted identity")
+                    remaining.discard(cid)
+                    continue
+                self._register_capability_as_primitive(cid, rec)
                 registered.append(cid)
                 remaining.discard(cid)
         return registered

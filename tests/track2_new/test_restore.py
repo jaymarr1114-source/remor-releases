@@ -16,11 +16,12 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pylib"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "pylib"))
 
 from swarm_engine.core.engine import SwarmEngine
 from swarm_engine.synthesis.integrity import (
     effective_status, quarantine_everywhere, restore_everywhere, RestoreRefused)
+from swarm_engine.governance.caller_authorization import AuthorizationError
 from swarm_engine.synthesis.admission import Verdict
 
 SCRATCH = os.path.dirname(os.path.abspath(__file__))
@@ -52,7 +53,7 @@ def boot(db):
 
 
 def admit_add(engine):
-    res = engine.admission.admit(goal=GOAL, plan=dict(ADD_PLAN))
+    res = engine.admission.admit(goal=GOAL, plan=dict(ADD_PLAN), caller=engine.oracle)
     assert res.verdict == Verdict.ADMITTED, f"admit failed: {res.reasons}"
     return res.capability_id
 
@@ -73,7 +74,7 @@ def main():
     check("admit: goal bound",
           eng.capabilities.goal_bindings().get(GOAL.strip().lower()) == cap_id)
 
-    q = quarantine_everywhere(eng, cap_id, "test deliberate quarantine")
+    q = quarantine_everywhere(eng, cap_id, "test deliberate quarantine", caller=eng.oracle)
     check("quarantine: unregistered primitive",
           f"acquired.{cap_id}" in q.get("unregistered", []))
     eff = effective_status(eng, cap_id)
@@ -87,6 +88,10 @@ def main():
         check("quarantine: not executable", True)
 
     # ---- destroy runtime representation: fresh engine, same DB ----
+    # D11: single-owner handoff -- the first engine releases the database
+    # (a real restart would have exited the old process) before the fresh
+    # engine boots on the same file. eng is not used again below.
+    eng.close()
     eng2 = boot(db)
     eff2 = effective_status(eng2, cap_id)
     check("fresh engine: still quarantined", eff2["effective"] == "quarantined", json.dumps(eff2))
@@ -94,7 +99,7 @@ def main():
           eng2.primitives.get(f"acquired.{cap_id}") is None)
 
     # ---- restore through the governed path ----
-    r = restore_everywhere(eng2, cap_id, authority=eng2.oracle,
+    r = restore_everywhere(eng2, cap_id, caller=eng2.oracle,
                            reason="test restore after deliberate quarantine")
     check("restore: returned actions", r["trust"] == 5, str(r.get("trust")))
     eff3 = effective_status(eng2, cap_id)
@@ -116,7 +121,7 @@ def main():
     with open(probe, "w") as f:
         f.write(
             "import sys, os\n"
-            "sys.path.insert(0, os.path.join(r'%s', '..', 'pylib'))\n"
+            "sys.path.insert(0, os.path.join(r'%s', '..', '..', 'pylib'))\n"
             % SCRATCH +
             "from swarm_engine.core.engine import SwarmEngine\n"
             "from swarm_engine.synthesis.integrity import effective_status\n"
@@ -125,7 +130,12 @@ def main():
             "prim = eng.primitives.get('acquired.%s')\n" % cap_id +
             "val = prim.fn(a=7, b=8) if prim else None\n"
             "print('EFF:' + eff['effective'] + ' VAL:' + str(val))\n")
+    # D11: the fresh-process probe is a second process on the same file,
+    # so this process must release ownership first; re-boot afterwards for
+    # the adversarial battery below (which reuses eng2).
+    eng2.close()
     out = subprocess.run([sys.executable, probe], capture_output=True, text=True, timeout=300)
+    eng2 = boot(db)
     line = [l for l in out.stdout.splitlines() if l.startswith("EFF:")]
     check("fresh process: effective active + executable",
           line and line[0] == "EFF:active VAL:15", (line[0] if line else out.stderr[-500:]))
@@ -134,44 +144,44 @@ def main():
     db2 = fresh_db("adv")
     e = boot(db2)
     cid = admit_add(e)
-    quarantine_everywhere(e, cid, "adv quarantine")
+    quarantine_everywhere(e, cid, "adv quarantine", caller=e.oracle)
 
     def expect_refused(name, fn):
         try:
             fn()
             check(name, False, "no refusal raised")
-        except RestoreRefused as ex:
+        except (RestoreRefused, AuthorizationError) as ex:
             check(name, True)
         except Exception as ex:
             check(name, False, f"wrong exception: {type(ex).__name__}: {ex}")
 
     expect_refused("adv: unknown id refused",
-                   lambda: restore_everywhere(e, "cap_nonexistent", authority=e.oracle, reason="x"))
+                   lambda: restore_everywhere(e, "cap_nonexistent", caller=e.oracle, reason="x"))
     expect_refused("adv: empty reason refused",
-                   lambda: restore_everywhere(e, cid, authority=e.oracle, reason=""))
+                   lambda: restore_everywhere(e, cid, caller=e.oracle, reason=""))
 
     # active (non-quarantined) capability cannot be "restored"
     db3 = fresh_db("adv2")
     e3 = boot(db3)
     cid3 = admit_add(e3)
     expect_refused("adv: active capability refused (not a generic activator)",
-                   lambda: restore_everywhere(e3, cid3, authority=e3.oracle, reason="x"))
+                   lambda: restore_everywhere(e3, cid3, caller=e3.oracle, reason="x"))
 
     # no authority
-    expect_refused("adv: authority=None refused",
-                   lambda: restore_everywhere(e, cid, authority=None, reason="x"))
+    expect_refused("adv: caller=None refused",
+                   lambda: restore_everywhere(e, cid, caller=None, reason="x"))
 
     # unauthorized producer
     class FakeAuth:
         producer_id = "attacker:nobody"
     expect_refused("adv: unauthorized producer refused",
-                   lambda: restore_everywhere(e, cid, authority=FakeAuth(), reason="x"))
+                   lambda: restore_everywhere(e, cid, caller=FakeAuth(), reason="x"))
 
     # corrupted plan (tamper with persisted plan_json)
     db4 = fresh_db("adv3")
     e4 = boot(db4)
     cid4 = admit_add(e4)
-    quarantine_everywhere(e4, cid4, "adv quarantine")
+    quarantine_everywhere(e4, cid4, "adv quarantine", caller=e4.oracle)
     con = sqlite3.connect(db4)
     row = con.execute("SELECT plan_json FROM plan_capabilities WHERE capability_id=?",
                       (cid4,)).fetchone()
@@ -181,9 +191,11 @@ def main():
                 (json.dumps(pj), cid4))
     con.commit()
     con.close()
+    # D11: e4 releases the DB before the second engine boots on it.
+    e4.close()
     e4b = boot(db4)
     expect_refused("adv: tampered plan refused (fingerprint mismatch)",
-                   lambda: restore_everywhere(e4b, cid4, authority=e4b.oracle, reason="x"))
+                   lambda: restore_everywhere(e4b, cid4, caller=e4b.oracle, reason="x"))
     evs4 = [ev.get("event") for ev in e4b.capabilities.events(cid4, limit=200)]
     check("adv: corruption_detected logged", "corruption_detected" in evs4)
 
@@ -194,7 +206,7 @@ def main():
     e5.capabilities.set_status(cid5, "quarantined")
     e5.capabilities.log(cid5, "dependency_quarantined", "test derived")
     expect_refused("adv: derived quarantine refused",
-                   lambda: restore_everywhere(e5, cid5, authority=e5.oracle, reason="x"))
+                   lambda: restore_everywhere(e5, cid5, caller=e5.oracle, reason="x"))
 
     # epistemic revocation is not restorable via this path
     db6 = fresh_db("adv5")
@@ -203,14 +215,14 @@ def main():
     e6.capabilities.set_status(cid6, "quarantined")
     e6.capabilities.log(cid6, "epistemic_revocation", "test epistemic")
     expect_refused("adv: epistemic revocation refused",
-                   lambda: restore_everywhere(e6, cid6, authority=e6.oracle, reason="x"))
+                   lambda: restore_everywhere(e6, cid6, caller=e6.oracle, reason="x"))
 
     # goal stolen by another active capability (genuinely different plan ->
     # different fingerprint -> different capability id)
     db7 = fresh_db("adv6")
     e7 = boot(db7)
     cid7 = admit_add(e7)
-    quarantine_everywhere(e7, cid7, "adv quarantine")
+    quarantine_everywhere(e7, cid7, "adv quarantine", caller=e7.oracle)
     other_plan = {
         "name": "add_two_plus_zero",
         "params": {"a": "num", "b": "num"},
@@ -220,34 +232,34 @@ def main():
         ],
         "output": {"$step": "s2"},
     }
-    res_other = e7.admission.admit(goal=GOAL, plan=other_plan)
+    res_other = e7.admission.admit(goal=GOAL, plan=other_plan, caller=e7.oracle)
     check("adv setup: second capability admitted", res_other.verdict == Verdict.ADMITTED)
     check("adv setup: distinct id", res_other.capability_id != cid7)
     expect_refused("adv: stolen goal refused",
-                   lambda: restore_everywhere(e7, cid7, authority=e7.oracle, reason="x"))
+                   lambda: restore_everywhere(e7, cid7, caller=e7.oracle, reason="x"))
 
     # registry drift: op removed -> re-verification rejects
     db8 = fresh_db("adv7")
     e8 = boot(db8)
     cid8 = admit_add(e8)
-    quarantine_everywhere(e8, cid8, "adv quarantine")
+    quarantine_everywhere(e8, cid8, "adv quarantine", caller=e8.oracle)
     assert e8.primitives.unregister("add"), "could not unregister add"
     expect_refused("adv: registry drift refused (op missing -> admit rejects)",
-                   lambda: restore_everywhere(e8, cid8, authority=e8.oracle, reason="x"))
+                   lambda: restore_everywhere(e8, cid8, caller=e8.oracle, reason="x"))
     eff8 = effective_status(e8, cid8)
     check("adv: failed restore leaves tri-system quarantined",
           eff8["effective"] == "quarantined" and eff8["consistent"], json.dumps(eff8))
 
     # double restore: second call refused (no longer quarantined)
     expect_refused("adv: double restore refused",
-                   lambda: restore_everywhere(eng2, cap_id, authority=eng2.oracle, reason="x"))
+                   lambda: restore_everywhere(eng2, cap_id, caller=eng2.oracle, reason="x"))
 
     # silent resurrection via re-admission is refused by the new 0c guard
     db9 = fresh_db("adv8")
     e9 = boot(db9)
     cid9 = admit_add(e9)
-    quarantine_everywhere(e9, cid9, "adv quarantine")
-    res9 = e9.admission.admit(goal=GOAL, plan=dict(ADD_PLAN))
+    quarantine_everywhere(e9, cid9, "adv quarantine", caller=e9.oracle)
+    res9 = e9.admission.admit(goal=GOAL, plan=dict(ADD_PLAN), caller=e9.oracle)
     check("adv: re-admission of deliberately-quarantined plan REJECTED",
           res9.verdict == Verdict.REJECTED, str(res9.verdict))
     check("adv: primitive still unregistered after refused re-admission",
@@ -255,7 +267,7 @@ def main():
     eff9 = effective_status(e9, cid9)
     check("adv: still quarantined after refused re-admission",
           eff9["effective"] == "quarantined", json.dumps(eff9))
-    r9 = restore_everywhere(e9, cid9, authority=e9.oracle,
+    r9 = restore_everywhere(e9, cid9, caller=e9.oracle,
                             reason="restore after refused re-acquisition")
     check("adv: restore_everywhere works after refused re-admission",
           effective_status(e9, cid9)["effective"] == "active")

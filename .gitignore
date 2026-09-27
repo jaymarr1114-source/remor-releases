@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+tests/batteryE/work/
+tests/agent_org/work/
+tests/track3_new/{work_root}/
+tests/inherited/work/
+tests/repair_loop/work/
+tests/track2_new/causal_*/
+tests/media/media_pickup_*/
+tests/media/tmp_out/

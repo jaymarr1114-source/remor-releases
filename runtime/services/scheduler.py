@@ -37,6 +37,29 @@ Status machine:
     running | paused -> stopping -> stopped
     queued -> cancelled                       (cancel only; never executes)
 
+Resource bounds (Phase 3 hardening, 2026-09-25):
+  * FIFO queue depth capped at _MAX_PENDING (10,000); submit() beyond
+    that refuses with an explicit "queue full" error -- never silent
+    growth.
+  * Per-run in-memory event buffer capped at _MAX_EVENTS_PER_RUN
+    (10,000); overflow drops the OLDEST events and increments a
+    per-run dropped-events counter surfaced by events_summary().
+  * In-memory event buffers for terminal runs are LRU-evicted (by
+    ended_at) beyond _MAX_EVENT_RUNS_KEPT (1,000) runs. _controls and
+    _payloads only ever hold non-terminal runs (released on finish /
+    cancel), so they are bounded by _MAX_PENDING + 1 in-flight.
+  * list_runs() clamps its caller-supplied limit to _MAX_LIST_RUNS.
+  * Per-event stage detail truncated to _MAX_TRACE_DETAIL chars;
+    error strings to _MAX_ERROR_LEN chars; serialized outcome payloads
+    to _MAX_OUTCOME_JSON_BYTES bytes (oversized outcomes are stored as
+    an explicit truncation marker, never silently clipped mid-JSON).
+  * The sqlite scheduler_runs table is deliberately NOT pruned. It is
+    an append-only hash-chained audit log (one of the three integrity
+    heads); deleting or NULL-ing a row breaks seq continuity and row
+    digests, and re-chaining would be rewriting history -- a trust
+    violation. Chain integrity > disk retention by design; operators
+    needing disk bounds archive via history() and start a fresh DB.
+
 All mutating calls return {"ok": True/False, ...} dicts for expected misuse
 (bad id, wrong state) instead of raising.
 """
@@ -99,6 +122,14 @@ def _head_digest(rows: List[Tuple[int, str, str, Dict[str, Any]]]) -> str:
             [seq, prev_digest, row_digest, fields]).encode("utf-8"))
     return h.hexdigest()
 
+
+def _truncate_error(text: str) -> str:
+    """Cap an error string at _MAX_ERROR_LEN chars (explicit marker)."""
+    if len(text) <= _MAX_ERROR_LEN:
+        return text
+    return text[:_MAX_ERROR_LEN] + (
+        f"... [truncated; original {len(text)} chars]")
+
 from swarm_engine.core.task_interface import Stage, UniversalTaskInterface
 from swarm_engine.services import run_control as _rc
 from swarm_engine.services.run_control import RunControl
@@ -129,13 +160,49 @@ _SCHEMA_INDEX = (
     "ON scheduler_runs(id)"
 )
 
+#: Side mapping scheduler-run -> project. Deliberately NOT part of the
+#: hash-chained scheduler_runs schema: the chain covers the run record
+#: itself, and project linkage is deployment metadata, not run content.
+#: Plain table (no chain); survives fresh-process reopen like any sqlite
+#: table. Written under the scheduler lock at submit time.
+_SCHEMA_PROJECTS = """
+CREATE TABLE IF NOT EXISTS scheduler_run_projects (
+    run_id      TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL,
+    linked_at   REAL NOT NULL
+)
+"""
+_SCHEMA_PROJECTS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_scheduler_run_projects_project "
+    "ON scheduler_run_projects(project_id)"
+)
+
 #: Columns of the pre-chain (legacy) scheduler_runs table. A database
 #: whose scheduler_runs table lacks the chain columns is refused at
 #: open -- see LegacySchemaError and migrate_legacy_scheduler_db().
 _LEGACY_REQUIRED_ABSENT = ("seq", "prev_digest", "row_digest")
 
-_MAX_EVENTS_PER_RUN = 5000
-_MAX_EVENT_RUNS_KEPT = 200
+# ---------------------------------------------------------------------------
+# Resource bounds (Phase 3 hardening). Every in-memory container in this
+# module is capped; the sqlite scheduler_runs log is append-only by trust
+# design (see module docstring) and is never pruned.
+# ---------------------------------------------------------------------------
+#: Per-run event buffer: beyond this, oldest events are dropped and the
+#: per-run counter in self._event_drops is incremented.
+_MAX_EVENTS_PER_RUN = 10000
+#: In-memory event buffers kept for terminal runs; LRU-evicted by ended_at.
+_MAX_EVENT_RUNS_KEPT = 1000
+#: FIFO queue depth. submit() at or beyond this refuses "queue full".
+_MAX_PENDING = 10000
+#: Caller-supplied list_runs(limit=...) is clamped to this.
+_MAX_LIST_RUNS = 1000
+#: Per-event stage detail truncation (characters) in the trace callback.
+_MAX_TRACE_DETAIL = 250
+#: Error-string truncation (characters) before persisting to sqlite.
+_MAX_ERROR_LEN = 2000
+#: Serialized outcome payload cap (bytes); oversized outcomes are replaced
+#: by an explicit truncation marker, never silently clipped mid-JSON.
+_MAX_OUTCOME_JSON_BYTES = 1_000_000
 
 
 class _TracingTaskInterface(UniversalTaskInterface):
@@ -155,7 +222,7 @@ class _TracingTaskInterface(UniversalTaskInterface):
                     "type": "stage",
                     "stage": stage.value,
                     "ran": ran,
-                    "detail": detail[:250],
+                    "detail": detail[:_MAX_TRACE_DETAIL],
                     "elapsed_ms": round(elapsed_ms, 3),
                     "at": time.time(),
                 })
@@ -175,9 +242,14 @@ class RunScheduler:
         self._controls: Dict[str, RunControl] = {}
         self._payloads: Dict[str, tuple] = {}  # run_id -> (goal, examples, metadata)
         self._events: Dict[str, List[dict]] = {}
+        self._event_drops: Dict[str, int] = {}  # run_id -> overflow drops
         self._engine = None
         self._engine_lock = threading.Lock()
         self._shutdown = False
+        # NL intent-dispatch executor for kind="intent_dispatch" runs.
+        # Registered by the intent-dispatch service; None means intent
+        # runs are honestly refused (no silent fallback to a full run).
+        self._intent_executor = None
         # Service anchor attachment (CrossDbAnchor). None in unit tests /
         # anchor-free drivers; chaining is always on regardless.
         self._anchor = None
@@ -196,15 +268,58 @@ class RunScheduler:
                     "this database (trust-on-first-use).")
             self._db.execute(_SCHEMA)
             self._db.execute(_SCHEMA_INDEX)
+            self._db.execute(_SCHEMA_PROJECTS)
+            self._db.execute(_SCHEMA_PROJECTS_INDEX)
             self._db.commit()
-            # A non-empty chain table must verify on open -- a tampered
-            # chain is never silently adopted, anchor or not.
+            # A non-empty chain table must verify on open. The internal
+            # audit catches row mutation and splice/deletion; tail
+            # truncation is invisible to any hash chain and is caught by
+            # the external journal tip at service boot (verify_all),
+            # never silently adopted there either.
             if self._db.execute(
                     "SELECT COUNT(*) FROM scheduler_runs").fetchone()[0]:
                 ok, msg = self.audit()
                 if not ok:
                     raise ChainAuditError(
                         f"scheduler_runs chain audit failed on open: {msg}")
+            # Tip BEFORE the orphan repair below, as the journal sees it
+            # (head_digest, the full-table digest committed by anchor
+            # records). attach_anchor() uses it to recognize the repair's
+            # own appends: the journal tip must equal this value for the
+            # audited-transition healing to apply. Anything else (attacker
+            # truncation, foreign writes) keeps the fail-closed boot
+            # refusal.
+            self._pre_repair_tip = self.head_digest("scheduler_runs")
+            self._boot_repair_appended = False
+            # Orphaned-queue repair (cycle-1 sweep): close() leaves
+            # not-yet-dequeued runs "queued" in sqlite, and run payloads
+            # (goal/examples/metadata) live only in memory, so no new
+            # instance can ever execute them -- but the rows still claim
+            # "queued" with queue_position None and nothing reaps them.
+            # At __init__ time this instance has submitted nothing, so
+            # every row still "queued" is an orphan by construction:
+            # relabel it honestly as "error" (never executed) via one
+            # more append-only version, instead of leaving a "queued"
+            # status no queue backs. Single-scheduler-per-DB is the
+            # design (one worker thread; the only construction site is
+            # build_services), so no live instance can own these rows.
+            orphaned = self._db.execute(
+                "SELECT s.id FROM scheduler_runs s JOIN "
+                "(SELECT id, MAX(seq) AS m FROM scheduler_runs "
+                "GROUP BY id) t ON s.id = t.id AND s.seq = t.m "
+                "WHERE s.status = 'queued'").fetchall()
+            for (orphan_id,) in orphaned:
+                latest = self._latest_row_locked(orphan_id)
+                data = dict(zip(_CHAIN_FIELDS, latest))
+                data["status"] = "error"
+                data["ended_at"] = time.time()
+                data["error"] = (
+                    "scheduler restarted while run was queued; run never "
+                    "executed (run payloads are in-memory only)")
+                self._append_version_locked(orphan_id, data)
+            if orphaned:
+                self._db.commit()
+                self._boot_repair_appended = True
 
         self._worker = threading.Thread(
             target=self._worker_loop, name="remor-scheduler", daemon=True
@@ -227,14 +342,36 @@ class RunScheduler:
     # submission
     # ------------------------------------------------------------------
     def submit(self, goal: str, examples=None, metadata=None,
-               conversation_id: Optional[str] = None) -> Dict[str, Any]:
-        """Queue a run. Returns {"ok": True, "run_id": ...} (thread-safe)."""
+               conversation_id: Optional[str] = None,
+               project_id: Optional[str] = None) -> Dict[str, Any]:
+        """Queue a run. Returns {"ok": True, "run_id": ...} (thread-safe).
+
+        project_id is an optional linkage tag: the run is recorded in the
+        scheduler_run_projects side mapping so project_runs(project_id)
+        can find every scheduler run submitted for a project. It does NOT
+        alter the hash-chained scheduler_runs schema (the linkage is
+        deployment metadata, not run content), and the scheduler never
+        validates the project exists -- the project service owns projects;
+        this table is just the honest join index. Run-loop jobs are engine
+        jobs, not scheduler runs; they carry the same project_id in their
+        job record, which is what "share run records" means here: both
+        record types are keyed by project_id, queryable per project.
+        """
         with self._lock:
             if self._shutdown:
                 return {"ok": False, "error": "scheduler is shut down"}
             if not isinstance(goal, str) or not goal.strip():
                 return {"ok": False,
                         "error": "goal must be a non-empty string"}
+            if len(self._pending) >= _MAX_PENDING:
+                return {"ok": False,
+                        "error": f"queue full ({_MAX_PENDING} runs pending); "
+                                 f"retry later"}
+            if project_id is not None and (
+                    not isinstance(project_id, str) or not project_id.strip()):
+                return {"ok": False,
+                        "error": "project_id must be a non-empty string "
+                                 "when given"}
             run_id = uuid.uuid4().hex
             control = RunControl()
             now = time.time()
@@ -246,12 +383,18 @@ class RunScheduler:
                     "conversation_id": conversation_id,
                     "queued_at": now,
                 })
+                if project_id is not None:
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO scheduler_run_projects "
+                        "(run_id, project_id, linked_at) VALUES (?,?,?)",
+                        (run_id, project_id, now))
                 self._db.commit()
 
             self._attested_write_locked(_write_submit, "submit")
             self._controls[run_id] = control
             self._payloads[run_id] = (goal, examples, metadata)
             self._events[run_id] = []
+            self._event_drops[run_id] = 0
             self._pending.append(run_id)
             self._push_event_locked(
                 run_id, {"type": "status", "status": "queued", "at": now})
@@ -369,6 +512,9 @@ class RunScheduler:
 
     def list_runs(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Recent runs: id/goal/status/queue position/timing (no outcomes)."""
+        # The HTTP layer passes a caller-supplied limit straight through;
+        # clamp it so one request cannot materialize an unbounded row list.
+        limit = max(1, min(int(limit), _MAX_LIST_RUNS))
         with self._lock:
             cur = self._db.execute(
                 "SELECT s.id, s.goal, s.status, s.conversation_id, "
@@ -377,7 +523,7 @@ class RunScheduler:
                 "(SELECT id, MAX(seq) AS m FROM scheduler_runs "
                 "GROUP BY id) t ON s.id = t.id AND s.seq = t.m "
                 "ORDER BY s.queued_at DESC LIMIT ?",
-                (int(limit),),
+                (limit,),
             )
             pending = list(self._pending)
             rows = []
@@ -392,16 +538,77 @@ class RunScheduler:
             return rows
 
     def events(self, run_id: str) -> Optional[List[dict]]:
-        """Buffered stage/status events for one run (for SSE adoption)."""
+        """Buffered stage/status events for one run (for SSE adoption).
+
+        Returns None for an unknown/evicted run. The list shape is
+        stable for the HTTP layer; drop accounting lives in
+        events_summary().
+        """
+        with self._lock:
+            buf = self._events.get(run_id)
+            if buf is None:
+                return None
+            return list(buf)
+
+    def events_summary(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Events for one run plus overflow accounting. None if unknown.
+
+        "dropped_events" counts events discarded from the head of the
+        buffer under the _MAX_EVENTS_PER_RUN bound; "total_pushed" is
+        events_kept + dropped_events.
+        """
+        with self._lock:
+            buf = self._events.get(run_id)
+            if buf is None:
+                return None
+            dropped = self._event_drops.get(run_id, 0)
+            return {
+                "run_id": run_id,
+                "events": list(buf),
+                "events_kept": len(buf),
+                "dropped_events": dropped,
+                "total_pushed": len(buf) + dropped,
+            }
+
+    def event_drop_count(self, run_id: str) -> Optional[int]:
+        """Number of events dropped for one run's buffer. None if unknown."""
         with self._lock:
             if run_id not in self._events:
                 return None
-            return list(self._events[run_id])
+            return self._event_drops.get(run_id, 0)
 
     def queue_depth(self) -> int:
         """Number of runs currently waiting (queued, not yet dequeued)."""
         with self._lock:
             return len(self._pending)
+
+    def project_runs(self, project_id: str) -> List[Dict[str, Any]]:
+        """Every scheduler run tagged with project_id (latest row each).
+
+        The honest join index for S6: run_loop jobs are engine jobs, not
+        scheduler runs, so they never appear here -- they carry the same
+        project_id in the project service's job record instead. This
+        returns the scheduler-run side of the shared project_id key.
+        Reads the plain side table (no chain involvement) plus the latest
+        chained row per run for status.
+        """
+        with self._lock:
+            cur = self._db.execute(
+                "SELECT p.run_id, s.goal, s.status, s.queued_at, "
+                "s.started_at, s.ended_at, s.error "
+                "FROM scheduler_run_projects p JOIN scheduler_runs s "
+                "ON s.id = p.run_id "
+                "JOIN (SELECT id, MAX(seq) AS m FROM scheduler_runs "
+                "GROUP BY id) t ON s.id = t.id AND s.seq = t.m "
+                "WHERE p.project_id = ? "
+                "ORDER BY s.queued_at DESC",
+                (project_id,),
+            )
+            return [{
+                "id": rid, "project_id": project_id, "goal": goal,
+                "status": status, "queued_at": qa, "started_at": sa,
+                "ended_at": ea, "error": err,
+            } for (rid, goal, status, qa, sa, ea, err) in cur.fetchall()]
 
     # ------------------------------------------------------------------
     # tamper-evidence: anchor attachment + hash chain
@@ -412,6 +619,16 @@ class RunScheduler:
         Verifies the existing chain first: a tampered table is never
         attached to a journal. The journal init/verify/refuse decision
         itself lives in build_services(), not here.
+
+        Boot-time healing: __init__'s orphaned-queue repair appends
+        chained versions BEFORE the anchor is attached, so the live tip
+        has legitimately moved past the journal tip. When -- and only
+        when -- the journal tip equals the exact pre-repair tip captured
+        in __init__ (i.e. the sole divergence is this boot's own repair),
+        the new heads are committed through the journal's AUDITED
+        transition() path (reason + authority recorded), never a silent
+        re-anchor. Any other divergence keeps the fail-closed boot
+        refusal in build_services().
         """
         with self._lock:
             ok, msg = self.audit()
@@ -421,6 +638,18 @@ class RunScheduler:
                     f"audit failed: {msg}")
             self._anchor = anchor
             self._authority = authority or "scheduler"
+            if (getattr(self, "_boot_repair_appended", False)
+                    and anchor.journal_exists()):
+                journal_tip = anchor.latest_heads().get(
+                    "scheduler:scheduler_runs")
+                if journal_tip == getattr(self, "_pre_repair_tip", None):
+                    # reason="recovery": the journal's transition allowlist
+                    # is closed; the detailed why lives in the appended
+                    # chain rows themselves ("scheduler restarted while
+                    # run was queued...").
+                    anchor.transition(reason="recovery",
+                                      authority=self._authority)
+                    self._boot_repair_appended = False
 
     def _attested_write_locked(self, write_fn, op: str) -> None:
         """Run write_fn() (chained appends) under the anchor discipline.
@@ -587,13 +816,79 @@ class RunScheduler:
                     continue
             self._run_one(run_id)
 
+    # ------------------------------------------------------------------
+    # NL intent dispatch (kind="intent_dispatch" runs)
+    # ------------------------------------------------------------------
+    def register_intent_executor(self, fn) -> None:
+        """Register the callable the worker uses for intent-dispatch runs.
+
+        `fn(text, args, producer)` must return an object with `.as_dict()`
+        (the DispatchResult). Registered once by the intent-dispatch
+        service; without it, intent runs fail closed with an honest error.
+        """
+        with self._lock:
+            self._intent_executor = fn
+
+    def _run_intent_dispatch(self, run_id: str, metadata: Dict[str, Any]) -> None:
+        """Execute an NL intent dispatch AS this run's work.
+
+        The dispatch goes through the real NLToolDispatcher (route ->
+        re-verify -> arg validation -> real Composer execution -> audit
+        record). A full engine run is never launched for an intent
+        dispatch. The DispatchResult is stored as the run outcome via its
+        .as_dict(); a dispatcher-level refusal (unknown_intent etc.) is a
+        COMPLETED run whose outcome carries ok:false + refusal -- the
+        machinery ran fine, the intent was refused.
+        """
+        executor = self._intent_executor
+        try:
+            if executor is None:
+                raise RuntimeError(
+                    "no intent executor registered on scheduler: "
+                    "kind='intent_dispatch' runs cannot execute")
+            result = executor(metadata.get("text"), metadata.get("args"),
+                              metadata.get("producer"))
+            if not hasattr(result, "as_dict"):
+                raise RuntimeError(
+                    "intent executor returned no DispatchResult")
+            with self._lock:
+                # Merge-time repair (2026-09-26): backend_ff's lineage used
+                # the status string "complete", which is not a member of
+                # the canonical status machine (TERMINAL_STATUSES uses
+                # "completed"; _prune_events_locked's terminal-run query
+                # keys on it). The hunk's own docstring says COMPLETED.
+                self._finish_locked(run_id, "completed", result)
+        except Exception as ex:  # honest, never silent
+            with self._lock:
+                self._finish_locked(run_id, "error", None,
+                                    error=f"intent dispatch failed: {ex!r}")
+
     def _run_one(self, run_id: str) -> None:
+        # Peek at the payload first: intent-dispatch runs do their NL
+        # dispatch as the run's work and must never boot (or invoke) the
+        # run engine. This peek is additive -- regular runs flow through
+        # the original path below unchanged.
+        with self._lock:
+            _payload = self._payloads.get(run_id)
+            _kind = ((_payload[2] if _payload else None) or {}).get("kind")
+        if _kind == "intent_dispatch":
+            with self._lock:
+                if (self._controls.get(run_id) is None
+                        or self._payloads.get(run_id) is None):
+                    return  # cancelled concurrently; worker_loop skips
+                _metadata = self._payloads[run_id][2] or {}
+                self._set_status_locked(run_id, "running",
+                                        started_at=time.time())
+            self._run_intent_dispatch(run_id, _metadata)
+            return
+
         try:
             engine = self._engine_lazy()
         except Exception as ex:  # engine failed to boot: honest error
             with self._lock:
                 self._finish_locked(run_id, "error", None,
-                                    error=f"engine boot failed: {ex!r}")
+                                    error=_truncate_error(
+                                        f"engine boot failed: {ex!r}"))
             return
 
         with self._lock:
@@ -617,11 +912,15 @@ class RunScheduler:
             outcome = asyncio.run(iface.handle(
                 goal,
                 examples=examples,
-                metadata={**(metadata or {}), "run_control": control},
+                # run_id is threaded so the task interface can namespace
+                # run-scoped governed directories (NL file/media artifacts)
+                # by the scheduler run that produced them.
+                metadata={**(metadata or {}), "run_control": control,
+                          "run_id": run_id},
             ))
             final = self._classify(outcome, control)
         except Exception as ex:  # honest, never silent
-            outcome_error = f"{type(ex).__name__}: {ex}"
+            outcome_error = _truncate_error(f"{type(ex).__name__}: {ex}")
             final = "stopped" if control.stop_requested else "error"
         finally:
             _rc.set_current(None)
@@ -639,6 +938,14 @@ class RunScheduler:
                 return "stopped"
             if control.stop_requested and not outcome.success:
                 # Stop was in flight; do not mislabel as a plain failure.
+                # Provenance: 2026-09-27 ~08:47 UTC — reverted a wiring-mission
+                # edit that had flipped this branch to "stopped" on any
+                # stop_requested (even when the outcome succeeded).
+                # James's exact words in main chat (04:46 EDT): "Him let's
+                # duck it" — read as "ditch it", i.e. revert the flip. The
+                # revert was reported back to him the same hour without
+                # objection. Pending-stop + successful outcome classifies
+                # "completed" unless he directs otherwise.
                 return "stopped"
             return "completed" if outcome.success else "failed"
         return "stopped" if control.stop_requested else "error"
@@ -692,6 +999,16 @@ class RunScheduler:
             except Exception as ex:
                 outcome_json = json.dumps(
                     {"_outcome_serialize_failed": repr(ex)})
+            if outcome_json is not None and len(
+                    outcome_json.encode("utf-8")) > _MAX_OUTCOME_JSON_BYTES:
+                # Oversized outcomes are never silently clipped mid-JSON:
+                # store an explicit marker with the original byte size.
+                raw_bytes = len(outcome_json.encode("utf-8"))
+                outcome_json = json.dumps({
+                    "_outcome_truncated": True,
+                    "outcome_bytes": raw_bytes,
+                    "cap_bytes": _MAX_OUTCOME_JSON_BYTES,
+                })
 
         def _write() -> None:
             latest = self._latest_row_locked(run_id)
@@ -724,10 +1041,22 @@ class RunScheduler:
         ev = dict(ev)
         ev.setdefault("run_id", run_id)
         buf.append(ev)
-        if len(buf) > _MAX_EVENTS_PER_RUN:
-            del buf[:len(buf) - _MAX_EVENTS_PER_RUN]
+        overflow = len(buf) - _MAX_EVENTS_PER_RUN
+        if overflow > 0:
+            # Drop-oldest: the head (earliest) events go; the count is
+            # kept in _event_drops and surfaced via events_summary().
+            del buf[:overflow]
+            self._event_drops[run_id] = (
+                self._event_drops.get(run_id, 0) + overflow
+            )
 
     def _prune_events_locked(self) -> None:
+        """LRU-eviction (by ended_at) of terminal-run event buffers.
+
+        Only the in-memory buffers go. The sqlite scheduler_runs rows
+        stay -- the hash chain is append-only by trust design (chain
+        integrity > retention; see module docstring).
+        """
         if len(self._events) <= _MAX_EVENT_RUNS_KEPT:
             return
         # Caller holds self._lock (RLock).
@@ -742,6 +1071,7 @@ class RunScheduler:
             if len(self._events) <= _MAX_EVENT_RUNS_KEPT:
                 break
             self._events.pop(rid, None)
+            self._event_drops.pop(rid, None)
 
 
 # ---------------------------------------------------------------------------

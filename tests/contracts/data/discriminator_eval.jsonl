@@ -1,0 +1,48 @@
+{"text": "hey", "label": "chat", "note": "mandated: greeting"}
+{"text": "what can you do", "label": "chat", "note": "mandated: capability question"}
+{"text": "can you tell me the time?", "label": "chat", "note": "mandated: informational, no side effect"}
+{"text": "hi there", "label": "chat"}
+{"text": "good morning", "label": "chat"}
+{"text": "thanks", "label": "chat"}
+{"text": "bye", "label": "chat"}
+{"text": "what are your capabilities", "label": "chat"}
+{"text": "what is remor", "label": "chat"}
+{"text": "tell me the time", "label": "chat"}
+{"text": "what day is it today", "label": "chat"}
+{"text": "who wrote hamlet", "label": "chat"}
+{"text": "why is the sky blue", "label": "chat"}
+{"text": "will it rain tomorrow", "label": "chat"}
+{"text": "can you tell me a joke", "label": "chat"}
+{"text": "ok", "label": "chat"}
+{"text": "make an image", "label": "task", "note": "mandated: synthesis imperative"}
+{"text": "can you set a timer?", "label": "task", "note": "mandated: side effect vs tell-time"}
+{"text": "can you write a parser for me?", "label": "task", "note": "mandated: question implying work"}
+{"text": "5 times 6", "label": "task", "note": "mandated: bare arithmetic; inherited contract pins dispatch path"}
+{"text": "please write the deployment note", "label": "task"}
+{"text": "generate a report on sales", "label": "task"}
+{"text": "fix the login bug", "label": "task"}
+{"text": "remind me to call mom at 5", "label": "task"}
+{"text": "set an alarm for 7am", "label": "task"}
+{"text": "create a new project called atlas", "label": "task"}
+{"text": "search the web for rust async runtimes", "label": "task"}
+{"text": "summarize this document", "label": "task"}
+{"text": "deploy the staging build", "label": "task"}
+{"text": "could you please draft an email to the team", "label": "task"}
+{"text": "i need you to check the logs", "label": "task"}
+{"text": "calculate 15% of 240", "label": "task"}
+{"text": "the server is down", "label": "ambiguous", "note": "mandated: statement implying a request"}
+{"text": "can you help me with this?", "label": "ambiguous", "note": "mandated: no work verb, no object"}
+{"text": "help me", "label": "ambiguous"}
+{"text": "what about this?", "label": "ambiguous"}
+{"text": "can you do something for me?", "label": "ambiguous"}
+{"text": "the build failed", "label": "ambiguous"}
+{"text": "hmm", "label": "ambiguous"}
+{"text": "this isn't working", "label": "ambiguous"}
+{"text": "can you take a look?", "label": "ambiguous"}
+{"text": "and this one?", "label": "ambiguous"}
+{"text": "it's broken", "label": "ambiguous"}
+{"text": "the meeting is at 3", "label": "ambiguous"}
+{"text": "?", "label": "ambiguous"}
+{"text": "please help", "label": "ambiguous"}
+{"text": "what's the status of the build", "label": "ambiguous"}
+{"text": "is the server down?", "label": "ambiguous"}

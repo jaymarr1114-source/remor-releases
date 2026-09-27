@@ -140,7 +140,7 @@ class TestCreateListGet(unittest.TestCase):
             self.assertTrue(g["ok"], g)
             self.assertEqual(g["state"], "ingested")
             self.assertGreaterEqual(g["model"]["file_count"], 2)
-            self.assertEqual(g["legal_next"], ["analyzing"])
+            self.assertEqual(g["legal_next"], ["analyzing", "retired"])
             # History begins at the first transition: no faked "created" row.
             self.assertEqual(g["history"], [])
             self.assertIsNone(g["progress"])
@@ -210,7 +210,7 @@ class TestTransitions(unittest.TestCase):
             self.assertEqual(g["history"][0]["from"], "ingested")
             self.assertEqual(g["history"][0]["to"], "analyzing")
             self.assertEqual(g["history"][-1]["to"], "complete")
-            self.assertEqual(g["legal_next"], [])  # complete is terminal
+            self.assertEqual(g["legal_next"], ["retired"])  # complete can retire (administrative)
 
     def test_transition_unknown_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -440,12 +440,16 @@ class TestTamperAndUnknown(unittest.TestCase):
             self.assertIn("unknown job", sl["error"])
 
     def test_delete_project_absent(self):
+        # Locked Phase 2: projects are NEVER permanently deleted. The
+        # old ABSENT refusal is now a typed refusal naming the governed
+        # retire path.
         with tempfile.TemporaryDirectory() as tmp:
             svc = _make_service(tmp)
             svc.create({"kind": "blank", "project_id": "d1"})
             r = svc.delete_project("d1")
             self.assertFalse(r["ok"])
-            self.assertIn("ABSENT", r["error"])
+            self.assertEqual(r["code"], "permanent_deletion_refused")
+            self.assertIn("retire", r["retire_route"])
             # Project untouched by the refused delete.
             self.assertTrue(svc.get_project("d1")["ok"])
 
