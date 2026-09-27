@@ -49,7 +49,13 @@ FREE = {Effect.PURE, Effect.CLOCK, Effect.RANDOM}
 # exercised inside a directory the governor has actually granted. Testing them
 # against a path outside every grant only proves the governor says no, which is
 # worth knowing once, not 15 times.
-SANDBOX_ROOT = "/tmp/swarm_validation_sandbox"
+# P0 Android fix (landed in canonical 2026-09-27): resolve the validation
+# sandbox under the writable root (REMOR_DATA_DIR) when set; the Android app
+# sandbox has no writable /tmp. Historical /tmp default preserved on dev
+# machines.
+from swarm_engine.core.writable import writable_subdir as _writable_subdir
+SANDBOX_ROOT = _writable_subdir("swarm_validation_sandbox",
+                                "/tmp/swarm_validation_sandbox")
 
 
 # ---------------------------------------------------------------------------

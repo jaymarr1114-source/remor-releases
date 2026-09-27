@@ -289,8 +289,10 @@ class ProjectExecutor:
         return None
 
     def _workspace_root(self) -> str:
+        from swarm_engine.core.writable import writable_subdir
         return str(getattr(self.engine, "projects_dir", None)
-                   or "/tmp/swarm_projects")
+                   or writable_subdir("swarm_projects",
+                                      "/tmp/swarm_projects"))
 
     @staticmethod
     def _scoped_target(raw: str, root: str) -> str:

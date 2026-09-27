@@ -104,7 +104,13 @@ class SwarmEngine:
         # sqlite connection) belongs to the constructing thread.
         self._owner_thread = threading.get_ident()
         self.db_path = db_path
-        self.projects_dir = "/tmp/swarm_projects"
+        # P0 Android fix (landed in canonical 2026-09-27): /tmp does not exist
+        # and is not writable in the Android app sandbox. Resolve via the
+        # writable root (REMOR_DATA_DIR, set by the Android wrapper) when
+        # present, else preserve the historical /tmp default on dev machines.
+        from swarm_engine.core.writable import writable_subdir
+        self.projects_dir = writable_subdir("swarm_projects",
+                                            "/tmp/swarm_projects")
         import os as _os
         _os.makedirs(self.projects_dir, exist_ok=True)
         self.kb = KnowledgeBase(db_path=db_path)

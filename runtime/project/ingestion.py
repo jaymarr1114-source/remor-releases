@@ -171,7 +171,14 @@ class ProjectIngestor:
     # archive path's per-entry streaming cap).
     MAX_ENTRY_BYTES = 200 * 1024 * 1024
 
-    def __init__(self, projects_dir: str = "/tmp/swarm_projects"):
+    def __init__(self, projects_dir: str = None):
+        # P0 Android fix (landed in canonical 2026-09-27): default resolves
+        # via the writable root (REMOR_DATA_DIR) when set; historical /tmp
+        # default preserved on dev machines.
+        if projects_dir is None:
+            from swarm_engine.core.writable import writable_subdir
+            projects_dir = writable_subdir("swarm_projects",
+                                           "/tmp/swarm_projects")
         self.projects_dir = projects_dir
         os.makedirs(projects_dir, exist_ok=True)
 

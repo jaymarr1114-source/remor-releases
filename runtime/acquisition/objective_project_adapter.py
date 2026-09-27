@@ -148,7 +148,9 @@ class ObjectiveProjectAdapter:
                 return None
         else:
             text = objective_text
-        projects_dir = getattr(self.engine, "projects_dir", None) or "/tmp/swarm_projects"
+        from swarm_engine.core.writable import writable_subdir
+        projects_dir = getattr(self.engine, "projects_dir", None) or \
+            writable_subdir("swarm_projects", "/tmp/swarm_projects")
         synthesized = markdown_to_project(text, str(projects_dir))
         if synthesized is None:
             return None
