@@ -152,22 +152,23 @@ def record_distillation_experience(epistemic: "EpistemicStore",
                                    C: Any = None) -> str:
     """Append an M2-style experience record to the epistemic store.
 
-    Returns the observation id. The record carries the full delta schema
-    so later unified queries can retrieve it and trace it back to the
-    delta and the synthesized capability.
+    V10-P1: this is the acquisition loop's experience write path, cut over
+    to the unified write path (record_experience). The record lands in the
+    epistemic store via the frozen EpistemicStore API, stamped with
+    provenance (origin loop, timestamp, causal chain). Returns the
+    observation id.
     """
-    from uuid import uuid4
-    from swarm_engine.intellect.epistemic import Observation
     raw = {"objective": objective, "delta_id": delta_id,
            "Y": Y, "Z": Z, "T": T, "E": E, "D": D, "V": V,
            "synthesized_capability_id": C}
-    obs_id = f"exp_{uuid4().hex[:12]}"
-    epistemic.save_observation(Observation(
-        observation_id=obs_id,
+    return record_experience(
+        epistemic,
+        origin_loop="acquisition",
+        kind="distillation",
         content=f"distillation experience: {objective} (technique: {T})",
-        source="distillation-loop",
-        raw=raw))
-    return obs_id
+        raw=raw,
+        causal_chain=[delta_id],
+        source="distillation-loop")
 
 
 def _get_planner(registry: Any) -> Any:
@@ -349,14 +350,21 @@ def _persist_attempt(epistemic: Any, result: ZCheckResult) -> None:
     if epistemic is None:
         return
     try:
-        epistemic.record_observation(
+        # V10-P1: the z-check attempt log is cut over to the unified write
+        # path (origin loop "planning"). Source stays "z-check" so the
+        # prior-attempt scan keeps working; raw keeps its legacy keys.
+        record_experience(
+            epistemic,
+            origin_loop="planning",
+            kind="z_check_attempt",
             content=(f"z-check on {result.objective!r}: "
                      f"{result.classification} "
                      f"(strategy={result.strategy or 'none'}, "
                      f"ops={result.ops_used}, reached={result.reached})"),
-            source="z-check",
             raw={"type": "z_check_attempt", "objective": result.objective,
-                 **result.as_dict()})
+                 **result.as_dict()},
+            causal_chain=[result.objective],
+            source="z-check")
     except Exception:
         pass  # attempt logging never breaks the check
 
@@ -680,3 +688,542 @@ class UnifiedMemory:
                         registry=self.registry, epistemic=self.epistemic)
         res.detail["prior_experiences"] = self.similar_experiences(objective)
         return res
+
+
+# ---------------------------------------------------------------------------
+# V10-P1 unified memory cutover: the single read/write path for experience
+# records, the store adapter catalog, and the census.
+#
+# Before V10-P1, UnifiedMemory was a query-only layer over the epistemic,
+# capability, and planner-registry vocabularies: it never held or wrote
+# records, and it was never instantiated in production. Every loop kept its
+# own store handles (EpistemicStore here, CapabilityStore there, GapRegistry
+# in gaps.db, the oracle trust sidecar, service DBs...), so "unified memory"
+# was a name, not a mechanism.
+#
+# V10-P1 cuts the loops over to this module as the single read/write path
+# for experience/memory records:
+#
+#   record_experience()  -- THE write path. Every experience record written
+#       through the acquisition loop goes through here. The write lands in
+#       the epistemic store via the FROZEN EpistemicStore API (no second
+#       source of truth: the epistemic store stays the physical substrate),
+#       stamped with provenance: origin loop, timestamp, causal chain.
+#   read_experiences()   -- THE read path. Any loop (dispatch included) reads
+#       records back through here, filtered by provenance.
+#
+# The operational stores themselves are BRIDGED, not migrated: STORE_CATALOG
+# registers one adapter entry per persistent store found by the V10-P1
+# structural survey (three independent survey passes, 2026-09-27), with the
+# authoritative table names verified against a fresh engine boot. The census
+# (UnifiedMemory.census) then proves the negative: every table in the engine
+# DB must be claimed by exactly one adapter. An unclaimed table is a defect
+# -- a private store invisible to the other loops. A table claimed twice is
+# a defect -- two sources of truth.
+#
+# Deliberate exception, documented not hidden: the oracle trust registry
+# ({engine_db}.oracle.db) is an INDEPENDENT trust authority. A trust record
+# must stay independent of the stores it guards (V9 trust architecture), so
+# the facade registers its existence and verifies it is present, but never
+# bridges its contents into the unified read/write path. Weakening that
+# separation to "unify" it would be a trust defect, not a cutover.
+# ---------------------------------------------------------------------------
+
+#: Schema version stamped into every provenance block.
+EXPERIENCE_SCHEMA = 1
+
+#: Canonical origin-loop names for provenance.
+ORIGIN_ACQUISITION = "acquisition"
+ORIGIN_DISPATCH = "dispatch"
+ORIGIN_PLANNING = "planning"
+ORIGIN_VERIFICATION = "verification"
+ORIGIN_TRUST = "trust"
+ORIGIN_MEMORY = "memory"
+ORIGIN_INTELLECT = "intellect"
+
+#: Raw-JSON key carrying the provenance block. Top-level record fields are
+#: never renamed by the cutover; provenance is additive.
+PROVENANCE_KEY = "_provenance"
+
+
+def record_experience(epistemic: Any,
+                      origin_loop: str,
+                      kind: str,
+                      content: str,
+                      raw: Optional[Dict[str, Any]] = None,
+                      causal_chain: Optional[Sequence[str]] = None,
+                      source: Optional[str] = None,
+                      observation_id: Optional[str] = None) -> str:
+    """Write one experience record through the unified write path.
+
+    The record lands in the epistemic store via the frozen EpistemicStore
+    API (the store stays the single physical substrate -- no duplication),
+    with an additive provenance block carrying the origin loop, the write
+    timestamp, and the causal chain (ids of the records/events that caused
+    this one, e.g. the delta id that produced a distillation experience).
+
+    Returns the observation id. Raises on storage failure: experience
+    writes through this path are load-bearing provenance, not advisory
+    logging -- callers that must not break their loop keep their own
+    try/except (as _persist_attempt does).
+    """
+    from uuid import uuid4
+    obs_id = observation_id or f"exp_{uuid4().hex[:12]}"
+    provenance = {
+        "schema": EXPERIENCE_SCHEMA,
+        "origin_loop": origin_loop,
+        "kind": kind,
+        "causal_chain": list(causal_chain or []),
+        "recorded_at": time.time(),
+        "write_path": "unified_memory.record_experience",
+    }
+    merged = dict(raw or {})
+    merged[PROVENANCE_KEY] = provenance
+    src = source or f"{origin_loop}/{kind}"
+    save = getattr(epistemic, "save_observation", None)
+    if callable(save):
+        from swarm_engine.intellect.epistemic import Observation
+        save(Observation(observation_id=obs_id, content=content,
+                         source=src, raw=merged))
+    else:
+        epistemic.record_observation(content=content, source=src, raw=merged)
+    return obs_id
+
+
+def read_experiences(epistemic: Any,
+                     origin_loop: Optional[str] = None,
+                     kind: Optional[str] = None,
+                     limit: int = 100) -> List[Dict[str, Any]]:
+    """Read experience records back through the unified read path.
+
+    Filters on the provenance block stamped by record_experience. Records
+    written before the cutover (or by loop-owned writers that bypass the
+    facade) carry no provenance block: they are still returned -- reachable
+    is the point -- but their provenance dict is empty, which is exactly
+    how the census distinguishes facade-written records from legacy ones.
+    """
+    out: List[Dict[str, Any]] = []
+    for o in epistemic.all_observations():
+        raw = getattr(o, "raw", None) or {}
+        prov = raw.get(PROVENANCE_KEY) or {}
+        if origin_loop is not None and prov.get("origin_loop") != origin_loop:
+            continue
+        if kind is not None and prov.get("kind") != kind:
+            continue
+        out.append({
+            "observation_id": getattr(o, "observation_id", ""),
+            "content": getattr(o, "content", ""),
+            "source": getattr(o, "source", ""),
+            "at": getattr(o, "at", None),
+            "provenance": dict(prov),
+            "raw": raw,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Store adapter catalog (bridge registry).
+#
+# One entry per persistent store found by the V10-P1 structural survey.
+# "Bridge" means: the store stays exactly where it is, owned by exactly the
+# module that owns it today; this catalog makes it REACHABLE through the
+# unified layer (adapter metadata + census), with provenance preserved --
+# the facade never copies a store's rows into a second table.
+#
+# db values: "engine" (the shared swarm_engine.db), "gaps" (gaps.db, sibling
+# of the engine DB), "acceptance" (acceptance.db), "oracle" (the trust
+# sidecar -- independent by design, see the header note), "service"
+# (service-private DBs, created at service boot), "project" (per-project
+# DBs), "staging" (M3 governed-fetch staging dir -- files, not tables).
+# ---------------------------------------------------------------------------
+
+def _adapter(store_id: str, tables: Sequence[str], owner: str, db: str,
+             loops: Sequence[str], notes: str = "",
+             independent: bool = False) -> Dict[str, Any]:
+    return {"store_id": store_id, "tables": tuple(tables), "owner": owner,
+            "db": db, "loops": tuple(loops), "notes": notes,
+            "independent": independent}
+
+
+STORE_CATALOG: Tuple[Dict[str, Any], ...] = (
+    # -- the shared engine DB ------------------------------------------------
+    _adapter("epistemic-store",
+             ("observations", "evidence", "hypotheses", "experiments"),
+             "runtime/intellect/epistemic.py", "engine",
+             ("acquisition", "intellect", "planning", "verification"),
+             "Primary experience-record substrate; unified write path lands here."),
+    _adapter("capability-store",
+             ("plan_capabilities", "capability_goals", "capability_events"),
+             "runtime/synthesis/capability_store.py", "engine",
+             ("acquisition", "dispatch", "planning", "verification", "trust"),
+             "FROZEN interface; read-only from the unified layer."),
+    _adapter("knowledge-base",
+             ("capabilities", "generation_log"),
+             "runtime/memory/knowledge_base.py", "engine",
+             ("verification", "synthesis"),
+             "Verification outcomes persist in generation_log."),
+    _adapter("provenance-store",
+             ("provenance", "provenance_events", "capability_prerequisites",
+              "acquired_code"),
+             "runtime/governance/provenance.py", "engine",
+             ("acquisition", "trust", "governance"),
+             "acquired_code is governance-owned, shared acquisition/competition."),
+    _adapter("lifecycle-store",
+             ("lifecycle_log", "lifecycle_state", "lifecycle_succession"),
+             "runtime/governance/lifecycle.py", "engine",
+             ("acquisition", "verification", "trust"),
+             "Quarantine/lifecycle transitions."),
+    _adapter("memory-bank",
+             ("episodic_memory", "semantic_memory"),
+             "runtime/memory/system.py", "engine",
+             ("memory", "cognition"),
+             "MemorySystem: the engine's episodic/semantic facade."),
+    _adapter("failure-memory",
+             ("failure_memory",),
+             "runtime/memory/failure_memory.py", "engine",
+             ("memory", "improvement")),
+    _adapter("experience-log",
+             ("experience_events",),
+             "runtime/intellect/experience.py", "engine",
+             ("acquisition", "dispatch"),
+             "ExperienceLog event table (owned by the intellect/memory files)."),
+    _adapter("acquisition-experience",
+             ("acquisition_experience",),
+             "runtime/synthesis/acquisition_learning.py", "engine",
+             ("acquisition",),
+             "Acquisition strategy outcomes (signature/strategy/success/cost)."),
+    _adapter("lexicon",
+             ("lexical_concepts",),
+             "runtime/acquisition/lexical.py", "engine",
+             ("acquisition",),
+             "Created lazily by the objective bridge."),
+    _adapter("semantic-structures",
+             ("semantic_structures",),
+             "runtime/acquisition/semantic_structure.py", "engine",
+             ("acquisition", "cognition"),
+             "Created lazily by the objective bridge."),
+    _adapter("semantic-capabilities",
+             ("semantic_capabilities",),
+             "runtime/acquisition/semantic_capability.py", "engine",
+             ("acquisition", "cognition", "synthesis")),
+    _adapter("external-evidence",
+             ("external_evidence",),
+             "runtime/acquisition/semantic_capability.py", "engine",
+             ("acquisition",)),
+    _adapter("semantic-evidence-gaps",
+             ("semantic_evidence_gaps",),
+             "runtime/acquisition/semantic_evidence_gap.py", "engine",
+             ("acquisition", "dispatch")),
+    _adapter("integrity-seals",
+             ("integrity_seals", "integrity_lineage"),
+             "runtime/synthesis/integrity.py", "engine",
+             ("dispatch", "trust"),
+             "Created lazily by the integrity/quarantine sweep."),
+    _adapter("quarantine-sweep",
+             ("sweep_runs", "sweep_actions", "quarantine_repair_evidence"),
+             "runtime/synthesis/integrity.py", "engine",
+             ("trust", "verification"),
+             "Created lazily by the quarantine sweep."),
+    _adapter("dispatch-audit",
+             ("intent_dispatches",),
+             "runtime/synthesis/nl_dispatch.py", "engine",
+             ("dispatch",),
+             "Created lazily on first dispatch."),
+    _adapter("composition-abstraction",
+             ("composition_observations", "generalized_skeletons"),
+             "runtime/synthesis/abstraction.py", "engine",
+             ("synthesis", "improvement")),
+    _adapter("competition",
+             ("competitors", "goal_winners"),
+             "runtime/synthesis/competition.py", "engine",
+             ("dispatch", "acquisition")),
+    _adapter("autonomous-driver",
+             ("driver_state",),
+             "runtime/capability/autonomous_driver.py", "engine",
+             ("capability",),
+             "Created lazily by the autonomous driver."),
+    _adapter("external-knowledge",
+             ("knowledge_requests", "knowledge_answers"),
+             "runtime/capability/external_knowledge.py", "engine",
+             ("capability", "acquisition"),
+             "Created lazily by the external-knowledge queue."),
+    _adapter("promoted-primitives",
+             ("promoted_primitives",),
+             "runtime/capability/primitive_promotion.py", "engine",
+             ("planning", "trust")),
+    _adapter("representations",
+             ("case_memory", "failed_adaptations", "search_bias_op",
+              "search_bias_pair", "concepts", "exhausted_searches"),
+             "runtime/cognition/representations.py", "engine",
+             ("cognition", "planning")),
+    _adapter("agenda-intellect",
+             ("agenda_questions", "agenda_weights"),
+             "runtime/intellect/agenda.py", "engine",
+             ("intellect",)),
+    _adapter("intellectual-patterns",
+             ("intellectual_patterns",),
+             "runtime/intellect/patterns.py", "engine",
+             ("intellect",)),
+    _adapter("longhorizon-core",
+             ("checkpoints",),
+             "runtime/core/longhorizon.py", "engine",
+             ("longhorizon",)),
+    _adapter("autonomy-objectives",
+             ("objectives",),
+             "runtime/core/autonomy.py", "engine",
+             ("autonomy",)),
+    _adapter("blackboard",
+             ("blackboard",),
+             "runtime/agents/blackboard.py", "engine",
+             ("agents",)),
+    _adapter("improvement-agenda",
+             ("agenda_events", "agenda_investigations", "agenda_seq",
+              "improvement_agenda"),
+             "runtime/improvement/agenda.py", "engine",
+             ("improvement",)),
+    _adapter("improvement-substrate",
+             ("improvement_log", "improvement_outcomes", "improvements"),
+             "runtime/improvement/substrate.py", "engine",
+             ("improvement",)),
+    _adapter("goal-language",
+             ("abstraction_decisions", "abstraction_events",
+              "abstraction_resource_experience", "goal_lang_cycles",
+              "goal_lang_seq", "deferred_opportunities",
+              "learned_productions"),
+             "runtime/improvement/goal_language.py", "engine",
+             ("improvement",)),
+    _adapter("auto-engineer",
+             ("auto_engineer_evidence",),
+             "runtime/improvement/auto_engineer.py", "engine",
+             ("improvement",)),
+    _adapter("experiment-design",
+             ("experiment_runs",),
+             "runtime/improvement/experiment_design.py", "engine",
+             ("improvement", "verification")),
+    _adapter("task-synthesis",
+             ("synthesis_cycles", "synthesis_seq"),
+             "runtime/improvement/task_synthesis.py", "engine",
+             ("improvement",)),
+    _adapter("curriculum",
+             ("curriculum_cycles", "curriculum_seq"),
+             "runtime/improvement/curriculum.py", "engine",
+             ("improvement",)),
+    _adapter("primitive-synthesis",
+             ("iterated_primitives",),
+             "runtime/cognition/primitive_synthesis.py", "engine",
+             ("cognition", "synthesis")),
+    _adapter("project",
+             ("projects", "project_log", "project_progress", "project_state"),
+             "runtime/project/lifecycle.py", "engine",
+             ("project",),
+             "projects table created by runtime/project/ingestion.py."),
+    # -- separate files ------------------------------------------------------
+    _adapter("m7-gap-registry",
+             ("m7_gap_records", "m7_dependency_inventory", "m7_route_runs"),
+             "runtime/acquisition/gaps.py", "gaps",
+             ("acquisition", "dispatch"),
+             "The only separate-file acquisition store; sibling of engine DB."),
+    _adapter("acceptance-overlay",
+             ("acceptance_records",),
+             "runtime/verification/acceptance.py", "acceptance",
+             ("verification",),
+             "Separate acceptance.db; no in-tree constructor -- wired by deployment."),
+    _adapter("oracle-trust",
+             (),
+             "runtime/trust/oracle.py", "oracle",
+             ("trust",),
+             "INDEPENDENT trust authority by design: registered for "
+             "existence, never bridged into the unified read/write path.",
+             independent=True),
+    _adapter("m3-substrate-staging",
+             (),
+             "runtime/acquisition/substrate.py", "staging",
+             ("acquisition",),
+             "Governed-fetch staging dir (files, not tables); in-memory "
+             "fetch audit is NOT persisted -- documented, not claimed."),
+    _adapter("scheduler-db",
+             (),
+             "runtime/services/scheduler.py", "service",
+             ("services",),
+             "Service-private DB; created at service boot."),
+    _adapter("tasks-db",
+             (),
+             "runtime/services/tasks.py", "service",
+             ("services",),
+             "Service-private DB; created at service boot."),
+    _adapter("evidence-db",
+             (),
+             "runtime/services/evidence.py", "service",
+             ("services",),
+             "Service-private DB; created at service boot."),
+    _adapter("artifacts-db",
+             (),
+             "runtime/services/artifacts.py", "service",
+             ("services",),
+             "Service-private DB; created at service boot."),
+    _adapter("intent-db",
+             (),
+             "runtime/agent_org/intent_dispatch_service.py", "service",
+             ("dispatch",),
+             "IntentDispatchService boots a separate full engine DB "
+             "(intent.db). FLAGGED: a private engine-schema copy unless "
+             "bridged or retired -- the census surfaces it when present."),
+    _adapter("project-db",
+             (),
+             "runtime/project/", "project",
+             ("project",),
+             "Per-project .remor_project.db + .remor_continuation/*.json."),
+)
+
+
+def store_catalog() -> List[Dict[str, Any]]:
+    """Return the registered store adapters (bridge registry)."""
+    return [dict(a) for a in STORE_CATALOG]
+
+
+def _sqlite_tables(db_path: str) -> List[str]:
+    import sqlite3
+    con = sqlite3.connect(db_path)
+    try:
+        rows = con.execute(
+            "select name from sqlite_master where type='table'").fetchall()
+    finally:
+        con.close()
+    return sorted(r[0] for r in rows
+                  if r[0] not in ("sqlite_sequence", "sqlite_stat1"))
+
+
+class _CensusResult(dict):
+    """A census report that is falsy when any defect is found."""
+
+    @property
+    def ok(self) -> bool:
+        return (not self.get("unclaimed_tables")
+                and not self.get("multi_claimed_tables")
+                and not self.get("missing_sidecars"))
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def run_census(engine_db_path: str) -> _CensusResult:
+    """Enumerate every table in the engine DB and prove each is reachable.
+
+    Every table must be claimed by exactly one STORE_CATALOG adapter with
+    db == "engine". Unclaimed tables are private stores invisible to the
+    loops (defect); tables claimed by two adapters are two sources of truth
+    (defect). Known sidecar files next to the engine DB (gaps.db,
+    acceptance.db, the oracle trust DB) are checked for presence and, when
+    present, their tables must be claimed by the matching adapter.
+
+    This is the adversarial half of the V10-P1 proof: a loop that keeps a
+    store outside this catalog fails the census.
+    """
+    import os
+    result: _CensusResult = _CensusResult()
+    result["engine_db"] = engine_db_path
+    by_table: Dict[str, List[str]] = {}
+    for adapter in STORE_CATALOG:
+        if adapter["db"] != "engine":
+            continue
+        for table in adapter["tables"]:
+            by_table.setdefault(table, []).append(adapter["store_id"])
+
+    tables = _sqlite_tables(engine_db_path)
+    result["tables_found"] = tables
+    claimed, unclaimed, multi = [], [], []
+    for table in tables:
+        owners = by_table.get(table, [])
+        if len(owners) == 1:
+            claimed.append({"table": table, "store_id": owners[0]})
+        elif not owners:
+            unclaimed.append(table)
+        else:
+            multi.append({"table": table, "store_ids": owners})
+    result["claimed_tables"] = claimed
+    result["unclaimed_tables"] = unclaimed
+    result["multi_claimed_tables"] = multi
+
+    # Sidecars: gaps.db and acceptance.db are bridged stores; the oracle DB
+    # is the deliberate independent exception (existence only).
+    sidecars: Dict[str, Any] = {}
+    missing = []
+    base = os.path.dirname(os.path.abspath(engine_db_path))
+    stem = os.path.splitext(os.path.basename(engine_db_path))[0]
+    expectations = {
+        "gaps": (os.path.join(base, "gaps.db"),
+                 "m7-gap-registry", False),
+        "acceptance": (os.path.join(base, "acceptance.db"),
+                       "acceptance-overlay", False),
+        "oracle": (os.path.join(base, f"{stem}.oracle.db"),
+                   "oracle-trust", True),
+    }
+    for name, (path, store_id, independent) in expectations.items():
+        entry: Dict[str, Any] = {"path": path, "store_id": store_id,
+                                 "present": os.path.exists(path),
+                                 "independent": independent}
+        if entry["present"] and not independent:
+            adapter = next(a for a in STORE_CATALOG
+                           if a["store_id"] == store_id)
+            actual = _sqlite_tables(path)
+            entry["tables"] = actual
+            entry["unclaimed_tables"] = [t for t in actual
+                                         if t not in adapter["tables"]]
+            if entry["unclaimed_tables"]:
+                unclaimed.extend(f"{name}:{t}"
+                                 for t in entry["unclaimed_tables"])
+        if not entry["present"] and name in ("gaps",):
+            # gaps.db is created on first GapRegistry use; its absence on a
+            # fresh engine is expected, not a defect.
+            entry["note"] = "not yet created (lazy)"
+        sidecars[name] = entry
+    result["sidecars"] = sidecars
+    result["missing_sidecars"] = missing
+    result["unclaimed_tables"] = unclaimed
+    return result
+
+
+# -- UnifiedMemory: the cutover surface -------------------------------------
+# (Methods are attached here, after the class definition above, so the
+# V10-P1 surface stays in one readable section with the write path and
+# the catalog it depends on.)
+
+def _um_record_experience(self: "UnifiedMemory",
+                          origin_loop: str,
+                          kind: str,
+                          content: str,
+                          raw: Optional[Dict[str, Any]] = None,
+                          causal_chain: Optional[Sequence[str]] = None,
+                          source: Optional[str] = None) -> str:
+    """Write an experience record through the unified write path."""
+    return record_experience(self.epistemic, origin_loop, kind, content,
+                             raw=raw, causal_chain=causal_chain,
+                             source=source)
+
+
+def _um_read_experiences(self: "UnifiedMemory",
+                         origin_loop: Optional[str] = None,
+                         kind: Optional[str] = None,
+                         limit: int = 100) -> List[Dict[str, Any]]:
+    """Read experience records back through the unified read path."""
+    return read_experiences(self.epistemic, origin_loop=origin_loop,
+                            kind=kind, limit=limit)
+
+
+def _um_census(self: "UnifiedMemory",
+               engine_db_path: Optional[str] = None) -> _CensusResult:
+    """Run the store census against the engine DB behind this layer."""
+    path = engine_db_path or getattr(self.epistemic, "db_path", None)
+    if not path:
+        raise ValueError("census needs an engine DB path: pass "
+                         "engine_db_path or bind an epistemic store with a "
+                         "db_path")
+    return run_census(path)
+
+
+UnifiedMemory.record_experience = _um_record_experience
+UnifiedMemory.read_experiences = _um_read_experiences
+UnifiedMemory.census = _um_census
+del _um_record_experience, _um_read_experiences, _um_census
