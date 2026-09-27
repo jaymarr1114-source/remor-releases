@@ -639,6 +639,37 @@ class OracleRegistry:
                 "producer_id": ENGINE_PRODUCER_ID,
                 "token_hash": _digest(self._engine_token),
                 "attested_at": _now()})
+            # Trust-schema migration (2026-09-27): the root decision-class
+            # set grew after some deployed DBs were bootstrapped (the v8
+            # lineage granted 5 classes; the agent:* classes, including
+            # agent:admit_capability, came later). An existing DB whose
+            # engine lacks a root class fail-closes every privileged op in
+            # that class -- on a real device this killed the engine
+            # front's boot (admit_capability refused under default-deny).
+            # Backfill the missing root authorizations as VISIBLE chained
+            # GRANT events, restoring the documented invariant that the
+            # engine holds every root class from bootstrap. A deliberate
+            # REVOKE is never overridden: only (producer, class) pairs
+            # with no event history AND no base grant row are backfilled.
+            for _cls in ROOT_DECISION_CLASSES:
+                cur.execute(
+                    "SELECT 1 FROM ob_producer_authz_events "
+                    "WHERE producer_id=? AND decision_class=? LIMIT 1",
+                    (ENGINE_PRODUCER_ID, _cls))
+                if cur.fetchone() is not None:
+                    continue
+                cur.execute(
+                    "SELECT 1 FROM ob_producer_authorizations "
+                    "WHERE producer_id=? AND decision_class=? LIMIT 1",
+                    (ENGINE_PRODUCER_ID, _cls))
+                if cur.fetchone() is not None:
+                    continue
+                self._record_authz_event(
+                    ENGINE_PRODUCER_ID, _cls, "grant",
+                    actor=ENGINE_PRODUCER_ID,
+                    reason="bootstrap backfill: root decision class added "
+                           "after this DB was created; restores the "
+                           "documented engine root-authorization invariant")
 
     def engine_handle(self) -> "EngineOracleHandle":
         if not self._engine_token:
