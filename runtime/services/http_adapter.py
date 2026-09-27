@@ -215,7 +215,8 @@ from swarm_engine.services.contract_types import (
 )
 from swarm_engine.services.unavailable import CapabilityUnavailable
 from swarm_engine.synthesis.integrity import (
-    RestoreRefused, effective_status, restore_everywhere)
+    RestoreRefused, effective_status, get_quarantine_reason,
+    restore_everywhere)
 from swarm_engine.synthesis.intent_router import IntentRouter
 from swarm_engine.synthesis.nl_dispatch import NLToolDispatcher, DispatchResult
 
@@ -1278,6 +1279,15 @@ class _Service:
                 eff = effective_status(self.engine, r["capability_id"])
             except Exception as exc:
                 eff = {"effective": "unknown", "error": str(exc)}
+            # M5 frozen quarantine-reason API: surface WHY a capability is
+            # quarantined in the list-view JSON (no more bare QUARANTINED
+            # badges). Fail-closed: a reason lookup failure must never break
+            # the capabilities listing.
+            try:
+                qr = get_quarantine_reason(r["capability_id"],
+                                           engine=self.engine)
+            except Exception:
+                qr = {"reason": None, "since": None, "system": "none"}
             out.append({
                 "capability_id": r["capability_id"],
                 "name": r["name"],
@@ -1288,6 +1298,9 @@ class _Service:
                 "consistent": eff.get("consistent"),
                 "trust": eff.get("trust"),
                 "lifecycle": eff.get("lifecycle"),
+                "quarantine_reason": qr.get("reason"),
+                "quarantine_since": qr.get("since"),
+                "quarantine_system": qr.get("system"),
             })
         return out
 

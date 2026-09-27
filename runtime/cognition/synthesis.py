@@ -50,6 +50,20 @@ def _is_numeric_input_type(_v):
     return ("num" in _t or _t in ("int", "float", "number", "integer"))
 
 
+def _is_subsequence(_sub, _seq):
+    """True iff _sub appears in _seq as a subsequence (order-preserving,
+    not necessarily contiguous). Q11-R1: used by the example-pattern
+    guidance to detect selection-shaped goals (filter/partition)."""
+    _it = iter(_seq)
+    for _x in _sub:
+        for _y in _it:
+            if _y == _x:
+                break
+        else:
+            return False
+    return True
+
+
 def _is_numeric_output_prim(_p):
     """True iff a primitive's output type is a scalar number (not a
     list/dict). The probes build scalar value vectors; a combining
@@ -74,9 +88,9 @@ _MULTIWAY_DEEPEN_TOTAL_BUDGET = 300.0
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from swarm_engine.cognition.representations import Expr, Hypothesis, SearchBias
+from swarm_engine.cognition.representations import Expr, Hypothesis, SearchBias, evaluate_expr
 from swarm_engine.cognition.constants import mine_constants
-from swarm_engine.primitives.core import Effect, Kind, infer
+from swarm_engine.primitives.core import Effect, Kind, TypeSpec, infer
 
 # Search-policy version. An exhaustion record ("this search failed") is
 # evidence about the POLICY that was active when it failed, not a timeless
@@ -167,7 +181,25 @@ from swarm_engine.primitives.core import Effect, Kind, infer
 #       strengthened n>=k+1 -> n>=k+2 (measured truth-divergent spurious
 #       emissions at n=k+1) -- minimal-evidence decompositions now fail
 #       closed instead of emitting.
-SEARCH_POLICY_VERSION = 46
+#   18 = callable-predicate synthesis (Q11): the slot-pool loop no longer
+#       treats a required CALLABLE argument as structurally unsatisfiable
+#       when the op also takes a required LIST argument (the binary
+#       higher-order shape: filter/partition/map). Instead it runs a
+#       bounded lambda-body sub-search -- Expr bodies over one fresh
+#       parameter, PURE primitives only, BOOL target for predicate slots
+#       (the inferred output element type for map's fn), max body size 2,
+#       literals from the search's own literal pool -- compiles each body
+#       to a real Python callable via evaluate_expr, and checks
+#       prim.fn(items, callable) against the goal across examples.
+#       Fitting bodies become $lambda Expr nodes (representations.py)
+#       rendered by _build_general_plan as {"$lambda": {...}} plan nodes
+#       with {"$var": ...} body references, which composer and codegen
+#       already resolve. Multi-parameter callables (reduce's two-arg fn)
+#       and non-binary higher-order shapes stay unsatisfiable by design.
+#       The exhaustion signature hashes this version, so bumping it
+#       invalidates stale "this search failed" records: a goal the old
+#       policy could not express may be expressible now.
+SEARCH_POLICY_VERSION = 47
 
 
 @dataclass
@@ -188,6 +220,12 @@ class SynthesisTrace:
     # producer of the required type in the current search bank/grammar.
     # Distinct from value-level rejected[] messages.
     unsatisfiable_args: List[Dict[str, Any]] = field(default_factory=list)
+    # Callable-predicate sub-search (Q11): body applications evaluated
+    # while synthesizing $lambda arguments for higher-order primitives.
+    # Counted separately from candidates_tried (which measures the main
+    # enumerative sweep) so search-efficiency comparisons stay
+    # commensurable -- same discipline as ambiguity_probe_evals.
+    lambda_body_evals: int = 0
     # Ambiguity/identifiability (conditional-completion correctness
     # repair): every conditional candidate that fit the training data but
     # was SUPPRESSED because rival explanations -- same predicate mask on
@@ -362,7 +400,8 @@ class GeneralSynthesizer:
     def __init__(self, registry, bias: SearchBias, max_size: int = 3,
                  pool_per_type: int = 150, max_arg_combinations: int = 3000,
                  max_candidates: int = 60000, wall_clock_limit_s: float = 20.0,
-                 skip_exhausted_bool_space: bool = True):
+                 skip_exhausted_bool_space: bool = True,
+                 exclude_ops: Sequence[str] = ()):
         # pool_per_type=24 / max_arg_combinations=300 / max_candidates=20000
         # were the original defaults, set before literal-constant seeding
         # existed. Found directly while testing a plain 2*(w+h) composition:
@@ -384,6 +423,9 @@ class GeneralSynthesizer:
         self.max_arg_combinations = max_arg_combinations
         self.max_candidates = max_candidates
         self.wall_clock_limit_s = wall_clock_limit_s
+        # Constructor-level op exclusion (see _ops property). Empty by
+        # default; the lambda-body sub-search passes ("if_else",).
+        self._excluded_ops = tuple(exclude_ops)
         # Boolean-space exhaustion skip ("boolean-trigger" optimization):
         # the space of boolean-output value tuples over n examples has
         # exactly 2^n members, so once every reachable tuple has been seen,
@@ -428,6 +470,14 @@ class GeneralSynthesizer:
         # correctly but never became reachable by this synthesizer's own
         # search, because _ops was a plain attribute frozen at construction
         # time.
+        #
+        # _in_lambda_subsearch guards the bounded lambda-body sub-search
+        # (Q11): a body search runs on a SEPARATE GeneralSynthesizer
+        # instance whose search must never itself trigger lambda
+        # synthesis, or filter([], <hole>) inside a body search would
+        # recurse without bound. Set True only on that sub-instance;
+        # search() never clears it.
+        self._in_lambda_subsearch = False
 
     def _find_pure_ops(self) -> List[str]:
         out = []
@@ -1916,12 +1966,24 @@ class GeneralSynthesizer:
         override = getattr(self, "_ops_override", None)
         if override is not None:
             return list(override)
-        return self._find_pure_ops()
+        ops = self._find_pure_ops()
+        # Q11: constructor-level op exclusion, used by the bounded
+        # lambda-body sub-search to withhold if_else (a predicate body
+        # is a boolean combination; if_else(c, True, False) is just c,
+        # and the conditional-completion machinery otherwise prefers
+        # the if_else(equals(modulo(__elt,2),1), 0, 1) parity hack over
+        # the clean predicate). Additive only; empty by default.
+        excluded = getattr(self, "_excluded_ops", ())
+        if excluded:
+            _ex = set(excluded)
+            ops = [o for o in ops if o not in _ex]
+        return ops
 
     def search(self, examples: Sequence[Tuple[Dict[str, Any], Any]],
               param_names: Sequence[str],
               extra_literals: Sequence[Any] = (),
               oracle: Optional[Any] = None,
+              goal: Optional[str] = None,
               ) -> Tuple[Optional[Hypothesis], SynthesisTrace]:
         """Iterates by true ascending expression SIZE (number of primitive
         applications), not by loop-iteration count. The first version of this
@@ -1961,6 +2023,20 @@ class GeneralSynthesizer:
         self._search_args_list = args_list
         self._search_leaf_literals = []
         self._search_literal_pool = set()
+        # Q11 callable-predicate synthesis: per-search state for the
+        # bounded lambda-body sub-search. The fresh binder name must not
+        # collide with any problem parameter (evaluate_expr scopes it
+        # exactly, but a collision would still shadow the outer param
+        # inside the lambda body); the body cache is keyed by the
+        # element-level examples so repeated (items, partition) pairs
+        # across levels reuse the sub-search result.
+        _elt = "__elt"
+        _n = 0
+        while _elt in param_names:
+            _n += 1
+            _elt = f"__elt{_n}"
+        self._lambda_param_name = _elt
+        self._lambda_body_cache = {}
         self._cc_seen = {}
         self._cc_bools = []
         self._cc_by_type = {}
@@ -2196,7 +2272,10 @@ class GeneralSynthesizer:
 
         # Piecewise univariate probe: split on evidence thresholds and
         # fit each side. Same identifiability gate as other probes.
-        if self._hyp_min_size is None:
+        # Q11: skipped in the lambda-body sub-search -- it builds
+        # if_else, and a predicate body is a boolean combination.
+        if self._hyp_min_size is None and not getattr(
+                self, "_in_lambda_subsearch", False):
             _pw = self._piecewise_univariate_probe(
                 examples, param_names, target, trace)
             if _pw is not None:
@@ -2216,7 +2295,10 @@ class GeneralSynthesizer:
                     return self._finish(_pexpr, param_names, trace), trace
 
         # Type/shape partition probe: dispatch via classify_shape.
-        if self._hyp_min_size is None:
+        # Q11: skipped in the lambda-body sub-search -- it builds
+        # if_else, and a predicate body is a boolean combination.
+        if self._hyp_min_size is None and not getattr(
+                self, "_in_lambda_subsearch", False):
             _tp = self._type_partition_probe(
                 examples, param_names, target, trace)
             if _tp is not None:
@@ -2988,6 +3070,60 @@ class GeneralSynthesizer:
                 _hyp_set = set(_hyp_ops)
                 ordered_ops = _hyp_ops + [o for o in ordered_ops
                                           if o not in _hyp_set]
+            # Q11-R1: lexical goal-name guidance. When the goal text names
+            # a primitive (e.g. "filter numbers divisible by 2" names
+            # `filter`), try that op first. On a cold search all bias
+            # scores tie and ordering falls back to hash order — a named
+            # op can land hundreds of positions late (observed: filter at
+            # 210/249, 42nd of 46 list ops), and the wall-clock budget
+            # expires before its partitions are tried. Lexical mention is
+            # evidence, not a decision: every op is still tried if the
+            # named op fails, so completeness is preserved.
+            # (Activates when the caller passes goal=; the reasoning layer
+            # passes it through.)
+            if goal:
+                import re as _re
+                _goal_low = goal.lower()
+                _lex_ops = [o for o in ordered_ops
+                            if _re.search(r"\b" + _re.escape(o.lower()) + r"\b",
+                                          _goal_low)]
+                if _lex_ops:
+                    _lex_set = set(_lex_ops)
+                    ordered_ops = _lex_ops + [o for o in ordered_ops
+                                              if o not in _lex_set]
+            # Q11-R1: example-pattern guidance for selective list ops.
+            # When every example's output list is a subsequence of some
+            # input list (the d6 shape: outputs are kept elements), the
+            # solution is a selection — prioritize the higher-order
+            # selection ops (filter/partition) over other list ops.
+            # Detected from the examples alone, no goal text needed.
+            # Ordering only; completeness preserved.
+            try:
+                _sel_ops = []
+                if examples:
+                    _all_subseq = True
+                    for _args, _exp in examples:
+                        if not isinstance(_exp, list):
+                            _all_subseq = False
+                            break
+                        _found = False
+                        for _v in _args.values():
+                            if isinstance(_v, list) and _is_subsequence(_exp, _v):
+                                _found = True
+                                break
+                        if not _found:
+                            _all_subseq = False
+                            break
+                    if _all_subseq:
+                        for _o in ("filter", "partition"):
+                            if _o in ordered_ops:
+                                _sel_ops.append(_o)
+                if _sel_ops:
+                    _sel_set = set(_sel_ops)
+                    ordered_ops = _sel_ops + [o for o in ordered_ops
+                                              if o not in _sel_set]
+            except Exception:
+                pass
             if target_size == 1 and (_acquired_defer or _blind_defer):
                 # Learned-shortcut split of the deferred level 1 (see
                 # staging above): first pass enumerates only the learned
@@ -3156,12 +3292,33 @@ class GeneralSynthesizer:
                         continue
                     slot_pools = []
                     feasible = True
+                    # Required CALLABLE slots whose pool cannot come from
+                    # the bank are deferred: after the sibling slots'
+                    # pools are built, the callable pool is synthesized
+                    # by the bounded lambda-body sub-search, paired with
+                    # the LIST slot's entries in the same combination.
+                    deferred_callable: List[Tuple[int, str, int]] = []
                     for slot_idx, (arg_name, size) in enumerate(
                             zip(required, size_partition)):
                         arg_type = prim.inputs[arg_name]
                         pool = [(e, v) for e, v, t in bank_by_size.get(size, [])
                                if t is not None and arg_type.accepts(t)]
+                        # Q11: CALLABLE slots must be served by real
+                        # $lambda exprs, not by non-callable bank entries
+                        # that happen to pass the type check. Filter to
+                        # $lambda only; if none, defer to the lambda
+                        # sub-search (when admissible).
+                        if arg_type.kind is Kind.CALLABLE:
+                            pool = [(e, v) for e, v in pool
+                                    if e.op == "$lambda"]
                         if not pool:
+                            if arg_type.kind is Kind.CALLABLE and \
+                                    self._lambda_slot_admissible(
+                                        prim, required, arg_name, size):
+                                deferred_callable.append(
+                                    (slot_idx, arg_name, size))
+                                slot_pools.append([])
+                                continue
                             feasible = False
                             # Record structural exclusion once per (op, arg).
                             key = (op, arg_name, str(arg_type))
@@ -3212,6 +3369,42 @@ class GeneralSynthesizer:
                                 ev[0].op if not ev[0].is_leaf()
                                 else f"leaf:{ev[0].param}:{ev[0].literal}")))
                         slot_pools.append(pool[: self.pool_per_type])
+
+                    if not feasible:
+                        continue
+
+                    # Resolve deferred CALLABLE slots: synthesize the
+                    # callable pool now that the sibling (LIST) slot's
+                    # pool is built, pairing each lambda body with the
+                    # items expression + per-example values it was
+                    # validated against. An empty pool keeps the existing
+                    # unsatisfiable behavior, with the reason naming the
+                    # lambda attempt (not a silent structural exclusion).
+                    for _d_slot, _d_arg, _d_size in deferred_callable:
+                        _lam_pool = self._synthesize_callable_pool(
+                            op, prim, required, _d_arg, _d_size,
+                            slot_pools, examples, target, trace,
+                            deadline_s=started + self.wall_clock_limit_s)
+                        if not _lam_pool:
+                            feasible = False
+                            _key = (op, _d_arg,
+                                    str(prim.inputs[_d_arg]))
+                            _already = any(
+                                (e.get("op"), e.get("arg_name"),
+                                 e.get("required_type")) == _key
+                                for e in trace.unsatisfiable_args
+                            )
+                            if not _already:
+                                trace.unsatisfiable_args.append({
+                                    "op": op,
+                                    "arg_name": _d_arg,
+                                    "required_type":
+                                        str(prim.inputs[_d_arg]),
+                                    "reason":
+                                        "no_fitting_lambda_body",
+                                })
+                            break
+                        slot_pools[_d_slot] = _lam_pool
 
                     if not feasible:
                         continue
@@ -3705,6 +3898,12 @@ class GeneralSynthesizer:
         is not identification, and a simpler non-conditional solution at
         this level must still win outright. Shapes already stashed or
         poisoned are not duplicated."""
+        # Q11: defense in depth for the lambda-body sub-search -- with
+        # the conditional-completion pass gated above, nothing should
+        # reach here, but a directly swept if_else (were one
+        # constructible) must not preempt the predicate either.
+        if getattr(self, "_in_lambda_subsearch", False):
+            return
         sig = self._signature_of(expr)
         if sig is None:
             return
@@ -4228,6 +4427,12 @@ class GeneralSynthesizer:
         capped so this pass's own cost stays small relative to the
         ordinary sweep it runs alongside.
         """
+        # Q11: the lambda-body sub-search wants a boolean combination,
+        # never a piecewise conditional -- if_else(c, True, False) is
+        # just c. Yield nothing so the parity-hack completions cannot
+        # preempt the clean predicate.
+        if getattr(self, "_in_lambda_subsearch", False):
+            return
         n = len(target)
         if n < 2:
             return
@@ -4591,7 +4796,13 @@ class GeneralSynthesizer:
                 new_children.append((cname, sub))
             else:
                 new_children.append((cname, child))
-        return Expr(op=expr.op, children=tuple(new_children))
+        # Preserve the lambda binder: a $lambda node rebuilt without its
+        # params would evaluate its body against an empty scope (every
+        # rival would crash to None and read as "disagreeing", making
+        # every lambda candidate look ambiguous). Generic tree surgery --
+        # the binder is part of the node's identity, like op.
+        return Expr(op=expr.op, children=tuple(new_children),
+                    lambda_params=expr.lambda_params)
 
     def _predicate_variants(self, cond: Expr, cond_vals: Tuple[bool, ...],
                             args_list: List[Dict[str, Any]],
@@ -5269,6 +5480,423 @@ class GeneralSynthesizer:
         match_count = sum(1 for v, t in zip(values, target) if v == t)
         return match_count * 1000.0 + op_score
 
+    # ------------------------------------------------------------------
+    # Callable-predicate synthesis (Q11): the bounded lambda-body
+    # sub-search.
+    #
+    # The gap (Q6 d6): GeneralSynthesizer records unsatisfiable_args
+    # ("no primitive currently outputs CALLABLE") for filter/partition/map
+    # -- the search cannot construct the callable argument -- while the
+    # plan language, the composer, and codegen ALREADY speak lambdas
+    # ({"$lambda": {"params", "steps", "output"}} and {"$var": name}).
+    # Only the search couldn't build one.
+    #
+    # Mechanism: when a required CALLABLE slot has no bank pool, and the
+    # op is a binary higher-order application (exactly one required LIST
+    # arg -- the items expression to pair with -- plus the callable),
+    # each LIST pool entry's per-example values determine the REQUIRED
+    # per-element behavior of the callable (subsequence alignments for
+    # filter, keep/drop alignments for partition, positional outputs for
+    # map). Those become element-level examples ({__elt: e} -> required),
+    # and a bounded GeneralSynthesizer sub-search (separate instance,
+    # PURE non-variadic primitives only -- the _ops property already
+    # enforces that -- max body size 2, the outer search's literal pool)
+    # enumerates fitting bodies. Each surviving body is compiled to a
+    # REAL Python callable via evaluate_expr and verified by applying
+    # the actual higher-order prim.fn across examples -- the alignments
+    # are only a candidate generator; prim.fn is the arbiter, so an
+    # alignment slip can only miss a body, never admit a wrong one.
+    #
+    # Bounds (all structural, none task-specific):
+    # - binary higher-order shape only (exactly two required args: one
+    #   LIST, one CALLABLE); reduce's three-arg/two-param-callable shape
+    #   is excluded by construction and keeps the old unsatisfiable
+    #   behavior;
+    # - single fresh parameter only; body size <= _LAMBDA_MAX_BODY_SIZE;
+    # - predicate slots ("predicate") target BOOL; map's "fn" targets
+    #   the inferred output element type, attempted only when it falls
+    #   out cleanly (every goal output a non-empty list of one kind);
+    # - alignment counts are capped; over-cap ambiguity skips the items
+    #   entry (fail closed) rather than guessing;
+    # - the sub-search runs on a separate synthesizer instance with its
+    #   own budget and _in_lambda_subsearch=True, so a callable-taking
+    #   op inside a body search can never recurse.
+    _LAMBDA_MAX_BODY_SIZE = 2
+    # Alignment caps: per-example alignment count, and the product across
+    # examples (each combination becomes one sub-search call).
+    _LAMBDA_ALIGN_PER_EXAMPLE_CAP = 16
+    _LAMBDA_ALIGN_TOTAL_CAP = 8
+
+    def _lambda_slot_admissible(self, prim, required, arg_name, size) -> bool:
+        """Whether the bounded lambda sub-search may serve this CALLABLE
+        slot. Binary higher-order shape only: exactly two required args,
+        one LIST (the items expression to pair with) and the callable.
+        Anything else -- including a nested body search, guarded by
+        _in_lambda_subsearch -- keeps the existing unsatisfiable
+        behavior."""
+        if getattr(self, "_in_lambda_subsearch", False):
+            return False
+        if size < 0 or size > self._LAMBDA_MAX_BODY_SIZE:
+            return False
+        if len(required) != 2:
+            return False
+        kinds = [prim.inputs[n].kind for n in required]
+        return (kinds.count(Kind.LIST) == 1
+                and kinds.count(Kind.CALLABLE) == 1)
+
+    def _synthesize_callable_pool(self, op, prim, required, arg_name, size,
+                                  slot_pools, examples, target, trace,
+                                  deadline_s):
+        """Build the deferred CALLABLE slot's pool: (lambda_expr, values)
+        pairs, one per fitting body, each paired with the LIST slot's
+        items expression + per-example values it was verified against.
+        Returns [] when no body fits -- the caller then keeps the
+        existing unsatisfiable behavior with a named reason."""
+        n = len(examples)
+        list_idx = next(i for i, nm in enumerate(required)
+                        if prim.inputs[nm].kind is Kind.LIST)
+        list_name = required[list_idx]
+        items_pool = slot_pools[list_idx]
+        if not items_pool:
+            return []
+        # Body output contract: predicate slots target BOOL; map's fn
+        # targets the inferred output element type, attempted only when
+        # it falls out cleanly.
+        if arg_name == "predicate":
+            out_type = TypeSpec(Kind.BOOL)
+        elif arg_name == "fn":
+            out_type = self._infer_map_element_type(target)
+            if out_type is None:
+                trace.rejected.append(
+                    f"lambda sub-search for {op}.fn skipped: output "
+                    "element type not cleanly inferable")
+                return []
+        else:
+            return []
+        elt_param = self._lambda_param_name
+        lam_pool = []
+        seen_results = set()
+        for items_expr, items_values in items_pool:
+            if time.time() > deadline_s:
+                trace.rejected.append(
+                    "lambda sub-search hit the outer wall-clock budget; "
+                    f"pool for {op}.{arg_name} closed with "
+                    f"{len(lam_pool)} entries")
+                break
+            # Required per-element behavior, as element-level example
+            # sets -- one set per alignment combination. Empty means
+            # infeasible or over-cap ambiguous: skip the entry (fail
+            # closed), never guess.
+            example_sets = self._lambda_body_example_sets(
+                op, arg_name, items_values, target)
+            if not example_sets:
+                continue
+            for body_examples in example_sets:
+                if time.time() > deadline_s:
+                    break
+                for body in self._lambda_bodies_for(
+                        body_examples, out_type, size, elt_param,
+                        op, arg_name, trace, deadline_s):
+                    lam_expr = Expr(
+                        op="$lambda",
+                        lambda_params=(elt_param,),
+                        children=(("body", body),))
+                    try:
+                        pred = evaluate_expr(lam_expr, {}, self.reg)
+                    except Exception:
+                        continue
+                    try:
+                        out = tuple(
+                            prim.fn(**{list_name: items_values[i],
+                                       arg_name: pred})
+                            for i in range(n))
+                    except Exception:
+                        continue
+                    trace.lambda_body_evals += 1
+                    key = self._value_key(out)
+                    if key in seen_results:
+                        continue
+                    seen_results.add(key)
+                    if out != target:
+                        continue
+                    lam_pool.append(
+                        (lam_expr, tuple(pred for _ in range(n))))
+        return lam_pool[: self.pool_per_type]
+
+    def _lambda_body_example_sets(self, op, arg_name, items_values, target):
+        """Required per-element behavior for the callable, derived from
+        the goal: a list of element-level example sets (one per alignment
+        combination). Returns [] when no alignment fits or ambiguity
+        exceeds the caps -- the entry is then skipped, fail closed."""
+        import itertools
+        per_example = []
+        for items, goal in zip(items_values, target):
+            if not isinstance(items, list):
+                return []
+            if arg_name == "predicate" and op == "filter":
+                if not isinstance(goal, list):
+                    return []
+                aligns = self._subsequence_alignments(
+                    items, goal, self._LAMBDA_ALIGN_PER_EXAMPLE_CAP)
+            elif arg_name == "predicate" and op == "partition":
+                if (not isinstance(goal, list) or len(goal) != 2
+                        or not isinstance(goal[0], list)
+                        or not isinstance(goal[1], list)):
+                    return []
+                aligns = self._partition_alignments(
+                    items, goal[0], goal[1],
+                    self._LAMBDA_ALIGN_PER_EXAMPLE_CAP)
+            elif arg_name == "fn" and op == "map":
+                if not isinstance(goal, list) or len(goal) != len(items):
+                    return []
+                # Positional: the required output per element is
+                # determined exactly -- a single vacuous "alignment".
+                per_example.append((items, goal, [None]))
+                continue
+            else:
+                return []
+            if not aligns:
+                return []
+            per_example.append((items, goal, aligns))
+        # Product across examples, capped: each combination is one
+        # sub-search call. Over-cap ambiguity -> skip (fail closed).
+        total = 1
+        for _, _, aligns in per_example:
+            total *= len(aligns)
+            if total > self._LAMBDA_ALIGN_TOTAL_CAP:
+                return []
+        example_sets = []
+        for combo in itertools.product(*[aligns for _, _, aligns
+                                         in per_example]):
+            body_examples = []
+            ok = True
+            for (items, goal, _), alignment in zip(per_example, combo):
+                if arg_name == "fn":
+                    for j, elt in enumerate(items):
+                        body_examples.append(
+                            ({self._lambda_param_name: elt}, goal[j]))
+                else:
+                    for j, elt in enumerate(items):
+                        body_examples.append(
+                            ({self._lambda_param_name: elt},
+                             bool(alignment[j])))
+            # Contradictory element examples (same element required both
+            # True and False, by repr) admit no deterministic body --
+            # skip the alignment without spending a sub-search.
+            seen_req = {}
+            for args, req in body_examples:
+                rk = repr(args[self._lambda_param_name])
+                if rk in seen_req and seen_req[rk] != repr(req):
+                    ok = False
+                    break
+                seen_req[rk] = repr(req)
+            if ok:
+                example_sets.append(body_examples)
+        return example_sets
+
+    @staticmethod
+    def _subsequence_alignments(items, target, cap):
+        """All per-position keep-masks with items[j] kept in order
+        spelling target (filter: the goal must be a subsequence of the
+        items). Capped."""
+        out = []
+
+        def rec(ti, start, chosen):
+            if len(out) >= cap:
+                return True
+            if ti == len(target):
+                out.append(tuple(chosen))
+                return len(out) >= cap
+            for j in range(start, len(items)):
+                if len(out) >= cap:
+                    return True
+                try:
+                    match = items[j] == target[ti]
+                except Exception:
+                    match = False
+                if match:
+                    chosen.append(j)
+                    if rec(ti + 1, j + 1, chosen):
+                        return True
+                    chosen.pop()
+            return False
+
+        rec(0, 0, [])
+        masks = []
+        for chosen in out:
+            keep = set(chosen)
+            masks.append(tuple(j in keep for j in range(len(items))))
+        return masks
+
+    @staticmethod
+    def _partition_alignments(items, kept, dropped, cap):
+        """All per-position keep/drop masks consistent with
+        partition(items, pred) == [kept, dropped] (order-preserving,
+        exact ==). Capped."""
+        out = []
+
+        def rec(j, ki, di, mask):
+            if len(out) >= cap:
+                return True
+            if j == len(items):
+                if ki == len(kept) and di == len(dropped):
+                    out.append(tuple(mask))
+                    return len(out) >= cap
+                return False
+            try:
+                to_kept = ki < len(kept) and items[j] == kept[ki]
+            except Exception:
+                to_kept = False
+            try:
+                to_dropped = di < len(dropped) and items[j] == dropped[di]
+            except Exception:
+                to_dropped = False
+            if to_kept:
+                mask.append(True)
+                if rec(j + 1, ki + 1, di, mask):
+                    return True
+                mask.pop()
+            if to_dropped:
+                mask.append(False)
+                if rec(j + 1, ki, di + 1, mask):
+                    return True
+                mask.pop()
+            return False
+
+        rec(0, 0, 0, [])
+        return out
+
+    @staticmethod
+    def _infer_map_element_type(target):
+        """The output element type for map's fn, when it falls out
+        cleanly: every goal output a non-empty list, one element kind
+        across all examples. Otherwise None (skip)."""
+        first = None
+        kinds = set()
+        for goal in target:
+            if not isinstance(goal, list) or not goal:
+                return None
+            try:
+                spec = infer(goal[0])
+            except Exception:
+                return None
+            kinds.add(spec.kind)
+            if first is None:
+                first = spec
+        if len(kinds) != 1:
+            return None
+        return first
+
+    def _lambda_bodies_for(self, body_examples, out_type, size, elt_param,
+                           op, arg_name, trace, deadline_s):
+        """Fitting lambda bodies for one element-level example set:
+        size-0 leaves are built structurally; larger bodies go through a
+        bounded sub-search on a separate synthesizer instance (own
+        budget, no nested lambda synthesis). Results cached per search
+        by the element examples. Yields body Exprs."""
+        # Cache key: the element examples fully determine the
+        # sub-search (same literal pool within one outer search).
+        key = (size, str(out_type), frozenset(
+            (repr(a[elt_param]), repr(req)) for a, req in body_examples))
+        hit = self._lambda_body_cache.get(key)
+        if hit is not None:
+            yield from hit
+            return
+        found = []
+        if size == 0:
+            cands = [Expr(param=elt_param)]
+            for v in self._search_leaf_literals:
+                try:
+                    t = infer(v)
+                except Exception:
+                    continue
+                try:
+                    ok = out_type.accepts(t)
+                except Exception:
+                    ok = False
+                if ok:
+                    cands.append(Expr(literal=v, is_literal=True))
+            # Q11: size-0 candidates must actually fit the element
+            # examples. The bare param (__elt) returns the element
+            # itself, not a bool, so it never fits a predicate's
+            # required True/False -- without this check it passes
+            # through and wastes the outer prim.fn verification.
+            for cand in cands:
+                try:
+                    vals = tuple(
+                        self._eval(cand, args) for args, _ in body_examples)
+                except Exception:
+                    continue
+                req = tuple(req for _, req in body_examples)
+                if vals == req:
+                    found.append(cand)
+        else:
+            if time.time() > deadline_s:
+                self._lambda_body_cache[key] = found
+                return
+            sub = GeneralSynthesizer(
+                self.reg, self.bias, max_size=size, max_candidates=300000,
+                wall_clock_limit_s=60.0,
+                # A predicate body is a boolean combination, never a
+                # piecewise conditional: if_else(c, True, False) is just
+                # c. Withholding if_else keeps the conditional-completion
+                # machinery from preferring the
+                # if_else(equals(modulo(__elt,2),1), 0, 1) parity hack
+                # over the clean predicate (found directly).
+                #
+                # Q11: pool_per_type=100000 effectively disables pool
+                # truncation. Intermediate non-bool exprs (e.g.
+                # modulo(__elt,2)) rank low against a bool target and
+                # would otherwise be truncated from comparison-op pools
+                # even though they are the essential building blocks.
+                # The sub-search is tiny (few examples), so the extra
+                # combos are cheap (measured ~1s for 7 examples).
+                #
+                # Q11-R1: max_candidates raised 100000 -> 300000. The d6
+                # predicate (16 element examples) needs ~215k candidates
+                # to surface; the 100k cap made the lambda sub-search
+                # fail closed even when the outer search reached the
+                # size-2 partition (the Worker A transfer gap).
+                pool_per_type=100000, max_arg_combinations=50000,
+                exclude_ops=("if_else",))
+            sub._in_lambda_subsearch = True
+            # search() places extra_literals in a set: only hashables
+            # survive. The sub-search re-derives [] / {} structurally
+            # from its own examples when the output shape calls for it.
+            _hashable_lits = []
+            for _v in self._search_leaf_literals:
+                try:
+                    hash(_v)
+                except TypeError:
+                    continue
+                _hashable_lits.append(_v)
+            try:
+                hyp, _sub_trace = sub.search(
+                    body_examples, [elt_param],
+                    extra_literals=_hashable_lits)
+            except Exception as exc:
+                trace.rejected.append(
+                    f"lambda body sub-search for {op}.{arg_name} raised: "
+                    f"{type(exc).__name__}")
+                hyp = None
+            if hyp is not None and getattr(hyp, "expr", None) is not None:
+                _body = hyp.expr
+                # Defensive: the sub-search's own machinery (e.g. a
+                # stashed conditional decided at level end) can return
+                # something larger than the requested max_size. The
+                # outer size partition budgeted `size` for this slot;
+                # an oversized body would silently break the
+                # 1 + items + body accounting, so it is dropped here
+                # (fail closed for this alignment, not admitted).
+                if _body.size() <= size:
+                    found = [_body]
+                else:
+                    trace.rejected.append(
+                        f"lambda body for {op}.{arg_name} oversized "
+                        f"(size {_body.size()} > {size}); dropped")
+        self._lambda_body_cache[key] = found
+        yield from found
+
     def _size_partitions(self, total: int, slots: int):
         """Every way to write `total` as an ordered sum of `slots`
         non-negative integers — small and cheap for the arities and sizes
@@ -5326,7 +5954,6 @@ class GeneralSynthesizer:
             yield tuple(pools[k][idxs[k]] for k in range(len(pools)))
 
     def _eval(self, expr: Expr, args: Dict[str, Any]) -> Any:
-        from swarm_engine.cognition.representations import evaluate_expr
         return evaluate_expr(expr, args, self.reg)
 
     def _eval_all(self, expr: Expr, args_list: List[Dict[str, Any]]
@@ -5381,16 +6008,40 @@ class GeneralSynthesizer:
         steps: List[Dict[str, Any]] = []
         counter = [0]
 
-        def compile_node(node: Expr) -> Dict[str, Any]:
+        def compile_node(node: Expr, steps_out: List[Dict[str, Any]],
+                         lam_scope: Tuple[str, ...] = ()) -> Dict[str, Any]:
             if node.is_leaf():
-                return node.literal if node.is_literal else {"$param": node.param}
-            child_refs = {name: compile_node(child) for name, child in node.children}
+                if node.is_literal:
+                    return node.literal
+                # Inside a lambda body, a reference to a bound parameter
+                # is a $var (resolved against the lambda's own scope by
+                # composer._resolve and codegen._render_lambda -- both
+                # already implemented); anything else is a plan $param.
+                if node.param in lam_scope:
+                    return {"$var": node.param}
+                return {"$param": node.param}
+            if node.is_lambda():
+                # Render as the plan language's $lambda node: its own
+                # nested step list (compiled from the body Expr with the
+                # same machinery as top-level steps) plus the output ref.
+                # Step ids share the global counter so they stay unique
+                # across nesting levels.
+                params = list(node.lambda_params)
+                inner_steps: List[Dict[str, Any]] = []
+                body = dict(node.children)["body"]
+                out_ref = compile_node(body, inner_steps,
+                                       tuple(lam_scope) + tuple(params))
+                return {"$lambda": {"params": params,
+                                    "steps": inner_steps,
+                                    "output": out_ref}}
+            child_refs = {name: compile_node(child, steps_out, lam_scope)
+                          for name, child in node.children}
             counter[0] += 1
             step_id = f"s{counter[0]}"
-            steps.append({"id": step_id, "op": node.op, "args": child_refs})
+            steps_out.append({"id": step_id, "op": node.op, "args": child_refs})
             return {"$step": step_id}
 
-        output_ref = compile_node(expr)
+        output_ref = compile_node(expr, steps, ())
         return {"name": "synthesized_general",
                 "params": {p: "any" for p in param_names},
                 "steps": steps, "output": output_ref}

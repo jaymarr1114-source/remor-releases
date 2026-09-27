@@ -123,9 +123,32 @@ _COMPOSE_VERBS = frozenset(
 _COMPOSE_VERB_RE = re.compile(r"^([a-z]+)\b")
 
 
+# General imperative work verbs for non-media composition legs (Q9).
+# The media verbs above cover depiction requests; a composition leg can
+# also be a computation or analysis request ("double the values 3, 5, 7",
+# "count the words in '...'"). These verbs only mark a fragment as
+# leg-shaped -- the IntentRouter must still resolve the fragment to a
+# real admitted capability, and Q9's per-leg arg synthesis must still
+# fill every declared param, or the leg fails honestly. Adjective-joins
+# stay protected: their fragments open with articles/adjectives, never
+# with these verbs.
+_COMPOSE_VERBS_GENERAL = frozenset(
+    "double doubles doubled doubling "
+    "halve halves halved halving "
+    "triple triples tripled tripling "
+    "sum sums summed summing "
+    "total totals totaled totaling "
+    "count counts counted counting "
+    "compute computes computed computing "
+    "calculate calculates calculated calculating "
+    "average averages averaged averaging "
+    "sort sorts sorted sorting".split())
+
+
 def _is_imperative(fragment: str) -> bool:
     m = _COMPOSE_VERB_RE.match(fragment.strip().lower())
-    return bool(m) and m.group(1) in _COMPOSE_VERBS
+    return bool(m) and (m.group(1) in _COMPOSE_VERBS
+                        or m.group(1) in _COMPOSE_VERBS_GENERAL)
 
 
 # Words marking a fragment as media-leg-shaped. A fragment that fails to
@@ -214,6 +237,14 @@ class DispatchResult:
             "reasons": self.reasons,
             "learning_error": self.learning_error,
         }
+
+
+def _q12_refusal_dict(value: Any) -> bool:
+    """Whether a media result value is a refusal carried as data:
+    {"ok": False, "error": ...}. The composer passes these through as a
+    successful value, which would swallow the failure."""
+    return (isinstance(value, dict) and value.get("ok") is False
+            and isinstance(value.get("error"), str))
 
 
 class NLToolDispatcher:
@@ -336,6 +367,164 @@ class NLToolDispatcher:
                     "path": _path("voice", "wav")}, None
         return None, f"no arg synthesizer for plan op {op!r}"
 
+    # -- non-media leg argument synthesis (Q9) ------------------------------
+    # A non-media composition leg's arguments are synthesized from the
+    # capability's DECLARED contract (plan params) plus the composition
+    # context: the leg's own fragment text, then earlier legs' outputs.
+    # Every value has a provenance -- a number, quoted string, or
+    # true/false word literally present in the fragment, or a
+    # type-matching value a prior leg really produced. Anything else
+    # (file paths, URLs, credentials, external resources) is refused
+    # with a named reason: the synthesizer never hallucinates arguments.
+    _Q9_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+    _Q9_QUOTED_RE = re.compile(r"'([^']+)'|\"([^\"]+)\"")
+
+    @staticmethod
+    def _q9_kind(kind: str) -> str:
+        # Mirror composer._spec's kind normalization: "list[num]" -> "list".
+        return str(kind).split("[")[0].strip().lower()
+
+    @classmethod
+    def _q9_numbers_in(cls, text: str):
+        out = []
+        for tok in cls._Q9_NUMBER_RE.findall(text or ""):
+            out.append(float(tok) if "." in tok else int(tok))
+        return out
+
+    @classmethod
+    def _q9_scan_prior(cls, prior_outputs, want):
+        """Find a type-matching value in earlier legs' outputs.
+
+        want is one of "int", "float", "num", "str", "bool", "listnum",
+        "list", "dict". For "listnum" only a non-empty list of
+        int/float (never bool) counts -- a media leg's "bounds" list of
+        strings must not become somebody's numeric input.
+        """
+        def _match(v):
+            if want == "int":
+                return isinstance(v, int) and not isinstance(v, bool)
+            if want == "float":
+                return isinstance(v, (int, float)) and not isinstance(v, bool)
+            if want == "num":
+                return isinstance(v, (int, float)) and not isinstance(v, bool)
+            if want == "str":
+                return isinstance(v, str)
+            if want == "bool":
+                return isinstance(v, bool)
+            if want == "listnum":
+                return (isinstance(v, list) and len(v) > 0
+                        and all(isinstance(x, (int, float))
+                                and not isinstance(x, bool) for x in v))
+            if want == "list":
+                return isinstance(v, list)
+            if want == "dict":
+                return isinstance(v, dict)
+            return False
+
+        for out in prior_outputs or []:
+            if _match(out):
+                return out
+            if isinstance(out, dict):
+                for v in out.values():
+                    if _match(v):
+                        return v
+        return None
+
+    def _synthesize_leg_arg(self, pname: str, kind: str, frag: str,
+                            prior_outputs):
+        """Synthesize one declared param. Returns (value, None) or
+        (None, reason). Explicit fragment-text evidence wins over
+        prior-leg context: the user's literal words outrank chaining."""
+        k = self._q9_kind(kind)
+        if k in ("int", "integer"):
+            nums = [n for n in self._q9_numbers_in(frag)
+                    if isinstance(n, int)]
+            if nums:
+                return nums[0], None
+            hit = self._q9_scan_prior(prior_outputs, "int")
+            if hit is not None:
+                return hit, None
+            return None, ("no integer in the fragment and no prior leg "
+                          "produced an integer")
+        if k in ("float", "number", "num", "double"):
+            nums = self._q9_numbers_in(frag)
+            if nums:
+                v = nums[0]
+                return (float(v) if k == "float" else v), None
+            hit = self._q9_scan_prior(prior_outputs, "num")
+            if hit is not None:
+                return hit, None
+            return None, ("no number in the fragment and no prior leg "
+                          "produced a number")
+        if k in ("str", "string", "text"):
+            m = self._Q9_QUOTED_RE.search(frag or "")
+            if m:
+                return (m.group(1) if m.group(1) is not None
+                        else m.group(2)), None
+            hit = self._q9_scan_prior(prior_outputs, "str")
+            if hit is not None:
+                return hit, None
+            return None, ("no quoted string in the fragment and no prior "
+                          "leg produced a string")
+        if k in ("bool", "boolean"):
+            low = (frag or "").lower()
+            if re.search(r"\btrue\b", low):
+                return True, None
+            if re.search(r"\bfalse\b", low):
+                return False, None
+            hit = self._q9_scan_prior(prior_outputs, "bool")
+            if hit is not None:
+                return hit, None
+            return None, ("no true/false word in the fragment and no prior "
+                          "leg produced a boolean")
+        if k == "list":
+            nums = self._q9_numbers_in(frag)
+            if nums:
+                return nums, None
+            hit = self._q9_scan_prior(prior_outputs, "listnum")
+            if hit is not None:
+                return list(hit), None
+            return None, ("no list of numbers in the fragment and no prior "
+                          "leg produced a list of numbers")
+        if k == "dict":
+            hit = self._q9_scan_prior(prior_outputs, "dict")
+            if hit is not None:
+                return hit, None
+            return None, "no prior leg produced a dict to fill this argument"
+        return None, (f"kind {kind!r} is not synthesizable from request "
+                      "text or leg outputs")
+
+    def _synthesize_leg_args(self, frag: str, rec, prior_outputs):
+        """Build full args for a non-media composition leg.
+
+        Returns (args, None) on success, (None, reason) when any
+        declared param cannot be filled -- never a partial or
+        fabricated arg set.
+        """
+        params = (rec.plan or {}).get("params") or {}
+        # Ambiguity guard: with two or more scalar numeric parameters
+        # and fewer distinct numbers in the fragment than parameters,
+        # reusing the first number for every parameter would fabricate
+        # associations. Fail closed instead.
+        scalar_num = [p for p, k in params.items()
+                      if self._q9_kind(k) in ("int", "float", "num")]
+        if len(scalar_num) > 1:
+            have = self._q9_numbers_in(frag)
+            if len(have) < len(scalar_num):
+                return (None, "ambiguous: %d numeric parameters (%s) but "
+                        "only %d number(s) in the fragment: %r"
+                        % (len(scalar_num), ", ".join(scalar_num),
+                           len(have), frag))
+        args = {}
+        for pname, kind in params.items():
+            val, why = self._synthesize_leg_arg(pname, kind, frag,
+                                                prior_outputs)
+            if why is not None:
+                return None, (f"argument {pname!r} (declared {kind}): "
+                              f"{why}")
+            args[pname] = val
+        return args, None
+
     # -- cross-capability composition (M4) ----------------------------------
     _MEDIUM_WORDS = {
         "image": ("image", "images", "picture", "pictures", "photo", "photos",
@@ -390,7 +579,8 @@ class NLToolDispatcher:
         falls through to single dispatch), ("unroutable", problems) when
         a leg-shaped fragment cannot be routed -- problems is a list of
         (fragment, reason) -- or ("ok", legs) with >= 2
-        (fragment, route) legs, each routed to a media capability.
+        (fragment, route) legs, each routed to a media capability or to
+        a non-media capability whose arguments Q9 can synthesize.
         """
         if not isinstance(text, str):
             return None
@@ -418,12 +608,27 @@ class NLToolDispatcher:
                     problems.append((frag, why))
                 continue
             rec = self.engine.capabilities.get(route.capability_id)
-            if rec is not None and self._media_plan(rec):
+            if rec is None:
+                problems.append(
+                    (frag, "routed capability vanished before argument "
+                           "synthesis"))
+            elif self._media_plan(rec):
                 legs.append((frag, route))
             else:
-                problems.append(
-                    (frag, "routes to a non-media capability: composition "
-                           "has no argument synthesizer for it"))
+                # Non-media leg (Q9): viable only when its declared args
+                # can be synthesized. Static check against the fragment
+                # now; when an earlier leg already exists, defer to
+                # execution -- the earlier leg's output may fill what
+                # the fragment cannot (chaining). Execution still fails
+                # honestly if the context does not deliver.
+                synth, why = self._synthesize_leg_args(frag, rec, [])
+                if synth is not None or len(legs) > 0:
+                    legs.append((frag, route))
+                else:
+                    problems.append(
+                        (frag, "routes to a non-media capability whose "
+                               "arguments cannot be synthesized from the "
+                               f"request: {why}"))
         if problems:
             return ("unroutable", problems)
         if len(legs) < 2:
@@ -435,6 +640,12 @@ class NLToolDispatcher:
         """Execute each leg through the governed single-dispatch core and
         compose the results into one artifact.
 
+        Legs are media or non-media. Media legs get args from
+        _synthesize_media_args; non-media legs from Q9's
+        _synthesize_leg_args (declared contract + fragment text +
+        earlier legs' outputs). A leg whose args cannot be synthesized
+        fails the composition honestly, naming the leg -- never with
+        hallucinated arguments.
         Every leg honors the same gates as a routed dispatch: the record
         must still exist, its plan must fingerprint to its id, its
         effective status must be active (a leg quarantined between
@@ -462,12 +673,20 @@ class NLToolDispatcher:
                     route_via="composition",
                     reasons=[f"{label}: {leg_res.refusal}: "
                              f"{'; '.join(leg_res.reasons)}"])
-            synth, why = self._synthesize_media_args(frag, rec)
+            if self._media_plan(rec):
+                synth, why = self._synthesize_media_args(frag, rec)
+                synth_label = "media args"
+            else:
+                # Non-media leg (Q9): synthesize from the declared
+                # contract plus earlier legs' outputs (chaining).
+                prior = [lt["result"] for lt in leg_traces]
+                synth, why = self._synthesize_leg_args(frag, rec, prior)
+                synth_label = "leg args"
             if synth is None:
                 return DispatchResult(
                     ok=False, refusal="composition_leg_failed",
                     route_via="composition",
-                    reasons=[f"{label}: media args could not be "
+                    reasons=[f"{label}: {synth_label} could not be "
                              f"synthesized: {why}"])
             leg_res = self._dispatch_validated(
                 frag, cap_id, synth, producer,
@@ -598,7 +817,9 @@ class NLToolDispatcher:
     def dispatch(self, text: str, args: Optional[Dict[str, Any]] = None,
                  producer: Optional[str] = None) -> DispatchResult:
         # M4 composition: an empty-args NL request that decomposes into
-        # multiple routable media legs executes as ONE composed dispatch;
+        # multiple routable legs executes as ONE composed dispatch; legs
+        # are media capabilities or non-media capabilities whose args
+        # Q9 can synthesize (declared contract + fragment + leg context).
         # each leg runs the governed single-dispatch core (existence,
         # plan fingerprint, effective_status, arg validation, real
         # Composer execution, persisted record). Explicit args keep the
@@ -694,10 +915,10 @@ class NLToolDispatcher:
                 reasons=["stored plan no longer fingerprints to its id"])
         eff = effective_status(self.engine, cap_id)
         if eff.get("effective") != "active" or not eff.get("consistent"):
-            return DispatchResult(
+            return self._wire_failure_gap(DispatchResult(
                 ok=False, refusal="capability_unavailable",
                 capability_id=cap_id,
-                reasons=[f"effective status at dispatch: {eff.get('effective')}"])
+                reasons=[f"effective status at dispatch: {eff.get('effective')}"]))
 
         # argument validation against the declared params
         ok_a, coerced_or_err = self._validate_args(args, rec.plan)
@@ -727,19 +948,31 @@ class NLToolDispatcher:
             self._record(dispatch_id, producer, text, route, cap_id,
                          rec.version, input_digest, None, False,
                          f"execution raised: {exc!r}")
-            return DispatchResult(ok=False, refusal="execution_failed",
-                                  capability_id=cap_id, dispatch_id=dispatch_id,
-                                  route_via=route_via,
-                                  reasons=[f"execution raised: {exc!r}"])
+            limitation = self._record_dispatch_limitation(
+                rec, coerced, exc)
+            reasons = [f"execution raised: {exc!r}"]
+            if limitation is not None:
+                reasons.append("limitation recorded: " + limitation[:160])
+            return self._wire_failure_gap(DispatchResult(
+                ok=False, refusal="execution_failed",
+                capability_id=cap_id, dispatch_id=dispatch_id,
+                route_via=route_via,
+                reasons=reasons))
         if not isinstance(exec_res, dict) or not exec_res.get("success", True):
             err = (exec_res.get("error") if isinstance(exec_res, dict)
                    else "unknown execution failure")
             self._record(dispatch_id, producer, text, route, cap_id,
                          rec.version, input_digest, None, False, str(err))
-            return DispatchResult(ok=False, refusal="execution_failed",
-                                  capability_id=cap_id, dispatch_id=dispatch_id,
-                                  route_via=route_via,
-                                  reasons=[f"execution failed: {err}"])
+            limitation = self._record_dispatch_limitation(
+                rec, coerced, err)
+            reasons = [f"execution failed: {err}"]
+            if limitation is not None:
+                reasons.append("limitation recorded: " + limitation[:160])
+            return self._wire_failure_gap(DispatchResult(
+                ok=False, refusal="execution_failed",
+                capability_id=cap_id, dispatch_id=dispatch_id,
+                route_via=route_via,
+                reasons=reasons))
         value = exec_res.get("value", exec_res.get("result", exec_res))
         # Honest bounds stay attached to every media answer: the substrate
         # result dict does not carry them (services.media adds them only
@@ -754,6 +987,24 @@ class NLToolDispatcher:
         if bounds and isinstance(value, dict):
             value = dict(value)
             value.setdefault("bounds", list(bounds))
+        if self._media_plan(rec) and _q12_refusal_dict(value):
+            # The substrate refused as data ({"ok": False, "error": ...}),
+            # which the composer passes through as a successful value --
+            # a swallowed failure. Report it honestly as a failure and
+            # run the limitation recorder.
+            err = value.get("error")
+            self._record(dispatch_id, producer, text, route, cap_id,
+                         rec.version, input_digest, None, False, str(err))
+            limitation = self._record_dispatch_limitation(
+                rec, coerced, err)
+            reasons = [f"execution failed: {err}"]
+            if limitation is not None:
+                reasons.append("limitation recorded: " + limitation[:160])
+            return self._wire_failure_gap(DispatchResult(
+                ok=False, refusal="execution_failed",
+                capability_id=cap_id, dispatch_id=dispatch_id,
+                route_via=route_via,
+                reasons=reasons))
         result_digest = hashlib.sha256(
             json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
         self._record(dispatch_id, producer, text, route, cap_id,
@@ -764,6 +1015,205 @@ class NLToolDispatcher:
                                       f"dispatch_id={dispatch_id}"])
         self._native_capture(res, dispatch_id, dict(coerced), value)
         return res
+
+    # -- dispatch-path gap wiring (V9-WIRE) --------------------------------
+    # The dispatch failure path registers limitation / missing-dependency
+    # gaps itself, in the unified registry, with no operator in the
+    # middle. Q12's production limitation recorder (below) is the model:
+    # the system acts on its own observation.
+    #
+    # The hook fires on the failure edges that carry a capability_id and a
+    # real execution outcome: _execute_and_record's three failure branches
+    # (raised exception, success=False, refusal-as-data) and
+    # _dispatch_validated's capability_unavailable refusal (where a
+    # missing-dependency quarantine surfaces). Early refusals without an
+    # execution attempt (unknown_intent, bad_arguments, underspecified
+    # media, composition_leg_unroutable) carry no gap evidence and are
+    # deliberately unwired. Composition legs go through the same governed
+    # core (_dispatch_validated -> _execute_and_record), so a failing leg
+    # wires its gap exactly like a single dispatch.
+    #
+    # The wiring never breaks the dispatch: all wiring failures are
+    # contained in dispatch_gaps.maybe_register_dispatch_gap (which never
+    # raises) and double-contained here. A registered gap is announced on
+    # the result's reasons so the turn stays observable.
+
+    def _wire_failure_gap(self, result: DispatchResult) -> DispatchResult:
+        try:
+            from swarm_engine.acquisition.dispatch_gaps import (
+                maybe_register_dispatch_gap)
+            wire = maybe_register_dispatch_gap(self.engine, result)
+        except Exception:
+            return result
+        if wire.get("registered") and not wire.get("duplicate_of_open"):
+            result.reasons.append(
+                "gap registered: %s (route %s, outcome %s)" % (
+                    wire.get("gap_id"), wire.get("route"),
+                    wire.get("outcome")))
+        return result
+
+    # -- production limitation recorder (Q12) -------------------------------
+    # When a governed dispatch fails on a REAL scale/format bound the
+    # media substrate declares, the failure is not left as a bare
+    # execution_failed (or, worse, a swallowed ok=True carrying a refusal
+    # dict): the system records the limitation as a structured quarantine
+    # reason (Q10's format_limitation_reason) and quarantines through the
+    # governed path (quarantine_everywhere with caller=engine.oracle --
+    # the system acting on its own observation, the same authorization
+    # M5's proof used). A missing dep that isn't a gap is a gap the
+    # system is ignoring; the same holds for a limitation the system
+    # observed but didn't record.
+    #
+    # The classifier fires ONLY on the machinery's genuine refusal
+    # signatures, with the attempted value checked against the REAL bound
+    # constants imported from the media modules -- never hardcoded
+    # numbers. Missing substrate, transient errors, bad args, and every
+    # other failure keep the existing behavior. A quarantine failure
+    # never breaks the dispatch refusal itself.
+
+    def _record_dispatch_limitation(self, rec: Any,
+                                    coerced: Dict[str, Any],
+                                    failure: Any) -> Optional[str]:
+        """Record a structured limitation reason for an observed dispatch
+        failure and quarantine through the governed path.
+
+        Returns the reason string, or None when the failure is not a
+        declared-bound limitation (existing behavior kept).
+        """
+        try:
+            effects = set(str(e) for e in ((rec.plan or {}).get("effects")
+                                           or []))
+        except Exception:
+            return None
+        failure_text = str(failure)
+        probe = self._limitation_probe(effects, coerced or {}, failure_text)
+        if probe is None:
+            return None
+        task, scale_or_format, preventing, reproduce = probe
+        try:
+            from swarm_engine.synthesis.integrity import (
+                format_limitation_reason, quarantine_everywhere)
+            reason = format_limitation_reason(
+                task, scale_or_format,
+                failure=failure_text[:500],
+                preventing=preventing,
+                reproduce=reproduce)
+        except Exception:
+            return None
+        try:
+            quarantine_everywhere(
+                self.engine, rec.capability_id, reason,
+                caller=getattr(self.engine, "oracle", None))
+        except Exception as exc:
+            # The dispatch refusal stands; the quarantine failure is
+            # reported in the result, never raised.
+            return reason + " [quarantine refused: %r]" % (exc,)
+        return reason
+
+    def _limitation_probe(self, effects: set, coerced: Dict[str, Any],
+                          failure_text: str):
+        """Classify an observed dispatch failure as a scale/format
+        limitation.
+
+        Returns (task, scale_or_format, preventing, reproduce) or None.
+        The attempted scale is checked against the REAL bound constants
+        imported from the media modules; the failure signature must be
+        the machinery's genuine refusal text. Format failures: no
+        production dispatch path currently decodes input bytes, so the
+        machinery emits no format failure here -- the classifier
+        recognizes nothing rather than inventing a mode.
+        """
+        # media_image_spec: _validate_spec raises ValueError, e.g.
+        #   "spec.width: expected int in [1,2048], got 10000"
+        # (surfaced by the composer as success=False).
+        if "media_image_spec" in effects:
+            spec = coerced.get("spec")
+            if isinstance(spec, dict):
+                w, h = spec.get("width"), spec.get("height")
+                if (isinstance(w, int) and isinstance(h, int)
+                        and "expected int in [" in failure_text):
+                    from swarm_engine.media.image_spec import _MAX_SIDE
+                    if w > _MAX_SIDE or h > _MAX_SIDE:
+                        red = dict(spec)
+                        red["width"] = 512
+                        red["height"] = 512
+                        return (
+                            "render_image_spec", "%dx%dpx" % (w, h),
+                            ("spec renderer declares a %dpx per-side bound "
+                             "(swarm_engine.media.image_spec._MAX_SIDE)"
+                             % _MAX_SIDE),
+                            {"callable": ("swarm_engine.media.image_spec:"
+                                          "render_spec"),
+                             "args": {"spec": spec,
+                                      "out_path": "probe_out.png"},
+                             "reduced_args": {"spec": red,
+                                              "out_path": "probe_out.png"}})
+        # media_image: generate() returns {"ok": False, "error":
+        #   "refused: dimensions out of bounds [1, 2048] (got 10000x10000)"}
+        if "media_image" in effects:
+            w, h = coerced.get("width"), coerced.get("height")
+            if (isinstance(w, int) and isinstance(h, int)
+                    and not isinstance(w, bool) and not isinstance(h, bool)
+                    and "dimensions out of bounds" in failure_text):
+                from swarm_engine.media.image import MAX_DIM
+                if w > MAX_DIM or h > MAX_DIM:
+                    args = {"prompt": coerced.get("prompt", ""),
+                            "out_path": "probe_out.png",
+                            "width": w, "height": h,
+                            "seed": coerced.get("seed")}
+                    red = dict(args)
+                    red["width"] = 512
+                    red["height"] = 512
+                    return (
+                        "render_image", "%dx%dpx" % (w, h),
+                        ("image generator declares a %dpx per-side bound "
+                         "(swarm_engine.media.image.MAX_DIM)" % MAX_DIM),
+                        {"callable": ("swarm_engine.synthesis."
+                                      "limitation_probe_adapters:"
+                                      "probe_image_generate"),
+                         "args": args, "reduced_args": red})
+        # media_video: generate() returns {"ok": False, "error": ...}
+        # from _validate, e.g. "width must be an integer in [16, 1280]".
+        if "media_video" in effects:
+            from swarm_engine.media import video as _vm
+            w, h = coerced.get("width"), coerced.get("height")
+            dur, fps = coerced.get("duration_s"), coerced.get("fps")
+            axis = None
+            if (isinstance(w, int) and not isinstance(w, bool)
+                    and w > _vm.MAX_WIDTH
+                    and "must be an integer in [" in failure_text):
+                axis = ("width", w, _vm.MAX_WIDTH, "px")
+            elif (isinstance(h, int) and not isinstance(h, bool)
+                    and h > _vm.MAX_HEIGHT
+                    and "must be an integer in [" in failure_text):
+                axis = ("height", h, _vm.MAX_HEIGHT, "px")
+            elif (isinstance(dur, (int, float)) and not isinstance(dur, bool)
+                    and dur > _vm.MAX_DURATION_S
+                    and "duration_s must be in" in failure_text):
+                axis = ("duration_s", dur, _vm.MAX_DURATION_S, "s")
+            elif (isinstance(fps, int) and not isinstance(fps, bool)
+                    and fps > _vm.MAX_FPS
+                    and "fps must be an integer in" in failure_text):
+                axis = ("fps", fps, _vm.MAX_FPS, "fps")
+            if axis is not None:
+                name, val, bound, unit = axis
+                args = {"prompt": coerced.get("prompt", ""),
+                        "out_path": "probe_out.mp4",
+                        "duration_s": dur, "fps": fps,
+                        "width": w, "height": h,
+                        "seed": coerced.get("seed")}
+                red = dict(args)
+                red[name] = {"width": 640, "height": 360,
+                             "duration_s": 4.0, "fps": 24}[name]
+                return (
+                    "render_video", "%s=%s%s" % (name, val, unit),
+                    ("video generator declares %s <= %s%s "
+                     "(swarm_engine.media.video)" % (name, bound, unit)),
+                    {"callable": ("swarm_engine.synthesis."
+                                  "limitation_probe_adapters:"
+                                  "probe_video_generate"),
+                     "args": args, "reduced_args": red})
+        return None
 
     def _native_capture(self, res: DispatchResult, dispatch_id: str,
                         coerced: Dict[str, Any], value: Any) -> None:

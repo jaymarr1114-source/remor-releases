@@ -36,12 +36,29 @@ class Expr:
     Confirmed directly while trying to synthesize a digital-root formula:
     `constant(value)` is a real registered primitive, but it takes the
     constant as an INPUT — it cannot manufacture one from nothing.
+
+    A fourth node kind, op == "$lambda" with lambda_params + a single
+    ("body", ...) child, is a callable literal: the search's way to build
+    the function arguments higher-order primitives (filter/partition/map)
+    require. See is_lambda/size/ops_used/as_dict for the accounting.
     """
     op: Optional[str] = None
     param: Optional[str] = None
     literal: Any = None
     is_literal: bool = False
     children: Tuple[Tuple[str, "Expr"], ...] = ()
+    # Lambda binder (Q11, 2026-09-27): a node with op == "$lambda" is a
+    # callable literal. lambda_params names the bound parameters and the
+    # single child ("body", body_expr) is the function body. This is the
+    # search-side counterpart of the plan language's {"$lambda": ...}
+    # node that composer._resolve and codegen._render_lambda already
+    # support -- it lets the enumerative search construct the callable
+    # arguments higher-order primitives (filter/partition/map) require,
+    # which no primitive's output type can supply.
+    lambda_params: Tuple[str, ...] = ()
+
+    def is_lambda(self) -> bool:
+        return self.op == "$lambda"
 
     def is_leaf(self) -> bool:
         return self.op is None
@@ -49,11 +66,24 @@ class Expr:
     def size(self) -> int:
         if self.is_leaf():
             return 0
+        if self.is_lambda():
+            # A binder is not a primitive application: its cost is exactly
+            # its body's cost. The body's size counts in full toward the
+            # candidate's total (minimality); the binding itself is free.
+            return sum(child.size() for _, child in self.children)
         return 1 + sum(child.size() for _, child in self.children)
 
     def ops_used(self) -> Tuple[str, ...]:
         if self.is_leaf():
             return ()
+        if self.is_lambda():
+            # "$lambda" is plan-language structure, not a primitive: bias,
+            # provenance, and concept identity record the body's real
+            # primitives, never a pseudo-op the registry cannot resolve.
+            out: List[str] = []
+            for _, child in self.children:
+                out.extend(child.ops_used())
+            return tuple(out)
         out: List[str] = [self.op]
         for _, child in self.children:
             out.extend(child.ops_used())
@@ -64,11 +94,19 @@ class Expr:
             if self.is_literal:
                 return {"literal": self.literal}
             return {"param": self.param}
+        if self.is_lambda():
+            return {"$lambda": {"params": list(self.lambda_params),
+                                "body": dict(self.children)["body"].as_dict()}}
         return {"op": self.op,
                 "children": {name: child.as_dict() for name, child in self.children}}
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "Expr":
+        if "$lambda" in data:
+            spec = data["$lambda"]
+            return Expr(op="$lambda",
+                        lambda_params=tuple(spec.get("params") or ()),
+                        children=(("body", Expr.from_dict(spec["body"])),))
         if "literal" in data:
             return Expr(literal=data["literal"], is_literal=True)
         if "param" in data:
@@ -92,6 +130,27 @@ def evaluate_expr(expr: "Expr", args: Dict[str, Any], registry: Any) -> Any:
     a second copy that could silently diverge from it."""
     if expr.is_leaf():
         return expr.literal if expr.is_literal else args[expr.param]
+    if expr.is_lambda():
+        # Compile a verified lambda body to a real Python callable over
+        # its bound parameters. This is the SAME compilation the
+        # synthesis search uses to test candidate predicates (no
+        # divergent copy): primitive promotion, the identifiability
+        # gate's rival evaluation, and any other consumer of a verified
+        # Expr reuse exactly this logic.
+        params = expr.lambda_params
+        children = dict(expr.children)
+        if "body" not in children:
+            raise ValueError("$lambda node has no 'body' child")
+
+        def _call(*call_args: Any) -> Any:
+            if len(call_args) != len(params):
+                raise TypeError(
+                    f"$lambda takes {len(params)} argument(s), "
+                    f"got {len(call_args)}")
+            return evaluate_expr(children["body"],
+                                 dict(zip(params, call_args)), registry)
+
+        return _call
     prim = registry.get(expr.op)
     # Short-circuit if_else so ill-typed unused branches are not evaluated.
     # Required for type/shape dispatch: the other branch is often illegal

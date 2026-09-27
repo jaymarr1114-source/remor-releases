@@ -612,12 +612,18 @@ def _const_repr(value: Any, what: str) -> str:
 def _extract_fn_source(fn: Any) -> Tuple[str, str, ast.AST, str]:
     """Extract (kind, original_name, node, dedented_source) of a fn.
 
-    kind is "lambda" or "def". Uses AST node location (not text slicing) so
-    a lambda embedded in a call expression is extracted exactly.
+    kind is "lambda", "def" or "class". Uses AST node location (not text
+    slicing) so a lambda embedded in a call expression is extracted exactly.
+
+    Classes are legitimate dependencies: a primitive's implementation may
+    raise or reference an exception class (e.g. the pow-safety signal), and
+    refusing to lift it was a codegen gap, not a safety property. A class
+    is lifted verbatim by its ClassDef node.
     """
-    if not inspect.isfunction(fn):
+    if not (inspect.isfunction(fn) or inspect.isclass(fn)):
         raise CodegenError(
-            f"primitive fn {fn!r} is not a Python function -- no source to lift")
+            f"primitive fn {fn!r} is not a Python function or class "
+            "-- no source to lift")
     try:
         raw = inspect.getsource(fn)
     except (OSError, TypeError) as exc:
@@ -627,15 +633,22 @@ def _extract_fn_source(fn: Any) -> Tuple[str, str, ast.AST, str]:
         tree = ast.parse(ded)
     except SyntaxError as exc:
         raise CodegenError(f"could not parse primitive source: {exc}")
-    cands = [n for n in ast.walk(tree)
-             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
-             and n.lineno == 1]
+    if inspect.isclass(fn):
+        cands = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.ClassDef) and n.lineno == 1]
+    else:
+        cands = [n for n in ast.walk(tree)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+                 and n.lineno == 1]
     if not cands:
-        raise CodegenError("could not locate the function definition in its source")
+        raise CodegenError(
+            "could not locate the function/class definition in its source")
     node = min(cands, key=lambda n: n.col_offset)
     if isinstance(node, ast.AsyncFunctionDef):
         raise CodegenError("async primitive fn cannot run in a standalone file")
-    kind = "lambda" if isinstance(node, ast.Lambda) else "def"
+    kind = ("class" if isinstance(node, ast.ClassDef)
+            else "lambda" if isinstance(node, ast.Lambda)
+            else "def")
     name = getattr(fn, "__name__", "<lambda>")
     return kind, name, node, ded
 
@@ -726,9 +739,22 @@ def _free_vars(node: ast.AST, self_name: str) -> set:
     return (loaded - bound) - {self_name}
 
 
+def _dep_globals(fn: Any) -> Dict[str, Any]:
+    """Module globals for a lifted function or class.
+
+    Functions carry __globals__; classes (legitimate dependencies, e.g.
+    exception types) do not, so fall back to the defining module's dict.
+    """
+    g = getattr(fn, "__globals__", None)
+    if g is not None:
+        return g
+    mod = sys.modules.get(getattr(fn, "__module__", "") or "")
+    return dict(getattr(mod, "__dict__", {}) or {})
+
+
 def _resolve_fn_dependencies(fn: Any, node: ast.AST, self_name: str,
                              ctx: _RenderCtx, _depth: int = 0) -> None:
-    """Resolve a lifted function's free variables.
+    """Resolve a lifted function/class's free variables.
 
     Closure cells first (they shadow module globals of the same name),
     then module globals. Builtins need nothing. Anything unbound or
@@ -746,14 +772,15 @@ def _resolve_fn_dependencies(fn: Any, node: ast.AST, self_name: str,
                     "cannot lift to a standalone module")
     import builtins as _builtins
     builtin_names = set(dir(_builtins))
+    mod_globals = _dep_globals(fn)
     for dep_name in sorted(free):
         if dep_name in builtin_names:
             continue
         if dep_name in closure:
             _emit_dependency_value(dep_name, closure[dep_name], ctx, _depth)
             continue
-        if dep_name in fn.__globals__:
-            _emit_dependency_value(dep_name, fn.__globals__[dep_name],
+        if dep_name in mod_globals:
+            _emit_dependency_value(dep_name, mod_globals[dep_name],
                                    ctx, _depth)
             continue
         raise CodegenError(

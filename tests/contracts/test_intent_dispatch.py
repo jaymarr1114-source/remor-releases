@@ -644,5 +644,125 @@ class TestIntentComposition(_HttpBase):
                       ("effect_fallback", "exact_goal", "structural"), obj)
 
 
+def _admit_q9_caps(svc, media_dir):
+    """Q9 shared fixture: admit the media image capability plus the
+    double_and_sum / halve non-media capabilities and bind the test
+    goal phrasings. Returns (image_id, double_id)."""
+    ieng, _, dispatcher = svc._ensure()
+
+    def _wire():
+        from swarm_engine.media.wiring import admit_media_capabilities
+        rep = admit_media_capabilities(ieng, media_out_dir=media_dir)
+        dispatcher.media_out_dir = media_dir
+        assert rep["image"]["admitted"], rep
+        r = ieng.admit_as_engine(
+            "double each value and sum them",
+            {"name": "double_and_sum", "params": {"values": "list"},
+             "steps": [
+                 {"id": "m", "op": "data.map",
+                  "args": {"items": {"$param": "values"},
+                           "fn": {"$partial": {
+                               "op": "computation.multiply",
+                               "bound": {"b": 2}, "free": ["a"]}}}},
+                 {"id": "s", "op": "computation.sum",
+                  "args": {"values": {"$step": "m"}}}],
+             "output": {"$step": "s"}},
+            name="double_and_sum")
+        assert r.ok and r.verdict == Verdict.ADMITTED, r
+        double_id = r.capability_id
+        r = ieng.admit_as_engine(
+            "halve a number",
+            {"name": "halve", "params": {"x": "num"},
+             "steps": [{"id": "h", "op": "multiply",
+                        "args": {"a": {"$param": "x"}, "b": 0.5}}],
+             "output": {"$step": "h"}},
+            name="halve")
+        assert r.ok and r.verdict == Verdict.ADMITTED, r
+        halve_id = r.capability_id
+        ieng.capabilities.bind_goal("double the values 3, 5, 7",
+                                    double_id)
+        ieng.capabilities.bind_goal("double the values", double_id)
+        ieng.capabilities.bind_goal("double the values 4, 6", double_id)
+        ieng.capabilities.bind_goal("halve the result", halve_id)
+        return rep["image"]["capability_id"], double_id
+    return svc._thread.run(_wire)
+
+
+class TestIntentCompositionNonMedia(_HttpBase):
+    """Q9: composition with a non-media leg whose arguments are
+    synthesized from the declared contract + fragment text + earlier
+    legs' outputs -- never hardcoded, never harness-supplied.
+
+    HTTP level: only phrasings the conversational discriminator
+    classifies as task reach the dispatcher; machinery-level tests
+    below cover pure non-media requests on the same causal path."""
+
+    def test_media_plus_computed_leg_over_http(self):
+        """Numbers come from the fragment text; the non-media leg
+        really executes (leg1 result 30), media leg produces a real
+        artifact."""
+        image_id, double_id = _admit_q9_caps(self.services["intent"],
+                                             self.tmp)
+        code, obj = self.req(
+            "POST", "/api/intent/dispatch",
+            {"text": "generate an image of a sunset and "
+                     "double the values 3, 5, 7",
+             "args": {}, "producer": "gui:operator"})
+        self.assertEqual(code, 200, obj)
+        self.assertTrue(obj["ok"], obj)
+        self.assertEqual(obj.get("route_via"), "composition", obj)
+        legs = obj["result"]["legs"]
+        self.assertEqual(len(legs), 2, obj)
+        self.assertEqual(legs[0]["capability_id"], image_id, obj)
+        self.assertEqual(legs[1]["capability_id"], double_id, obj)
+        self.assertEqual(legs[1]["result"], 30, obj)
+        self.assertGreaterEqual(len(obj["result"]["artifacts"]), 1, obj)
+
+
+class TestIntentCompositionNonMediaMachinery(unittest.TestCase):
+    """Q9 machinery level: pure non-media composition requests are
+    classified 'ambiguous' by the conversational discriminator
+    (swarm_engine/services/discriminator.py -- not Q9-owned, so not
+    edited here) before they reach the HTTP dispatch path. These
+    tests drive the real dispatcher directly -- the exact causal
+    path the HTTP task gate reaches once the discriminator admits
+    a phrasing."""
+
+    def setUp(self):
+        self.tmp, self.sched, self.met, self.svc = _service_on_scratch(self)
+
+    def tearDown(self):
+        self.sched.close()
+
+    def test_chained_nonmedia_legs_machinery(self):
+        """A later leg's arg comes from an earlier leg's real output:
+        'halve the result' has no numbers in its fragment; x=20 comes
+        from leg0's output."""
+        _admit_q9_caps(self.svc, self.tmp)
+        res = self.svc.dispatch_direct(
+            "double the values 4, 6 then halve the result",
+            {}, producer="q9-test")
+        self.assertTrue(res.ok, res.as_dict())
+        self.assertEqual(res.route_via, "composition", res.as_dict())
+        legs = res.result["legs"]
+        self.assertEqual(len(legs), 2, res.as_dict())
+        self.assertEqual(legs[0]["result"], 20, res.as_dict())
+        self.assertEqual(legs[1]["result"], 10.0, res.as_dict())
+
+    def test_unsynthesizable_leg_refuses_honestly_machinery(self):
+        """No numbers anywhere -> the composition fails closed naming
+        the argument, instead of hallucinating one."""
+        _admit_q9_caps(self.svc, self.tmp)
+        res = self.svc.dispatch_direct(
+            "double the values and generate an image of a sunset",
+            {}, producer="q9-test")
+        self.assertFalse(res.ok, res.as_dict())
+        self.assertEqual(res.refusal, "composition_leg_unroutable",
+                         res.as_dict())
+        reasons = " ".join(res.reasons)
+        self.assertIn("values", reasons, res.as_dict())
+        self.assertIsNone(res.result, res.as_dict())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

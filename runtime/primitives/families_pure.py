@@ -65,6 +65,20 @@ def register_computation(reg: PrimitiveRegistry) -> None:
             raise ZeroDivisionError("modulo by zero")
         return a % b
 
+    def _int_divide(a, b):
+        # Integer floor division, e.g. the n//2 technique. Strictly
+        # int-typed to honor the declared INT + INT -> INT signature --
+        # inline checks (rather than _require_num) so the closure stays
+        # minimal (builtins only) and lifts cleanly to a standalone
+        # module through codegen.
+        if isinstance(a, bool) or not isinstance(a, int):
+            raise TypeError("int_divide a expects int, got " + type(a).__name__)
+        if isinstance(b, bool) or not isinstance(b, int):
+            raise TypeError("int_divide b expects int, got " + type(b).__name__)
+        if b == 0:
+            raise ZeroDivisionError("integer division by zero")
+        return a // b
+
     def _power(base, exponent):
         # R16 authoritative enforcement: the magnitude check lives here, in
         # the primitive itself, so EVERY execution path (fast interpreter,
@@ -96,6 +110,7 @@ def register_computation(reg: PrimitiveRegistry) -> None:
         ("multiply", lambda a, b: _require_num(a,"a") * _require_num(b,"b"), N2, NUM, "Product a * b."),
         ("divide", _div, N2, FLOAT, "Quotient a / b; raises on zero."),
         ("modulo", _mod, N2, NUM, "Remainder of a / b."),
+        ("int_divide", _int_divide, {"a": INT, "b": INT}, INT, "Floor division a // b; raises on zero."),
         ("power", _power, {"base": NUM, "exponent": NUM}, NUM, "base raised to exponent."),
         ("negate", lambda x: -_require_num(x,"x"), N1, NUM, "Unary minus."),
         ("abs", lambda x: abs(x), N1, NUM, "Absolute value."),
@@ -257,6 +272,22 @@ def register_data(reg: PrimitiveRegistry) -> None:
                 errs.append(f"field {k!r} expected {kind}, got {type(obj[k]).__name__}")
         return {"valid": not errs, "errors": errs}
 
+    def _take(items, n):
+        # First n elements -- exact Python slicing semantics. Strictly
+        # int-typed to honor the declared LIST + INT -> LIST signature.
+        # Inline type checks keep the closure to builtins only, so
+        # codegen lifts this verbatim.
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise TypeError("take n expects int, got " + type(n).__name__)
+        return list(items)[:n]
+
+    def _drop(items, n):
+        # Everything after the first n elements -- exact Python slicing
+        # semantics, strictly int-typed per the declared signature.
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise TypeError("drop n expects int, got " + type(n).__name__)
+        return list(items)[n:]
+
     defs = [
         ("get", get_path, {"obj": ANY, "path": STR, "default": OPT(ANY)}, ANY, "Read a dotted path out of a nested structure."),
         ("set", set_path, {"obj": DICT(), "path": STR, "value": ANY}, DICT(), "Return a copy with a dotted path set."),
@@ -278,6 +309,8 @@ def register_data(reg: PrimitiveRegistry) -> None:
          {"items": LIST(), "index": INT, "default": OPT(ANY)}, ANY, "Element at index."),
         ("slice", lambda items, start=0, stop=None: items[int(start): (None if stop is None else int(stop))],
          {"items": LIST(), "start": OPT(INT), "stop": OPT(INT)}, LIST(), "Sublist."),
+        ("take", _take, {"items": LIST(), "n": INT}, LIST(), "First n elements."),
+        ("drop", _drop, {"items": LIST(), "n": INT}, LIST(), "All elements after the first n."),
         ("append", lambda items, value: list(items) + [value], {"items": LIST(), "value": ANY}, LIST(), "List with value appended."),
         ("prepend", lambda items, value: [value] + list(items), {"items": LIST(), "value": ANY}, LIST(), "List with value prepended."),
         ("list_concat", lambda a, b: list(a) + list(b), {"a": LIST(), "b": LIST()}, LIST(), "Concatenate two lists."),

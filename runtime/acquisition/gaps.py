@@ -1043,7 +1043,7 @@ def _acquire_technique(registry: GapRegistry, record: GapRecord,
     """Route 'technique' -- drive M2's real distillation loop on the
     record's validated delta."""
     from swarm_engine.acquisition.delta import DeltaRecord
-    from swarm_engine.acquisition.distill import Distiller
+    from swarm_engine.acquisition.distill import DistillationLoop
     d = record.technique.delta or {}
     try:
         delta = DeltaRecord(
@@ -1060,10 +1060,19 @@ def _acquire_technique(registry: GapRegistry, record: GapRecord,
         return ("open",
                 f"technique delta fails causal discipline: {exc}", None)
     epi = getattr(registry._engine, "epistemic_store", None)
-    distiller = Distiller(registry._engine, epistemic=epi)
+    # 2026-09-27 (M7-R1): the import/construction below previously named
+    # `Distiller`, which does not exist in this module -- the class is
+    # `DistillationLoop`. That ImportError killed the whole technique leg
+    # at import time (V9-GEN found it).
+    distiller = DistillationLoop(registry._engine, epistemic=epi)
     result = distiller.distill(delta)
     rd = result.as_dict() if hasattr(result, "as_dict") else {}
-    if rd.get("admitted"):
+    # 2026-09-27 (M7-R1): DistillationResult carries `success` + `verdict_admitted`,
+    # never `admitted` -- `success` is only set True after promotion +
+    # held-out verification pass (distill.py routes A/B), so it IS the
+    # admission gate. The old `rd.get("admitted")` check was always falsy
+    # and would have left the leg permanently open.
+    if rd.get("success") and rd.get("verdict_admitted"):
         return ("closed",
                 "technique distilled, verified and admitted via M2",
                 {"utilization_verified": True,

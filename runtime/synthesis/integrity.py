@@ -908,6 +908,7 @@ QUARANTINE_REASON_VOCABULARY = (
     "not-functional",
     "missing-dependency",
     "missing-substrate",
+    "limitation",  # Q10: capability limitation at scale/format, diagnosed
     "tampered",
     "verification-failed",
     "revoked",
@@ -1115,6 +1116,284 @@ class QuarantineDiagnosis:
                 "checks": self.checks}
 
 
+# ---------------------------------------------------------------------------
+# Limitation-gap reason shape (Q10)
+#
+# A capability limitation at scale/format is a valid quarantine-reason
+# shape alongside "missing dependency" (James, 2026-09-27). The shape is
+#   limitation:{task}:{scale_or_format}
+# carried as a structured record: attempted task, attempted scale/format,
+# the observed failure, and the "what's preventing it" diagnosis. The
+# diagnosis machinery below is generic -- it parses the record, replays
+# its carried reproduction in a bounded subprocess to separate "can't do
+# at this scale" from "can't do at all", and routes the limitation toward
+# technique acquisition (M1/M2), substrate (M3), or synthesis. No
+# limitation strings are hardcoded anywhere in this path.
+# ---------------------------------------------------------------------------
+
+#: Structured limitation-reason prefix. The full record follows as JSON:
+#: {"task", "scale_or_format", "failure", "preventing", "reproduce"?}.
+LIMITATION_PREFIX = "limitation:"
+
+#: Strict shape for a probe callable reference: "importable.module:attr".
+_CALLABLE_RE = None  # compiled lazily (re import kept local)
+
+_TECHNIQUE_HINTS = ("technique", "algorithm", "tiled", "tiling",
+                    "streaming", "chunked", "knowledge", "method",
+                    "approach", "distill")
+
+# "Missing" semantics for routing (narrower than _MISSING_HINTS): the word
+# "substrate"/"dependency" alone must NOT route to substrate acquisition --
+# "the PIL substrate cannot decode .obj" means the present substrate is
+# incapable (synthesize or learn a technique), while "PIL is not installed"
+# means acquire it. Only genuine absence routes to M3.
+_SUBSTRATE_ABSENT_HINTS = ("missing", "not installed", "not importable",
+                           "no module", "unavailable", "absent")
+
+# Generic bound patterns a failure observation may name, e.g.
+# "spec.width: expected int in [1,2048], got 10000".
+# 2026-09-27 (Q10-R1): added the media generators' genuine refusal-text
+# family "refused: dimensions out of bounds [1, 2048] (got 10000x10000)" --
+# previously only "in [lo,hi]" matched, so an out-of-bounds refusal named
+# no bound and routed to synthesis instead of technique (M7 incident 1).
+# All patterns stay generic: no bound numbers are hardcoded anywhere.
+_BOUND_PATTERNS = (
+    r"in\s*\[\s*\d+\s*,\s*(\d+)\s*\]",   # "in [lo,hi]" -> hi
+    r"out of bounds\s*\[\s*\d+\s*,\s*(\d+)\s*\]",  # "out of bounds [1, 2048]" -> hi
+    r"maximum\s*(?:of\s*)?(\d+)",          # "maximum 2048" / "maximum of 2048"
+    r"at most\s*(\d+)",                   # "at most 2048"
+)
+
+
+def _callable_re():
+    global _CALLABLE_RE
+    if _CALLABLE_RE is None:
+        import re
+        _CALLABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*$")
+    return _CALLABLE_RE
+
+
+def format_limitation_reason(task: str, scale_or_format: str, *,
+                             failure: str = "",
+                             preventing: str = "",
+                             reproduce: Optional[Dict[str, Any]] = None) -> str:
+    """Build a limitation-shaped quarantine reason (the quarantining path's
+    constructor). `reproduce` optionally carries a machine-readable
+    reproduction for the diagnostic probe:
+      {"callable": "importable.module:attr",
+       "args": {...},            # the failing invocation
+       "reduced_args": {...}}    # the same invocation at reduced scale
+    Binary args are carried as {"$b64": "<base64>"}. The callable is
+    replayed in a bounded subprocess by the diagnosis; it must be
+    side-effect-free with respect to engine state (pure characterization).
+    """
+    import json
+    record = {"task": task, "scale_or_format": scale_or_format,
+              "failure": failure, "preventing": preventing}
+    if reproduce is not None:
+        record["reproduce"] = reproduce
+    return LIMITATION_PREFIX + json.dumps(record, sort_keys=True)
+
+
+def parse_limitation_reason(reason: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse a limitation-shaped reason into its record. Returns None when
+    the reason is not limitation-shaped or not parseable (fail closed)."""
+    import json
+    if not reason or not reason.startswith(LIMITATION_PREFIX):
+        return None
+    try:
+        rec = json.loads(reason[len(LIMITATION_PREFIX):])
+    except Exception:
+        return None
+    if not isinstance(rec, dict):
+        return None
+    return {"task": rec.get("task", ""), "scale_or_format": rec.get("scale_or_format", ""),
+            "failure": rec.get("failure", ""), "preventing": rec.get("preventing", ""),
+            "reproduce": rec.get("reproduce")}
+
+
+def _limitation_numbers(text: str) -> List[int]:
+    import re
+    return [int(x) for x in re.findall(r"\d+", text or "")]
+
+
+def _limitation_declared_bound(failure: str) -> Optional[int]:
+    """A bound the failure observation itself names (generic patterns)."""
+    import re
+    for pat in _BOUND_PATTERNS:
+        m = re.search(pat, failure or "", re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                continue
+    return None
+
+
+def _route_limitation(preventing: str,
+                      scale_specific: Optional[bool],
+                      probe_specific: bool = False) -> str:
+    """Route a diagnosed limitation toward the next acquisition path.
+
+    Returns one of "substrate" (M3), "technique" (M1/M2), "synthesis".
+    Routing is by generic hint shape on the preventing-text, never by
+    limitation-specific strings.
+
+    probe_specific carries the active separability probe's confirmation
+    (reduced-scale ok + full-scale fails): a probe-confirmed specific
+    limitation upgrades an UNKNOWN static separability to scale-specific,
+    because smaller invocations demonstrably work. It never overrides an
+    explicit format/class classification -- the axis comes from the
+    static record, not the probe. (2026-09-27, Q10-R1: previously the
+    probe's specific_confirmed verdict was computed but dropped, so a
+    10K limitation with an unparseable refusal format routed to
+    synthesis; M7 incident 1.)
+    """
+    p = (preventing or "").lower()
+    if any(h in p for h in _SUBSTRATE_ABSENT_HINTS):
+        return "substrate"
+    if any(h in p for h in _TECHNIQUE_HINTS):
+        return "technique"
+    if scale_specific is True or (scale_specific is None and probe_specific):
+        # A scale the current mechanism cannot reach but smaller scales
+        # can: crossable by a better technique (tiling, streaming, ...).
+        return "technique"
+    if scale_specific is False:
+        # A format/class the mechanism cannot handle at any scale.
+        return "synthesis"
+    return "synthesis"
+
+
+# Fixed probe child: replays one recorded invocation in a plain
+# subprocess (NOT the W4-R1 capability sandbox -- that sandbox forbids
+# the very imports a characterization probe needs). The parent enforces
+# a hard wall timeout and kills on expiry. The script is constant; only
+# the reproduce spec travels as data.
+_LIMITATION_PROBE_CHILD = """\
+import base64, importlib, json, sys
+
+def _decode(v):
+    if isinstance(v, dict) and set(v.keys()) == {"$b64"}:
+        return base64.b64decode(v["$b64"])
+    if isinstance(v, dict):
+        return {k: _decode(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_decode(x) for x in v]
+    return v
+
+def main():
+    spec_path, which, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    out = {"which": which, "ok": False}
+    try:
+        spec = json.load(open(spec_path, encoding="utf-8"))
+        call = spec.get("callable", "")
+        mod_name, _, attr = call.rpartition(":")
+        fn = getattr(importlib.import_module(mod_name), attr)
+        args = _decode(spec.get("args") if which == "full"
+                       else spec.get("reduced_args", {}))
+        try:
+            fn(**args) if isinstance(args, dict) else fn(*args)
+            out["ok"] = True
+            out["result"] = "returned-ok"
+        except Exception as e:
+            out["error"] = "%s: %s" % (type(e).__name__, e)
+    except Exception as e:
+        out["error"] = "setup: %s: %s" % (type(e).__name__, e)
+    json.dump(out, open(out_path, "w", encoding="utf-8"))
+
+main()
+"""
+
+
+def _validate_reproduce_spec(reproduce: Any) -> Optional[str]:
+    """Strict shape check on a carried reproduction. Returns an error
+    string when invalid, None when the spec is usable."""
+    if not isinstance(reproduce, dict):
+        return "reproduce is not a dict"
+    call = reproduce.get("callable")
+    if not isinstance(call, str) or not _callable_re().match(call):
+        return "reproduce.callable is not a module:attr reference"
+    for key in ("args", "reduced_args"):
+        if key in reproduce and not isinstance(reproduce[key], (dict, list)):
+            return f"reproduce.{key} must be a dict or list"
+    return None
+
+
+def _pylib_dir() -> Optional[str]:
+    """A sys.path entry that provides the swarm_engine package (for the
+    probe child's environment)."""
+    import os as _os
+    for entry in sys.path:
+        try:
+            if entry and _os.path.isdir(_os.path.join(entry, "swarm_engine")):
+                return entry
+        except Exception:
+            continue
+    return None
+
+
+def _run_limitation_probe(reproduce: Dict[str, Any],
+                          timeout_s: float = 60.0) -> Dict[str, Any]:
+    """Replay the recorded reproduction at reduced and full scale in
+    bounded child processes. Returns
+      {"reduced": {...}, "full": {...}, "setup_error": ...?}
+    where each side is {"which", "ok", "result"|"error", "elapsed_ms"}
+    or {"which", "ok": False, "error": "probe_timeout"} on expiry.
+    Never raises: every failure mode is a recorded outcome."""
+    import os
+    import subprocess
+    import tempfile
+    import time as _time
+    result: Dict[str, Any] = {}
+    try:
+        tmp = tempfile.mkdtemp(prefix="limprobe_")
+        spec_path = os.path.join(tmp, "spec.json")
+        child_path = os.path.join(tmp, "probe_child.py")
+        with open(spec_path, "w", encoding="utf-8") as fh:
+            json.dump(reproduce, fh)
+        with open(child_path, "w", encoding="utf-8") as fh:
+            fh.write(_LIMITATION_PROBE_CHILD)
+        env = dict(os.environ)
+        pylib = _pylib_dir()
+        if pylib:
+            env["PYTHONPATH"] = pylib + os.pathsep + env.get("PYTHONPATH", "")
+        for which in ("reduced", "full"):
+            out_path = os.path.join(tmp, f"out_{which}.json")
+            t0 = _time.monotonic()
+            side: Dict[str, Any] = {"which": which, "ok": False}
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, child_path, spec_path, which, out_path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=env, cwd=tmp)
+                try:
+                    proc.communicate(timeout=timeout_s)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                    side["error"] = "probe_timeout"
+                    side["elapsed_ms"] = (_time.monotonic() - t0) * 1000.0
+                    result[which] = side
+                    continue
+                try:
+                    with open(out_path, encoding="utf-8") as fh:
+                        side = json.load(fh)
+                except Exception as e:
+                    side["error"] = f"no probe output: {e}"
+                side["elapsed_ms"] = (_time.monotonic() - t0) * 1000.0
+                if proc.returncode not in (0, None):
+                    side.setdefault("error",
+                                    f"child exit {proc.returncode}")
+                    side["ok"] = False
+            except Exception as e:
+                side["error"] = f"probe harness: {type(e).__name__}: {e}"
+                side["elapsed_ms"] = (_time.monotonic() - t0) * 1000.0
+            result[which] = side
+    except Exception as e:
+        result["setup_error"] = f"{type(e).__name__}: {e}"
+    return result
+
+
 _MISSING_HINTS = ("missing", "not installed", "not importable", "no module",
                   "substrate", "dependency", "unavailable", "absent")
 _TAMPER_HINTS = ("tamper", "corrupt", "fingerprint", "mismatch", "seal")
@@ -1158,17 +1437,27 @@ def _importable(module: str) -> Tuple[bool, str]:
 
 
 def _reason_class(reason: Optional[str]) -> str:
-    r = (reason or "").lower()
-    if any(h in r for h in _MISSING_HINTS):
+    r = (reason or "")
+    # Q10: the structured limitation shape is classified by its prefix
+    # before any hint matching (a preventing-text may itself contain
+    # substrate words like "unavailable").
+    if r.startswith(LIMITATION_PREFIX):
+        return "limitation"
+    rl = r.lower()
+    if any(h in rl for h in _MISSING_HINTS):
         return "missing_substrate"
-    if any(h in r for h in _TAMPER_HINTS):
+    if any(h in rl for h in _TAMPER_HINTS):
         return "tampered"
-    if any(h in r for h in _SMOKE_HINTS):
+    if any(h in rl for h in _SMOKE_HINTS):
         return "verification"
-    if "superseded" in r or "not-applicable" in r or "not applicable" in r:
+    if "superseded" in rl or "not-applicable" in rl or "not applicable" in rl:
         return "not_applicable"
-    if "revoked" in r:
+    if "revoked" in rl:
         return "revoked"
+    # Free-text fallback: only the explicit word "limitation" -- generic
+    # scale/format words are too noisy to classify on.
+    if "limitation" in rl:
+        return "limitation"
     return "unknown"
 
 
@@ -1180,6 +1469,10 @@ def _stay_label(reason: Optional[str], reason_class: str) -> str:
         return "not-functional"  # cannot run in this environment
     if reason_class == "tampered":
         return "needs-improvement"  # needs a repair action, not just time
+    if reason_class == "limitation":
+        # Q10: the limitation branch computes its own routed label; this
+        # is only the fallback for paths that never reach it.
+        return "needs-improvement"
     return "needs-improvement"
 
 
@@ -1293,6 +1586,11 @@ def diagnose_quarantine(engine, capability_id: str) -> QuarantineDiagnosis:
             None, "indeterminate", checks,
             _stay_label(reason, rclass))
 
+    # Q10: limitation at scale/format -- characterize what's preventing it.
+    if rclass == "limitation":
+        return _diagnose_limitation(engine, capability_id, reason, qr,
+                                    checks)
+
     # verification / revoked / not_applicable / unknown: no safe automatic
     # re-check exists on this driver -- fail closed.
     checks.append({"name": "recheck", "outcome": "skipped",
@@ -1301,6 +1599,165 @@ def diagnose_quarantine(engine, capability_id: str) -> QuarantineDiagnosis:
     return QuarantineDiagnosis(
         capability_id, True, reason, qr["since"], qr["system"],
         None, "indeterminate", checks, _stay_label(reason, rclass))
+
+
+def _diagnose_limitation(engine, capability_id: str,
+                         reason: Optional[str],
+                         qr: Dict[str, Any],
+                         checks: List[Dict[str, Any]]) -> QuarantineDiagnosis:
+    """Diagnose a limitation-shaped quarantine reason (Q10).
+
+    1. Parse the structured record -- unparseable fails closed.
+    2. Require an observed failure: a limitation asserted without an
+       observation is indeterminate, never a verdict.
+    3. Static separability: a numeric attempted scale against a bound the
+       failure observation itself names ("can't do at this scale" vs
+       "can't do at all" vs format/class with no scale axis).
+    4. Active bounded probe when the record carries a valid reproduction:
+       reduced-scale ok + full-scale fails confirms scale/format-specific;
+       reduced failing too means mechanism-wide; full-scale succeeding
+       means the limitation no longer holds (reason_cleared).
+    5. Route toward substrate (M3) / technique (M1/M2) / synthesis and
+       label honestly from the M5 vocabulary.
+    """
+    rec = parse_limitation_reason(reason)
+    if rec is None:
+        checks.append({"name": "limitation_parse", "outcome": "fail",
+                       "detail": "reason classified as limitation but not "
+                                 "parseable as the limitation shape"})
+        return QuarantineDiagnosis(
+            capability_id, True, reason, qr["since"], qr["system"],
+            None, "indeterminate", checks, "needs-improvement")
+
+    task = rec["task"]
+    scale = rec["scale_or_format"]
+    failure = rec["failure"]
+    preventing = rec["preventing"]
+    checks.append({"name": "limitation_record", "outcome": "parsed",
+                   "detail": {"task": task, "scale_or_format": scale,
+                              "preventing": preventing}})
+
+    if not failure:
+        checks.append({"name": "failure_observed", "outcome": "absent",
+                       "detail": "limitation asserted without an observed "
+                                 "failure -- refusing to diagnose a claim"})
+        return QuarantineDiagnosis(
+            capability_id, True, reason, qr["since"], qr["system"],
+            None, "indeterminate", checks, "needs-improvement")
+    checks.append({"name": "failure_observed", "outcome": "recorded",
+                   "detail": failure[:300]})
+
+    # -- static separability -------------------------------------------
+    nums = _limitation_numbers(scale)
+    bound = _limitation_declared_bound(failure)
+    scale_specific: Optional[bool] = None
+    mechanism_wide = False
+    if nums and bound is not None and max(nums) > bound:
+        scale_specific = True
+        checks.append({"name": "separability_static",
+                       "outcome": "scale_specific",
+                       "detail": f"attempted scale {max(nums)} exceeds the "
+                                 f"bound {bound} named by the failure "
+                                 f"observation"})
+    elif not nums:
+        scale_specific = False
+        checks.append({"name": "separability_static",
+                       "outcome": "format_or_class",
+                       "detail": "no numeric scale axis in "
+                                 f"{scale!r}: a format/class limitation, "
+                                 f"not a scale limitation"})
+    else:
+        checks.append({"name": "separability_static",
+                       "outcome": "unknown",
+                       "detail": "separability not determinable from the "
+                                 "record alone"})
+
+    # -- active bounded probe ------------------------------------------
+    reproduce = rec.get("reproduce")
+    probe_ran = False
+    specific_confirmed = False  # reduced ok + full fails (any axis)
+    if reproduce is not None:
+        spec_err = _validate_reproduce_spec(reproduce)
+        if spec_err:
+            checks.append({"name": "limitation_probe", "outcome": "skipped",
+                           "detail": f"invalid reproduce spec: {spec_err}"})
+        else:
+            probe = _run_limitation_probe(reproduce)
+            probe_ran = True
+            red = probe.get("reduced", {})
+            full = probe.get("full", {})
+            checks.append({"name": "limitation_probe", "outcome": "ran",
+                           "detail": {
+                               "reduced": {k: red.get(k) for k in
+                                           ("ok", "error", "result",
+                                            "elapsed_ms")},
+                               "full": {k: full.get(k) for k in
+                                        ("ok", "error", "result",
+                                         "elapsed_ms")},
+                               "setup_error": probe.get("setup_error")}})
+            red_err = str(red.get("error") or "")
+            full_err = str(full.get("error") or "")
+            red_setup = red_err.startswith("setup:") or \
+                red.get("error") == "probe_timeout"
+            full_setup = full_err.startswith("setup:") or \
+                full.get("error") == "probe_timeout"
+            if full.get("ok") is True and not full_setup:
+                # The recorded failure no longer reproduces: the
+                # limitation is cleared (e.g. substrate upgraded).
+                checks.append({"name": "limitation_recheck",
+                               "outcome": "cleared",
+                               "detail": "full-scale reproduction now "
+                                         "succeeds; the recorded limitation "
+                                         "no longer holds"})
+                return QuarantineDiagnosis(
+                    capability_id, True, reason, qr["since"], qr["system"],
+                    False, "reason_cleared", checks, None)
+            if red.get("ok") is True and full.get("ok") is False \
+                    and not red_setup and not full_setup:
+                # The limitation is specific to the full invocation, not
+                # mechanism-wide. Whether that axis is scale or format
+                # comes from the static record, not the probe.
+                specific_confirmed = True
+                checks.append({"name": "separability_probe",
+                               "outcome": "specific_confirmed",
+                               "detail": "reduced-scale reproduction "
+                                         "succeeds; full-scale reproduction "
+                                         "fails: the limitation is specific "
+                                         "to the full invocation"})
+            elif red.get("ok") is False and not red_setup:
+                mechanism_wide = True
+                checks.append({"name": "separability_probe",
+                               "outcome": "mechanism_wide",
+                               "detail": "reduced-scale reproduction also "
+                                         f"fails ({red_err[:200]}): can't do "
+                                         f"at all with the current mechanism"})
+            else:
+                checks.append({"name": "separability_probe",
+                               "outcome": "inconclusive",
+                               "detail": "probe inconclusive (setup/timeout); "
+                                         "separability from the static "
+                                         "record only"})
+
+    # -- route + label ---------------------------------------------------
+    # Q10-R1: the separability probe's specific_confirmed verdict feeds
+    # the route (it was previously computed but dropped).
+    route = _route_limitation(preventing, scale_specific,
+                              probe_specific=specific_confirmed)
+    if mechanism_wide:
+        label = "not-functional"
+    elif route == "substrate":
+        label = "not-functional"  # cannot run in this environment
+    else:
+        label = "needs-improvement"  # technique or synthesis can cross it
+    checks.append({"name": "limitation_route", "outcome": route,
+                   "detail": f"preventing={preventing!r} "
+                             f"scale_specific={scale_specific} "
+                             f"probe_specific={specific_confirmed} "
+                             f"mechanism_wide={mechanism_wide} "
+                             f"probe_ran={probe_ran} -> {route}"})
+    return QuarantineDiagnosis(
+        capability_id, True, reason, qr["since"], qr["system"],
+        True, "reason_holds", checks, label)
 
 
 # --------------------------------------------------------------------------
