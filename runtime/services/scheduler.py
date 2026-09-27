@@ -231,11 +231,26 @@ class _TracingTaskInterface(UniversalTaskInterface):
 
 
 class RunScheduler:
-    """FIFO run queue with one worker thread over one lazily-booted engine."""
+    """FIFO run queue with one worker thread over one lazily-booted engine.
 
-    def __init__(self, db_path: str, runtime_db_path: str) -> None:
+    D11 single-owner: exactly one SwarmEngine may exist per database file
+    per process. Deployments where the engine is already owned (e.g. the
+    GUI engine front owns RUNTIME_DB) MUST pass ``engine_call`` -- a
+    callable ``fn(bundle) -> result`` that executes ``fn`` on the
+    engine-owning thread with the shared ``{"engine", "router",
+    "dispatcher"}`` bundle. The worker then runs the engine body through
+    the hook and never constructs a second engine on the owned DB (which
+    the D11 registry would fail-closed refuse). Without the hook, the
+    scheduler keeps its legacy behavior of lazily booting its own engine
+    on ``runtime_db_path`` (bench/test deployments where no other engine
+    owns that file).
+    """
+
+    def __init__(self, db_path: str, runtime_db_path: str,
+                 engine_call=None) -> None:
         self.db_path = os.path.abspath(db_path)
         self.runtime_db_path = runtime_db_path
+        self._engine_call = engine_call
         self._lock = threading.RLock()
         self._cond = threading.Condition(self._lock)
         self._pending: collections.deque = collections.deque()  # run_ids, FIFO
@@ -330,7 +345,13 @@ class RunScheduler:
     # engine
     # ------------------------------------------------------------------
     def _engine_lazy(self):
-        """Boot the single shared SwarmEngine on first use (thread-safe)."""
+        """Boot the scheduler-owned SwarmEngine on first use (thread-safe).
+
+        Legacy path only: used when no ``engine_call`` hook was provided
+        (no other engine owns ``runtime_db_path`` in this process). When
+        the hook is set, this is never called -- the deployment's shared
+        engine is the single D11 owner.
+        """
         with self._engine_lock:
             if self._engine is None:
                 from swarm_engine.core.engine import SwarmEngine
@@ -882,15 +903,6 @@ class RunScheduler:
             self._run_intent_dispatch(run_id, _metadata)
             return
 
-        try:
-            engine = self._engine_lazy()
-        except Exception as ex:  # engine failed to boot: honest error
-            with self._lock:
-                self._finish_locked(run_id, "error", None,
-                                    error=_truncate_error(
-                                        f"engine boot failed: {ex!r}"))
-            return
-
         with self._lock:
             control = self._controls.get(run_id)
             payload = self._payloads.get(run_id)
@@ -900,9 +912,50 @@ class RunScheduler:
             self._set_status_locked(run_id, "running",
                                     started_at=time.time())
 
+        if self._engine_call is not None:
+            # D11 single-owner path: the deployment already owns the one
+            # engine on this DB (e.g. the GUI engine front). The whole
+            # engine body runs on the owning thread via the hook -- never
+            # boot a second engine (the D11 registry would fail-closed
+            # refuse it, which is exactly the phone bug this repairs).
+            try:
+                final, outcome, outcome_error = self._engine_call(
+                    lambda bundle: self._execute_engine_run(
+                        bundle["engine"], run_id, control,
+                        goal, examples, metadata))
+            except Exception as ex:  # hook failed: honest error
+                with self._lock:
+                    self._finish_locked(run_id, "error", None,
+                                        error=_truncate_error(
+                                            f"engine call failed: {ex!r}"))
+                return
+        else:
+            try:
+                engine = self._engine_lazy()
+            except Exception as ex:  # engine failed to boot: honest error
+                with self._lock:
+                    self._finish_locked(run_id, "error", None,
+                                        error=_truncate_error(
+                                            f"engine boot failed: {ex!r}"))
+                return
+            final, outcome, outcome_error = self._execute_engine_run(
+                engine, run_id, control, goal, examples, metadata)
+
+        with self._lock:
+            self._finish_locked(run_id, final, outcome, error=outcome_error)
+
+    def _execute_engine_run(self, engine, run_id: str, control: RunControl,
+                            goal: str, examples, metadata):
+        """Run the engine body for one run; returns (final, outcome, error).
+
+        MUST execute on the engine-owning thread (thread-affinity): the
+        caller either booted this engine itself (legacy ``_engine_lazy``
+        path, worker thread == constructing thread) or routed here through
+        the deployment's ``engine_call`` hook (owning thread).
+        """
         outcome = None
         outcome_error = ""
-        # The worker thread installs the run's control as current AND passes
+        # The thread installs the run's control as current AND passes
         # it via metadata, per the frozen run_control contract. handle()
         # converts RunStopped into a STOPPED outcome with the trace intact.
         _rc.set_current(control)
@@ -924,9 +977,7 @@ class RunScheduler:
             final = "stopped" if control.stop_requested else "error"
         finally:
             _rc.set_current(None)
-
-        with self._lock:
-            self._finish_locked(run_id, final, outcome, error=outcome_error)
+        return final, outcome, outcome_error
 
     @staticmethod
     def _classify(outcome, control: RunControl) -> str:
