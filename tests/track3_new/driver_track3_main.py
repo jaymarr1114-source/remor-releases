@@ -88,8 +88,21 @@ def cmd_http(workdir):
         with open(os.path.join(workdir, "track3_meta.json")) as fh:
             meta = json.load(fh)
         ev_id = meta["evidence_id"]
+        # The adapter bearer-gates every route: read the provisioned token
+        # (<workdir>/service_data/api_token) and send it. An unauthenticated
+        # request is correctly 401 -- the check must authenticate, not the
+        # server relax.
+        token_path = os.path.join(workdir, "service_data", "api_token")
+        with open(token_path) as fh:
+            token = fh.read().strip()
+
+        def _get(url):
+            req = urllib.request.Request(
+                url, headers={"Authorization": f"Bearer {token}"})
+            return urllib.request.urlopen(req, timeout=10)
+
         url = f"http://127.0.0.1:{port}/api/dispatch_evidence/{ev_id}"
-        with urllib.request.urlopen(url, timeout=10) as resp:
+        with _get(url) as resp:
             assert resp.status == 200, resp.status
             body = json.loads(resp.read().decode())
         ev = body["evidence"]
@@ -101,9 +114,7 @@ def cmd_http(workdir):
         assert json.loads(ev["evidence_json"])["ok"] is True
         # unknown evidence -> 404, never 200 with fabricated content
         try:
-            urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/dispatch_evidence/dsp_ev_nope",
-                timeout=10)
+            _get(f"http://127.0.0.1:{port}/api/dispatch_evidence/dsp_ev_nope")
             raise SystemExit("HTTP 404 expected for unknown evidence")
         except urllib.error.HTTPError as e:
             assert e.code == 404, e.code
@@ -127,8 +138,17 @@ def main():
     elif args.cmd == "http":
         cmd_http(workdir)
     elif args.cmd == "all":
-        cmd_phase1(workdir)
-        cmd_http(workdir)
+        # Pure orchestrator: each phase runs in its OWN process. The engine
+        # owns <workdir>/engine.db via a process-lifetime lockfile
+        # (DuplicateEngineError), so phase1's engine must be fully released
+        # (process exit) before http's engine claims the db. Same discipline
+        # as phase2 (fresh process per phase).
+        import subprocess as _sp
+        for sub in ("phase1", "http"):
+            r = _sp.run([sys.executable, os.path.abspath(__file__),
+                         sub, "--workdir", workdir])
+            if r.returncode != 0:
+                raise SystemExit(r.returncode)
 
 
 if __name__ == "__main__":

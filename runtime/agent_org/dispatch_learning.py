@@ -91,10 +91,13 @@ DISPATCH_KNOWLEDGE_REF_PREFIX = "dispatch_knowledge:"
 # arguments, and returns the recomputed digests. The digest formulas are
 # byte-identical to NLToolDispatcher.dispatch()'s.
 #
-# The subprocess must be able to ``import swarm_engine``: the driver sets
-# PYTHONPATH to the runtime tree before review (run_code inherits the
-# environment). If the import fails the harness raises, the case fails, and
-# the verdict is refused -- fail closed, never silently skipped.
+# The subprocess must be able to ``import swarm_engine``: run_code now
+# guarantees this itself (subprocess_runner._review_subprocess_env derives
+# the path from its own module file -- swarm_engine is a namespace package,
+# so the child imports the exact tree under review; a driver-set PYTHONPATH
+# is preserved after it). If the import ever fails the harness raises, the
+# case fails, and the verdict is refused -- fail closed, never silently
+# skipped.
 #
 # closure_json defaults to "[]" so legacy (pre-closure) evidence -- which
 # the review only ever submits for base-primitive-only plans -- keeps

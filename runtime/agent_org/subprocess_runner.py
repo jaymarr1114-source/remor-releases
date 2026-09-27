@@ -26,6 +26,41 @@ from typing import Any, Dict, List, Sequence, Tuple
 TIMEOUT_S = 30
 
 
+def _review_subprocess_env() -> Dict[str, str]:
+    """Environment for review subprocesses.
+
+    Guarantees the child can ``import swarm_engine``: the dispatch-evidence
+    re-execution harness (and any review-procedure code) does
+    ``from swarm_engine... import ...``, but a parent's ``sys.path``
+    tweaks do not cross the subprocess boundary -- only the environment
+    does. The path is derived from this module's own file
+    (``swarm_engine`` is a namespace package -- ``__file__`` is None -- so
+    the package file cannot be used), guaranteeing the child imports the
+    exact tree the parent is running; a driver-set PYTHONPATH is preserved
+    after it, not replaced.
+
+    This grants the child no new authority and weakens no check: the
+    isolation boundary is the subprocess itself (temp cwd, stdio-only,
+    timeout), and the review-procedure code it executes is fixed, never
+    agent input. Without this, every dispatch-evidence verdict fails
+    closed for an environmental reason ("No module named 'swarm_engine'")
+    that the verdict reasons then misreport as a behavioural failure.
+    """
+    env = dict(os.environ)
+    try:
+        # This module lives at <container>/swarm_engine/agent_org/; the
+        # container dir is what the child needs on PYTHONPATH.
+        here = os.path.abspath(__file__)
+        container = os.path.dirname(os.path.dirname(
+            os.path.dirname(here)))
+        prev = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (container + os.pathsep + prev
+                             if prev else container)
+    except Exception:
+        pass
+    return env
+
+
 @dataclass
 class RunReport:
     ok: bool
@@ -116,7 +151,7 @@ def run_code(code: str, entrypoint: str,
             proc = subprocess.run(
                 [sys.executable, shim_path, payload_path],
                 capture_output=True, text=True, timeout=TIMEOUT_S,
-                cwd=tmp)
+                cwd=tmp, env=_review_subprocess_env())
         except subprocess.TimeoutExpired:
             return RunReport(False, [], "subprocess timed out "
                              f"after {TIMEOUT_S}s (killed)")
