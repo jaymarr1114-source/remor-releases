@@ -158,12 +158,46 @@ class ControllerCheckpoint:
 
     def __init__(self, path: str) -> None:
         self._path = path
+        # Set when a corrupt checkpoint file was quarantined at open: the
+        # boot survived a damaged checkpoint instead of crashing on it.
+        self._quarantined_from: Optional[str] = None
+        try:
+            con = sqlite3.connect(self._path)
+            try:
+                con.executescript(_CHECKPOINT_SCHEMA)
+                con.commit()
+            finally:
+                con.close()
+        except sqlite3.DatabaseError:
+            # Corrupt checkpoint file (a real Android failure mode: flash
+            # corruption). Fail closed: quarantine the damaged file and
+            # start fresh -- never crash the boot on a bad checkpoint.
+            self.quarantine_and_reset()
+
+    def quarantine_and_reset(self) -> Optional[str]:
+        """Quarantine the current checkpoint file and start a fresh one.
+
+        The damaged file is renamed to ``<path>.corrupt-<epoch>`` (kept for
+        forensics, never read again); a new empty checkpoint DB takes its
+        place. Returns the quarantine path, or None if there was nothing
+        to quarantine. Raises only if the fresh DB itself cannot be
+        created (then the storage itself is broken -- an honest failure).
+        """
+        bad: Optional[str] = None
+        try:
+            stamp = int(time.time())
+            bad = "%s.corrupt-%d" % (self._path, stamp)
+            os.replace(self._path, bad)
+            self._quarantined_from = bad
+        except OSError:
+            pass  # nothing to quarantine (or already moved); recreate below
         con = sqlite3.connect(self._path)
         try:
             con.executescript(_CHECKPOINT_SCHEMA)
             con.commit()
         finally:
             con.close()
+        return bad
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self._path)
@@ -358,11 +392,27 @@ class RunController:
         except Exception:
             return ""
 
+    @property
+    def stop_requested(self) -> bool:
+        """True once request_stop() has been called. Lets a cooperative
+        host (the Android wrapper's serve+cadence pump) poll for shutdown
+        without touching the controller's internals."""
+        return self._stop.is_set()
+
     # -- main run ----------------------------------------------------------
-    def run(self) -> Dict[str, Any]:
+    def run(self, wait_fn=None) -> Dict[str, Any]:
         """The unprompted run. Loops on the authorized cadence until the run
         budget is exhausted, max_cycles is reached, or stop is requested.
-        Never raises: the report carries what happened."""
+        Never raises on operational failures: the report carries what
+        happened, and a crashed loop is recorded "crashed" (never
+        mislabeled "complete") so the next boot resumes it.
+
+        wait_fn: optional zero-arg callable used INSTEAD of the dumb
+        scheduler's blocking wait. It must serve the host while waiting
+        (the Android wrapper's cooperative serve+cadence pump) and return
+        False when the run should stop. None (default) keeps the
+        standalone blocking cadence.
+        """
         cfg = self.config
         ckpt = self._checkpoint
         report: Dict[str, Any] = {
@@ -370,10 +420,32 @@ class RunController:
             "resumed": False, "budget_exhausted": False,
             "errors": [],
         }
+        crashed = False
         try:
-            prior_status = ckpt.load_meta("status")
-            prior_cycles = ckpt.cycles_completed()
-            if prior_status == "running" and prior_cycles > 0:
+            # Resume-load: every value is validated. A checkpoint that is
+            # corrupt or carries unparsable values is quarantined and the
+            # run starts fresh -- fail closed, named, never crash the boot.
+            try:
+                prior_status = ckpt.load_meta("status")
+                prior_cycles = ckpt.cycles_completed()
+                saved_deadline = ckpt.load_meta("deadline_wall")
+                if saved_deadline is not None:
+                    float(saved_deadline)  # validate; may raise ValueError
+            except (sqlite3.DatabaseError, ValueError, TypeError) as exc:
+                bad = ckpt.quarantine_and_reset()
+                self._observe(
+                    "checkpoint_quarantined",
+                    f"Run Controller {self._run_id}: checkpoint failed "
+                    f"integrity ({type(exc).__name__}: {exc}); quarantined "
+                    f"to {bad}; starting fresh, fail-closed.",
+                    {"quarantined_to": bad,
+                     "reason": f"{type(exc).__name__}: {exc}"})
+                prior_status, prior_cycles, saved_deadline = None, 0, None
+            # A loop that died from an exception is recorded "crashed", and
+            # "crashed" is a resume signal alongside "running": a crash is
+            # never mislabeled a clean finish, and the next boot picks the
+            # run back up instead of silently dropping it.
+            if prior_status in ("running", "crashed") and prior_cycles > 0:
                 report["resumed"] = True
                 self._observe(
                     "run_resumed",
@@ -398,14 +470,32 @@ class RunController:
             # one. Without this, kill -> resume could exceed the authorized
             # total wall-clock the RunConfig grants.
             if report["resumed"]:
-                saved_deadline = ckpt.load_meta("deadline_wall")
-                deadline_wall = (float(saved_deadline) if saved_deadline
-                                 else time.time() + cfg.run_budget_s)
+                deadline_wall = float(saved_deadline)
             else:
                 deadline_wall = time.time() + cfg.run_budget_s
                 ckpt.save_meta("deadline_wall", str(deadline_wall))
-            run_deadline = (time.monotonic()
-                            + max(0.0, deadline_wall - time.time()))
+            # Wall-clock-jump clamp: a forward jump must not silently zero
+            # the remaining budget (deadline in the past => expired, named
+            # via the budget_exhausted path below), and a backward jump
+            # must not grant more than the authorized run_budget_s. Both
+            # directions are bounded without pretending to know the true
+            # elapsed time.
+            wall_now = time.time()
+            remaining = deadline_wall - wall_now
+            clamped = False
+            if remaining > cfg.run_budget_s:
+                remaining = cfg.run_budget_s
+                clamped = True
+            run_deadline = (time.monotonic() + max(0.0, remaining))
+            if clamped:
+                self._observe(
+                    "deadline_clamped",
+                    f"Run Controller {self._run_id}: persisted deadline_wall "
+                    f"exceeded the authorized run budget ({cfg.run_budget_s}s"
+                    f") -- wall-clock jump or tampered checkpoint suspected; "
+                    f"remaining budget clamped to {cfg.run_budget_s}s.",
+                    {"deadline_wall": deadline_wall, "wall_now": wall_now,
+                     "run_budget_s": cfg.run_budget_s})
             cycle_n = prior_cycles
             while True:
                 if self._stop.is_set():
@@ -434,25 +524,50 @@ class RunController:
                                f"{type(exc).__name__}: {exc}"}
                     report["errors"].append(summary["tick_error"])
                 report["cycles"].append(summary)
+                # Per-cycle checkpoint writes are intentionally unprotected:
+                # a storage failure here (real under app storage quotas)
+                # flows to the except below -- honest stop, status
+                # "crashed", next boot resumes. Swallowing it would fake a
+                # healthy run while losing state.
                 ckpt.record_cycle(cycle_n, summary)
                 ckpt.save_meta("status", "running")
-                if not self._scheduler.wait_until_next_tick(self._stop):
+                if wait_fn is not None:
+                    if not wait_fn():
+                        report["stopped"] = True
+                        break
+                elif not self._scheduler.wait_until_next_tick(self._stop):
                     report["stopped"] = True
                     break
+        except Exception as exc:
+            # The run died from an operational failure: record it honestly
+            # as crashed so the next boot resumes instead of believing a
+            # clean finish happened. run() never propagates.
+            crashed = True
+            report["errors"].append(
+                f"run_fatal: {type(exc).__name__}: {exc}")
+            self._observe(
+                "run_crashed",
+                f"Run Controller {self._run_id}: run loop died "
+                f"({type(exc).__name__}: {exc}); recorded crashed, next "
+                f"boot resumes.",
+                {"error": f"{type(exc).__name__}: {exc}",
+                 "cycles": len(report["cycles"])})
         finally:
             try:
                 ckpt.save_meta(
                     "status", "stopped" if self._stop.is_set()
-                    else "complete")
+                    else ("crashed" if crashed else "complete"))
                 self._observe(
                     "run_finished",
                     f"Run Controller {self._run_id}: finished "
                     f"({len(report['cycles'])} cycles, "
                     f"stopped={report['stopped']}, "
-                    f"budget_exhausted={report['budget_exhausted']}).",
+                    f"budget_exhausted={report['budget_exhausted']}, "
+                    f"crashed={crashed}).",
                     {"cycles": len(report["cycles"]),
                      "stopped": report["stopped"],
                      "budget_exhausted": report["budget_exhausted"],
+                     "crashed": crashed,
                      "errors": report["errors"]})
             except Exception:
                 pass
