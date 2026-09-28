@@ -58,6 +58,7 @@ from swarm_engine.governance.anchor import (
     default_anchor_paths,
 )
 from swarm_engine.governance.oracle_binding import OracleRegistry
+from swarm_engine.governance.trust_migrations import migrate_engine_backfill
 
 
 def _table_row_counts(db_path: str) -> Dict[str, int]:
@@ -158,7 +159,20 @@ class RemorOrganization:
             ok, msg = anchor_store.verify(
                 collect_anchor_heads(store, oregistry))
             if not ok:
-                raise AnchorMismatch(f"boot refused: {msg}")
+                # Trust-schema migration: the code's root decision-class
+                # set may have grown since the journal tip (the engine's
+                # bootstrap backfill appends visible GRANT events for the
+                # new root classes). migrate_engine_backfill() records an
+                # AUDITED, SIGNED migration transition for EXACTLY that
+                # delta and nothing else; any other difference keeps
+                # refusing (fail-closed preserved).
+                migrated = migrate_engine_backfill(
+                    store, oregistry, anchor_store)
+                if migrated:
+                    ok, msg = anchor_store.verify(
+                        collect_anchor_heads(store, oregistry))
+                if not ok:
+                    raise AnchorMismatch(f"boot refused: {msg}")
         else:
             # No journal: this is only a fresh deployment when the
             # databases are PRISTINE (nothing beyond constructor-time
