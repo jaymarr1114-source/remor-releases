@@ -34,6 +34,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from swarm_engine.primitives.core import ANY, BOOL, DICT, LIST, NUM, STR, TypeSpec
+from swarm_engine.synthesis import nlu_substrate as _nlu_substrate
 
 
 class Intent(Enum):
@@ -587,6 +588,30 @@ def _rule_arithmetic(toks: List[_Token], mood: str) -> List[_Candidate]:
     )]
 
 
+def _substrate_np(obj_toks: List[_Token], raw: str, verb: str,
+                ) -> Optional[Dict[str, Any]]:
+    """NP analysis via the ACQUIRED NLU substrate (never hand-rolled).
+
+    Returns the substrate's frame-ready NP parts, or None when the
+    substrate is absent, errors, or finds no taxonomy-mapped noun chunk.
+    All linguistic decisions come from the acquired model; this is pure
+    plumbing. Never raises.
+    """
+    try:
+        # The substrate needs the ORIGINAL surface (the grammar's tokens
+        # already split "256x256" into pieces): slice the raw text after
+        # the imperative verb.
+        obj_text = ""
+        at = raw.lower().find(verb.lower())
+        if at >= 0:
+            obj_text = raw[at + len(verb):].strip()
+        if not obj_text:
+            obj_text = " ".join(t.text for t in obj_toks)
+        return _nlu_substrate.analyze_np(obj_text, _NOUN_TAXONOMY, _singular)
+    except Exception:
+        return None
+
+
 def _rule_imperative_creation(toks: List[_Token], verb: str, vclass: str,
                               vtax: Optional[str], mood: str,
                               raw: str) -> List[_Candidate]:
@@ -612,6 +637,22 @@ def _rule_imperative_creation(toks: List[_Token], verb: str, vclass: str,
                 trace.append("taxonomy from modifier %r -> %s"
                              % (m, head_tax))
                 break
+    if head_tax is None:
+        # The hand-rolled NP scan found no taxonomy noun -- e.g. dimension
+        # tokens like "256x256" abort its scan before the head. Ask the
+        # ACQUIRED NLU substrate (never a hand-rolled repair): None when the
+        # substrate is absent or unconfident, and the grammar path below
+        # then runs exactly as before.
+        sub = _substrate_np(obj_toks, raw, verb)
+        if sub is not None:
+            trace.append(
+                "NP via acquired NLU substrate: chunk=%r head=%r taxonomy=%r"
+                % (sub["phrase_text"], sub["head"], sub["taxonomy"]))
+            language = next((m for m in sub["mods"] if m in _LANGUAGES), None)
+            np = _NP(mods=sub["mods"], head=sub["head"], language=language,
+                     rest=_tokenize(sub["rest_text"]),
+                     phrase_text=sub["phrase_text"])
+            head_tax = sub["taxonomy"]
     trace.append("head taxonomy=%r verb default=%r" % (head_tax, vtax))
 
     filename, fn_trace = _extract_filename(obj_toks)
