@@ -751,6 +751,12 @@ class PlanComposer:
 
         GEN-SYNTH-2: fused second step of the binary post-pass. Returns
         True if the goal was reached (res finished via _finish).
+
+        GEN-SYNTH-3: after the map completion, also tries filter fusion
+        (see _complete_filtered): filter(M, pred) for banked BOOL
+        predicates, then the map(F, L) lookahead. This is what crosses
+        plans like map(filter(map(zip(xs,ys),sum),P),T): the binary
+        intermediate feeds filter as well as map.
         """
         if map_prim is None:
             return False
@@ -881,6 +887,220 @@ class PlanComposer:
                              for v in svals) == exp_key:
                         sfrag = self._extend_frag(
                             mfrag, map_prim, sargs, slam)
+                        self._finish(objective, res, sfrag)
+                        return True
+                except Exception:
+                    continue
+            # GEN-SYNTH-3: filter fusion over the binary intermediate.
+            # M = map(Z, Q) banked as mfrag/map_vals above; try
+            # filter(M, pred) for banked BOOL predicates, then the
+            # map(F, L) lookahead. The multiset pre-filter inside is
+            # sound (filter only removes elements), so this extends
+            # attention-order completion to filter without weakening
+            # the economics.
+            if self._complete_filtered(
+                    objective, res, banked, prims, bank, map_prim,
+                    map_inputs, mfrag, map_vals,
+                    exp_key, first_goal_key):
+                return True
+        return False
+
+    def _complete_filtered(self, objective, res, banked, prims, bank,
+                           map_prim, map_inputs, mfrag, map_vals,
+                           exp_key, first_goal_key) -> bool:
+        """Filter fusion over a binary intermediate; then map lookahead.
+
+        GEN-SYNTH-3: for M = map(Z, Q) (mfrag, map_vals from
+        _complete_mapped), try filter(M, pred) for every BOOL-output
+        predicate lambda in the bank that behaviorally executes on M's
+        elements, then try completing each filtered F to the goal via
+        map(F, L) with the sound first-element pre-filter.
+
+        Sound pruning (not heuristics):
+        1. Multiset inclusion: filter only removes elements, so for
+           filter(M, pred) to equal the goal, every goal element must
+           occur in M (per example, as a sub-multiset). M failing this
+           cannot yield the goal under any predicate -- skip all.
+        2. First-element pre-filter for the map(F, L) head: L must map
+           F's first element to the goal's first element (same argument
+           as the GEN-SYNTH-2 map lookahead).
+        Bounds: predicates drawn from the forbidden-filtered bank
+        (GEN-XDOM-1 repair holds -- prims is the filtered pool, and the
+        bank was built from it); per-predicate budget check. Returns
+        True if the goal was reached (res finished via _finish).
+        """
+        filter_prim = next(
+            (q for q in prims if q.name == "filter"), None)
+        if filter_prim is None or not _outputs_goal(
+                filter_prim, objective.output_kind):
+            return False
+        f_inputs = list(filter_prim.inputs.items())
+        fcoll = [(nn, ss) for nn, ss in f_inputs
+                 if ss.kind is not Kind.CALLABLE]
+        ffn = [nn for nn, ss in f_inputs
+               if ss.kind is Kind.CALLABLE]
+        if not fcoll or not ffn:
+            return False
+        (fcname, fcspec), ffn_name = fcoll[0], ffn[0]
+        # Sound pre-filters, per example (filter only removes elements;
+        # map preserves length):
+        # 1. direct_possible: filter(M,pred) == goal requires every goal
+        #    element to occur in M (sub-multiset). Strong and sound.
+        # 2. mapafter_possible: map(filter(M,pred),L) == goal requires
+        #    len(goal) <= len(M) (filter shrinks, map preserves). Sound;
+        #    the map(F,L) first-element pre-filter below does the
+        #    heavy pruning for this case.
+        # If neither holds for every example, no predicate can complete.
+        direct_possible = True
+        mapafter_possible = True
+        try:
+            for (m_ex, g_ex) in zip(map_vals,
+                                    [o for _, o in objective.examples]):
+                if not isinstance(g_ex, (list, tuple)):
+                    direct_possible = False
+                    mapafter_possible = False
+                    break
+                m_list = (m_ex if isinstance(m_ex, (list, tuple))
+                          else [])
+                if len(g_ex) > len(m_list):
+                    mapafter_possible = False
+                mc = {}
+                for v in m_list:
+                    k = self._value_key(v)
+                    mc[k] = mc.get(k, 0) + 1
+                for gv in g_ex:
+                    k = self._value_key(gv)
+                    if mc.get(k, 0) <= 0:
+                        direct_possible = False
+                        break
+                    mc[k] -= 1
+                if not direct_possible and not mapafter_possible:
+                    break
+        except Exception:
+            return False
+        if not direct_possible and not mapafter_possible:
+            return False
+        # Predicate lambdas: BOOL output, behaviorally viable on M's
+        # elements. The bank's lambdas are single-prim x -> Q(x, lit...)
+        # shapes; Q is often 2-input (greater_than(x, 10)), so an arity
+        # check on the underlying prim would wrongly drop them. Probe
+        # instead: a predicate is viable iff it executes on M's actual
+        # first element and returns a BOOL -- the bank's own behavioral
+        # discipline, applied to the real intermediate values.
+        preds = []
+        seen_bk = set()
+        m_first_probe = None
+        try:
+            if map_vals and map_vals[0]:
+                m_first_probe = map_vals[0][0]
+        except Exception:
+            pass
+
+        def _pred_takes(lam):
+            if m_first_probe is None:
+                return False
+            try:
+                pk = self._probe_first(lam, m_first_probe)
+            except Exception:
+                return False
+            return (isinstance(pk, tuple) and len(pk) == 2
+                    and pk[0] == "bool")
+        try:
+            all_lams = bank.entries
+        except Exception:
+            all_lams = []
+        for lam in all_lams:
+            try:
+                if lam.output_kind.kind.name != "BOOL":
+                    continue
+            except Exception:
+                continue
+            if lam.behavior_key in seen_bk:
+                continue
+            if not _pred_takes(lam):
+                continue
+            seen_bk.add(lam.behavior_key)
+            preds.append(lam)
+        if not preds:
+            return False
+        # map head for the F -> goal lookahead (same shape as the
+        # GEN-SYNTH-2 map completion).
+        coll = [(nn, ss) for nn, ss in map_inputs
+                if ss.kind is not Kind.CALLABLE]
+        fn_name = [nn for nn, ss in map_inputs
+                   if ss.kind is Kind.CALLABLE]
+        if not coll or not fn_name:
+            return False
+        (cname, cspec), fn_name = coll[0], fn_name[0]
+        static_lams = bank.for_element_kind(
+            map_prim.output.args[0] if map_prim.output.args else None)
+        for pred in preds:
+            if res.candidates_evaluated >= objective.max_candidates:
+                res.search_exhausted = True
+                return False
+            fargs = {fcname: mfrag.out_ref, ffn_name: pred.ref}
+            fplan = self._plan_from_frag(
+                objective, mfrag, filter_prim, fargs)
+            if fplan is None:
+                res.refused_type_incoherent += 1
+                continue
+            fvals = self._exec_vals(fplan, objective)
+            res.candidates_evaluated += 1
+            if fvals is None:
+                continue
+            if direct_possible:
+                try:
+                    if tuple(self._value_key(v) for v in fvals) == exp_key:
+                        ffrag = self._extend_frag(
+                            mfrag, filter_prim, fargs, pred)
+                        self._finish(objective, res, ffrag)
+                        return True
+                except Exception:
+                    pass
+            fkey = ("filter", tuple(self._value_key(v) for v in fvals),
+                    pred.behavior_key)
+            if fkey in banked:
+                ffrag = banked[fkey][0]
+            else:
+                ffrag = self._extend_frag(
+                    mfrag, filter_prim, fargs, pred)
+                try:
+                    banked[fkey] = (ffrag, fvals, filter_prim.output)
+                except Exception:
+                    pass
+            # map(F, L) lookahead with the sound first-element
+            # pre-filter. Only when the length check allows it; skipped
+            # for scalar goals (first_goal_key None) or empty F.
+            if not mapafter_possible or first_goal_key is None:
+                continue
+            try:
+                f_first = (fvals[0][0] if fvals and fvals[0]
+                           else None)
+            except Exception:
+                continue
+            if f_first is None:
+                continue
+            for slam in static_lams:
+                if self._probe_first(slam, f_first) != first_goal_key:
+                    continue
+                if res.candidates_evaluated >= objective.max_candidates:
+                    res.search_exhausted = True
+                    return False
+                sargs = {cname: ffrag.out_ref, fn_name: slam.ref}
+                splan = self._plan_from_frag(
+                    objective, ffrag, map_prim, sargs)
+                if splan is None:
+                    res.refused_type_incoherent += 1
+                    continue
+                svals = self._exec_vals(splan, objective)
+                res.candidates_evaluated += 1
+                if svals is None:
+                    continue
+                try:
+                    if tuple(self._value_key(v)
+                             for v in svals) == exp_key:
+                        sfrag = self._extend_frag(
+                            ffrag, map_prim, sargs, slam)
                         self._finish(objective, res, sfrag)
                         return True
                 except Exception:
