@@ -644,7 +644,19 @@ class PlanComposer:
 
     def _candidate_prims(self, objective: CompositionObjective) -> List[Any]:
         prims = []
+        forbidden = set(objective.forbidden or ())
         for name in sorted(self._reg._prims.keys()):
+            if name in forbidden:
+                # GEN-XDOM-1 repair: the forbidden set is the causal-
+                # contrast's exclusion list. It must be honored by EVERY
+                # consumer of the candidate pool -- previously the lambda
+                # bank was built from the unfiltered pool, so a forbidden
+                # (distilled) technique leaked back in as a bank lambda and
+                # the contrast was vacuous for any objective with list
+                # params (exactly the cross-domain collection case). The
+                # bank, the forward loop, and the head loop all draw from
+                # this list, so filtering here is the single repair point.
+                continue
             p = self._reg._prims[name]
             if objective.pure_only and tuple(p.effects) != (Effect.PURE,):
                 continue
