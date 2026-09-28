@@ -72,7 +72,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from swarm_engine.primitives.core import (
-    ANY, CALLABLE, NUM, STR, Effect, Kind, TypeSpec, infer,
+    ANY, CALLABLE, LIST, NUM, STR, Effect, Kind, TypeSpec, infer,
 )
 
 
@@ -163,6 +163,10 @@ class PlanComposer:
         res = ComposeResult(plan=None, composed_of=[],
                             examples_total=len(objective.examples))
         self._literals = self._literals_from_examples(objective)
+        # GEN-SYNTH-2 / GEN-XDOM-1: the pair-lambda cache is per-compose.
+        # A cached lambda built from an allowed prim must never leak into
+        # a later contrast run where that prim is forbidden.
+        self._pair_lam_cache = {}
         # Forward (bottom-up) behavior-banked search: builds
         # observationally-distinct values layer by layer from the params,
         # checking the goal examples after each layer. Example-driven, not
@@ -258,12 +262,42 @@ class PlanComposer:
                 elif (len(callables) == 1 and len(inputs) == 2
                         and prim.name in BANK_HO_PRIMS):
                     self._bank_higher(objective, res, banked, snapshot,
-                                      prim, inputs, bank, new_frontier)
+                                      prim, inputs, bank, new_frontier,
+                                      prims)
                 if res.search_exhausted:
                     return res
             if not new_frontier:
                 break
             frontier = new_frontier
+
+        # ---- binary intermediates post-pass (GEN-SYNTH-2) ----------------
+        # One banking pass for 2-input LIST-output prims over the banked
+        # set, AFTER the forward loop. This is what lets a binary
+        # combination of derived values (e.g. zip(map(xs, T), map(ys, T)))
+        # become an intermediate feeding a higher-order head. It runs
+        # post-loop (not in-loop) because the in-loop version at depth 3
+        # let level-2 unary banking consume the whole budget before any
+        # head was tried (measured: 16136 unary, 0 heads). One pass at
+        # depth 2 keeps the economics sane. Bounds: both sides must be
+        # param-derived (uses_param), pairs ordered by combined fragment
+        # size (smallest first), per-prim pair cap. The GEN-XDOM-1
+        # forbidden filter applies (prims is the filtered pool).
+        # GEN-SYNTH-2 post-pass: bank binary LIST-output applications as
+        # intermediates for higher-order operators. Skipped for non-list
+        # goals: the post-pass targets LIST->LIST patterns (binary
+        # intermediate feeding map/filter); for scalar goals it only
+        # consumes budget and perturbs the GEN-SYNTH-1 search trajectory.
+        goal_is_list = False
+        try:
+            goal_is_list = objective.output_kind.kind.name == "LIST"
+        except Exception:
+            pass
+        if goal_is_list:
+            if self._bank_binary_postpass(objective, res, banked, prims,
+                                           bank):
+                return res
+        if res.search_exhausted:
+            return res
 
         # ---- backward: heads over banked args ----------------------------
         # Value-outer ordering: for each banked value (most promising
@@ -309,16 +343,28 @@ class PlanComposer:
         outputs_vary = (len({self._value_key(exp)
                              for _, exp in examples}) > 1)
 
+        def _is_pair_valued(vkind: Any) -> bool:
+            try:
+                return (vkind.kind.name == "LIST" and vkind.args
+                        and vkind.args[0].kind.name == "LIST")
+            except Exception:
+                return False
+
         def vsort(kv):
             frag = kv[1][0]
+            vkind = kv[1][2]
             # Stable sort: preserves bank insertion order within groups.
             # Map/filter values (len=2) precede unary (len=1) precede param.
             # Prefer map over filter: map transforms elements (productive
             # for reducers like sum), filter only subsets.
+            # GEN-SYNTH-2: pair-valued collections (binary intermediates
+            # like zip) sort before other collections -- they are the
+            # productive inputs to the (coll, fn) head shape.
             used = frag.used
             is_map = 'map' in used
-            return (not frag.uses_param, -len(used),
-                    0 if is_map else 1)
+            return (not frag.uses_param,
+                    0 if _is_pair_valued(vkind) else 1,
+                    -len(used), 0 if is_map else 1)
         ordered_values = sorted(banked.items(), key=vsort)
 
         for key, (frag, vals, _p) in ordered_values:
@@ -384,7 +430,19 @@ class PlanComposer:
                             elem_kind = prim.output.args[0]
                     except Exception:
                         pass
-                    for lam in bank.for_element_kind(elem_kind):
+                    use_lambdas = bank.for_element_kind(elem_kind)
+                    # GEN-SYNTH-2: for pair-valued collections (binary
+                    # intermediates like zip), the pair-element lambdas
+                    # REPLACE the static bank -- the static lambdas were
+                    # probed on NUM/STR domains and are meaningless over
+                    # pairs; the pair lambdas are the same prims probed
+                    # correctly. This also keeps the head budget sane.
+                    try:
+                        if _is_pair_valued(vkind):
+                            use_lambdas = self._pair_lambdas(vals, prims)
+                    except Exception:
+                        pass
+                    for lam in use_lambdas:
                         if res.candidates_evaluated >= \
                                 objective.max_candidates:
                             res.search_exhausted = True
@@ -518,7 +576,7 @@ class PlanComposer:
             new_frontier.append(bkey)
 
     def _bank_higher(self, objective, res, banked, snapshot, prim,
-                     inputs, bank, new_frontier) -> None:
+                     inputs, bank, new_frontier, prims) -> None:
         """Bank (collection, fn) applications (no goal check)."""
         coll = [(n, s) for n, s in inputs if s.kind is not Kind.CALLABLE][0]
         fn_name = [n for n, s in inputs if s.kind is Kind.CALLABLE][0]
@@ -541,7 +599,18 @@ class PlanComposer:
                 continue
             if not all(isinstance(v, (list, tuple)) for v in vals):
                 continue
-            for lam in lambdas:
+            # GEN-SYNTH-2: pair-valued collections (e.g. banked zip
+            # intermediates) get pair-element lambdas (x -> sum(x)) built
+            # from their actual values INSTEAD of the static bank (see
+            # the head loop for why).
+            use_lambdas = lambdas
+            try:
+                if (vkind.kind.name == "LIST" and vkind.args
+                        and vkind.args[0].kind.name == "LIST"):
+                    use_lambdas = self._pair_lambdas(vals, prims)
+            except Exception:
+                pass
+            for lam in use_lambdas:
                 if res.candidates_evaluated >= objective.max_candidates:
                     res.search_exhausted = True
                     return
@@ -562,6 +631,381 @@ class PlanComposer:
                 nfrag = self._extend_frag(frag, prim, args, lam)
                 banked[bkey] = (nfrag, out_vals, prim.output)
                 new_frontier.append(bkey)
+
+    def _bank_binary_postpass(self, objective, res, banked,
+                               prims, bank) -> bool:
+        """Bank binary LIST-output applications; complete them to goal.
+
+        GEN-SYNTH-2 post-pass (see the call site for why it runs after
+        the forward loop). Returns True if the goal was reached (res
+        finished). For each banked pair (A, B) and each 2-input
+        LIST-output prim P (both inputs LIST-accepting): bank P(A, B).
+        When the result is pair-valued, bank map(result, x -> Q(x)) for
+        scalar-output pair lambdas Q, and -- crucially -- try to
+        COMPLETE each such M to the goal right away: if M matches, or
+        if map(M, L) matches for a static lambda L, finish immediately.
+        This is what crosses plans like map(map(zip(xs,ys),sum),T):
+        the binary intermediate is completed in attention order instead
+        of waiting for the value-outer head loop to reach it (measured:
+        the right intermediate ranked 1743rd there).
+
+        The lambda pre-filter is SOUND pruning, not a heuristic: for
+        map(M, L) to equal the goal, L must map M's first element to
+        the goal's first element; lambdas failing that necessary
+        condition cannot match, so only passers get full plans.
+        Bounds: both sides param-derived, pairs by combined size,
+        per-prim cap, map only, scalar Q only. GEN-XDOM-1 forbidden
+        filter applies throughout (prims is the filtered pool).
+        """
+        BINARY_POSTPASS_PAIR_CAP = 128
+        exp_key = tuple(self._value_key(ex) for _, ex in objective.examples)
+        # first_goal_key: for the sound first-element pre-filter. Only
+        # defined when the goal output is a non-empty list (the post-pass
+        # completes list-valued intermediates); None for scalar goals.
+        first_goal_key = None
+        if objective.examples:
+            first_out = objective.examples[0][1]
+            if isinstance(first_out, (list, tuple)) and len(first_out) > 0:
+                first_goal_key = self._value_key(first_out[0])
+        cands = []
+        for key, (frag, vals, _p) in banked.items():
+            if not frag.uses_param:
+                continue
+            cands.append((key, frag, vals))
+        cands.sort(key=lambda kv: len(kv[1].used))
+        map_prim = next((q for q in prims if q.name == "map"), None)
+        if map_prim is None or not _outputs_goal(map_prim,
+                                                 objective.output_kind):
+            map_prim = None
+        else:
+            map_inputs = list(map_prim.inputs.items())
+        for prim in prims:
+            if prim.name in objective.forbidden:
+                continue
+            inputs = list(prim.inputs.items())
+            if len(inputs) != 2:
+                continue
+            if any(s.kind is Kind.CALLABLE for _, s in inputs):
+                continue
+            if prim.output.kind.name != "LIST":
+                continue
+            (aname, aspec), (bname, bspec) = inputs[0], inputs[1]
+            try:
+                if not (aspec.accepts(LIST()) and bspec.accepts(LIST())):
+                    continue
+            except Exception:
+                continue
+            tried = 0
+            n = len(cands)
+            order = sorted(
+                ((i, j) for i in range(n) for j in range(i, n)),
+                key=lambda ij: (len(cands[ij[0]][1].used)
+                                + len(cands[ij[1]][1].used), ij[0], ij[1]))
+            for i, j in order:
+                if tried >= BINARY_POSTPASS_PAIR_CAP:
+                    break
+                if res.candidates_evaluated >= objective.max_candidates:
+                    res.search_exhausted = True
+                    return False
+                key1, frag1, _v1 = cands[i]
+                key2, frag2, _v2 = cands[j]
+                _, _, vkind1 = banked[key1]
+                _, _, vkind2 = banked[key2]
+                try:
+                    if not aspec.accepts(vkind1):
+                        continue
+                    if not bspec.accepts(vkind2):
+                        continue
+                except Exception:
+                    continue
+                tried += 1
+                frags = [frag1] if key1 == key2 else [frag1, frag2]
+                args = {aname: frag1.out_ref, bname: frag2.out_ref}
+                plan = self._plan_from_frags(objective, frags, prim, args)
+                if plan is None:
+                    res.refused_type_incoherent += 1
+                    continue
+                out_vals = self._exec_vals(plan, objective)
+                res.candidates_evaluated += 1
+                if out_vals is None:
+                    continue
+                bkey = (prim.name, key1, key2,
+                        tuple(self._value_key(v) for v in out_vals))
+                if bkey in banked:
+                    res.pruned_equivalent += 1
+                    continue
+                nfrag = self._extend_frags(frags, prim, args, None)
+                banked[bkey] = (nfrag, out_vals, prim.output)
+                if self._complete_mapped(
+                        objective, res, banked, prims, bank, map_prim,
+                        map_inputs if map_prim else None,
+                        bkey, nfrag, out_vals,
+                        exp_key, first_goal_key):
+                    return True
+        return False
+
+    def _complete_mapped(self, objective, res, banked, prims, bank,
+                         map_prim, map_inputs, bkey, nfrag, out_vals,
+                         exp_key, first_goal_key) -> bool:
+        """Bank map(pair_coll, Q) and try completing it to the goal.
+
+        GEN-SYNTH-2: fused second step of the binary post-pass. Returns
+        True if the goal was reached (res finished via _finish).
+        """
+        if map_prim is None:
+            return False
+        try:
+            vkind = banked[bkey][2]
+            if not (vkind.kind.name == "LIST" and vkind.args
+                    and vkind.args[0].kind.name == "LIST"):
+                return False
+        except Exception:
+            return False
+        if not all(isinstance(v, (list, tuple)) for v in out_vals):
+            return False
+        pair_lams = [lam for lam in self._pair_lambdas(out_vals, prims)
+                     if lam.output_kind.kind.name != "LIST"]
+        if not pair_lams:
+            return False
+        coll = [(nn, ss) for nn, ss in map_inputs
+                if ss.kind is not Kind.CALLABLE]
+        fn_name = [nn for nn, ss in map_inputs
+                   if ss.kind is Kind.CALLABLE]
+        if not coll or not fn_name:
+            return False
+        (cname, cspec), fn_name = coll[0], fn_name[0]
+        try:
+            if not cspec.accepts(vkind):
+                return False
+        except Exception:
+            return False
+        # Static lambdas for the completion head, with the sound
+        # first-element pre-filter (see post-pass docstring).
+        # Pre-filter by input kind: only lambdas whose prim accepts the
+        # element kind can map elements; this cuts the 972-entry bank
+        # to the relevant subset before probing.
+        elem_kind = None
+        try:
+            if map_prim.output.args:
+                elem_kind = map_prim.output.args[0]
+        except Exception:
+            pass
+        static_lams = bank.for_element_kind(elem_kind)
+        # m_elem_kind: the element kind of M = map(Z, Q) is Q's output
+        # kind (lam.output_kind), NOT Z's kind. (Bug fix: was using
+        # Z's LIST-of-pairs kind, which filtered out scalar lambdas.)
+        if True:
+            prim_by_name = {p.name: p for p in prims}
+            def _takes_elem(lam, m_ek):
+                try:
+                    p = prim_by_name.get(lam.used[0] if lam.used else "")
+                    if p is None or len(p.inputs) != 1:
+                        return False
+                    ispec = list(p.inputs.values())[0]
+                    return bool(ispec.accepts(m_ek))
+                except Exception:
+                    return False
+            filtered_by_q = {}
+        first_elem = out_vals[0][0] if out_vals and out_vals[0] else None
+        for lam in pair_lams:
+            if res.candidates_evaluated >= objective.max_candidates:
+                res.search_exhausted = True
+                return False
+            args = {cname: nfrag.out_ref, fn_name: lam.ref}
+            plan = self._plan_from_frag(objective, nfrag, map_prim, args)
+            if plan is None:
+                res.refused_type_incoherent += 1
+                continue
+            map_vals = self._exec_vals(plan, objective)
+            res.candidates_evaluated += 1
+            if map_vals is None:
+                continue
+            try:
+                if tuple(self._value_key(v) for v in map_vals) == exp_key:
+                    mfrag = self._extend_frag(nfrag, map_prim, args, lam)
+                    self._finish(objective, res, mfrag)
+                    return True
+            except Exception:
+                continue
+            mkey = ("map", bkey, lam.behavior_key,
+                    tuple(self._value_key(v) for v in map_vals))
+            if mkey not in banked:
+                mfrag = self._extend_frag(nfrag, map_prim, args, lam)
+                banked[mkey] = (mfrag, map_vals, map_prim.output)
+            else:
+                mfrag = banked[mkey][0]
+            # Completion: map(M, L) for static L passing the
+            # first-element filter. Only for binary intermediates built
+            # directly from params (len(used)<=1): the canonical
+            # pairwise combinations. This bounds the lookahead cost;
+            # deeper intermediates are still banked for the head loop.
+            # Skipped for scalar goals (first_goal_key None): the
+            # completion targets list-valued goals only.
+            if first_elem is None or len(nfrag.used) > 1:
+                continue
+            if first_goal_key is None:
+                continue
+            try:
+                m_first = map_vals[0][0] if map_vals and map_vals[0] else None
+            except Exception:
+                continue
+            if m_first is None:
+                continue
+            # Per-Q static-lambda subset: only lambdas whose prim accepts
+            # M's element kind (Q's output kind). Cached per Q.
+            m_ek = lam.output_kind
+            qkey = _LambdaBank._val_key(
+                (m_ek.kind.name,
+                 tuple(a.kind.name for a in (m_ek.args or ()))))
+            if qkey not in filtered_by_q:
+                filtered_by_q[qkey] = [
+                    sl for sl in static_lams if _takes_elem(sl, m_ek)]
+            for slam in filtered_by_q[qkey]:
+                if self._probe_first(slam, m_first) != first_goal_key:
+                    continue
+                if res.candidates_evaluated >= objective.max_candidates:
+                    res.search_exhausted = True
+                    return False
+                sargs = {cname: mfrag.out_ref, fn_name: slam.ref}
+                splan = self._plan_from_frag(
+                    objective, mfrag, map_prim, sargs)
+                if splan is None:
+                    res.refused_type_incoherent += 1
+                    continue
+                svals = self._exec_vals(splan, objective)
+                res.candidates_evaluated += 1
+                if svals is None:
+                    continue
+                try:
+                    if tuple(self._value_key(v)
+                             for v in svals) == exp_key:
+                        sfrag = self._extend_frag(
+                            mfrag, map_prim, sargs, slam)
+                        self._finish(objective, res, sfrag)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def _probe_first(self, lam: Any, elem: Any) -> Any:
+        """Execute a single-prim lambda on one element (value key).
+
+        Sound pre-filter for the completion head: None if the lambda
+        cannot be probed (then the caller tries the full plan).
+        """
+        try:
+            steps = lam.ref["$lambda"]["steps"]
+            if len(steps) != 1:
+                return None
+            s = steps[0]
+            args = {}
+            for k, v in s["args"].items():
+                if isinstance(v, dict) and v.get("$var"):
+                    args[k] = elem
+                else:
+                    args[k] = v
+            probe = {"name": "probe_first", "params": {},
+                     "steps": [{"id": "q0", "op": s["op"], "args": args}],
+                     "output": {"$step": "q0"}}
+            r = self._composer.execute_sync(probe, {})
+            if not r.get("success"):
+                return None
+            return self._value_key(r.get("value"))
+        except Exception:
+            return None
+
+    def _pair_lambdas(self, vals: tuple, prims: List[Any]) -> List[Any]:
+        """Lambdas over pair elements: x -> Q(x) for 1-input prims Q.
+
+        GEN-SYNTH-2: the static _LambdaBank probes lambdas on NUM/STR
+        domains, so a lambda like x -> sum(x) over zip-pairs can never
+        survive its probe (sum of a number fails). These are built lazily
+        from the ACTUAL pair values of a banked collection, probed on
+        those pairs, and deduplicated by observed behavior -- the same
+        discipline as the bank. Q is drawn from the forbidden-filtered
+        pool, so the GEN-XDOM-1 repair holds for this path too.
+        Results are cached per compose() call.
+        """
+        cache = getattr(self, "_pair_lam_cache", None)
+        if cache is None:
+            cache = {}
+            self._pair_lam_cache = cache
+        ckey = tuple(sorted(set(
+            _LambdaBank._val_key(p) for v in vals
+            for p in (v if isinstance(v, (list, tuple)) else []))))
+        if ckey in cache:
+            return cache[ckey]
+        pairs = []
+        seen = set()
+        for v in vals:
+            if not isinstance(v, (list, tuple)):
+                continue
+            for p in v:
+                if not isinstance(p, (list, tuple)):
+                    continue
+                pk = _LambdaBank._val_key(p)
+                if pk not in seen:
+                    seen.add(pk)
+                    pairs.append(p)
+        out: List[Any] = []
+        if pairs:
+            seen_behaviors: Dict[tuple, bool] = {}
+            for prim in prims:
+                if prim.output.kind is Kind.CALLABLE:
+                    continue
+                inputs = list(prim.inputs.items())
+                if len(inputs) != 1:
+                    continue
+                iname, ispec = inputs[0]
+                try:
+                    if ispec.kind is Kind.CALLABLE:
+                        continue
+                    if not ispec.accepts(LIST()):
+                        continue
+                except Exception:
+                    continue
+                ref = {"$lambda": {
+                    "params": ["x"],
+                    "steps": [{"id": "t1", "op": prim.name,
+                               "args": {iname: {"$var": "x"}}}],
+                    "output": {"$step": "t1"},
+                }}
+                key = self._probe_lambda(prim, ref, pairs)
+                if key is None or key in seen_behaviors:
+                    continue
+                seen_behaviors[key] = True
+                out.append(_LambdaEntry(
+                    ref=ref, output_kind=prim.output,
+                    used=[prim.name], behavior_key=key))
+        cache[ckey] = out
+        return out
+
+    def _probe_lambda(self, prim: Any, ref: Dict[str, Any],
+                      pairs: list) -> Optional[tuple]:
+        """Behavior key of a pair-lambda on actual pair values.
+
+        Mirrors _LambdaBank._behavior_key, but probes on the banked
+        pairs instead of the static NUM/STR domains. None if any
+        application fails.
+        """
+        import json as _json
+        outs = []
+        for p in pairs:
+            steps = []
+            for i, s in enumerate(ref["$lambda"]["steps"]):
+                steps.append({**s, "id": f"q{i}"})
+            probe = {"name": "pair_probe", "params": {},
+                     "steps": steps, "output": {"$step": "q0"}}
+            s = _json.dumps(probe).replace('{"$var": "x"}',
+                                           _json.dumps(p))
+            try:
+                r = self._composer.execute_sync(_json.loads(s), {})
+            except Exception:
+                return None
+            if not r.get("success"):
+                return None
+            outs.append(_LambdaBank._val_key(r.get("value")))
+        return tuple(outs)
 
     def _try_head_unary(self, objective, res, banked, prim,
                         input_spec, exp_key) -> bool:
@@ -605,7 +1049,7 @@ class PlanComposer:
         return False
 
     def _try_head_higher(self, objective, res, banked, prim,
-                         inputs, bank, exp_key) -> bool:
+                         inputs, bank, exp_key, prims) -> bool:
         """Try (collection, fn) prim as head. True if found."""
         coll = [(n, s) for n, s in inputs
                 if s.kind is not Kind.CALLABLE][0]
@@ -621,6 +1065,14 @@ class PlanComposer:
         except Exception:
             pass
         lambdas = bank.for_element_kind(elem_kind)
+
+        def _pair_elem_kind(vkind: Any) -> bool:
+            try:
+                return (vkind.kind.name == "LIST" and vkind.args
+                        and vkind.args[0].kind.name == "LIST")
+            except Exception:
+                return False
+
         def vsort(kv):
             frag = kv[1][0]
             return (not frag.uses_param,
@@ -636,7 +1088,14 @@ class PlanComposer:
                 continue
             if not all(isinstance(v, (list, tuple)) for v in vals):
                 continue
-            for lam in lambdas:
+            # GEN-SYNTH-2: pair-element lambdas for banked pair
+            # collections (see _bank_higher).
+            use_lambdas = lambdas
+            if _pair_elem_kind(vkind):
+                pair_lams = self._pair_lambdas(vals, prims)
+                if pair_lams:
+                    use_lambdas = list(lambdas) + pair_lams
+            for lam in use_lambdas:
                 if res.candidates_evaluated >= objective.max_candidates:
                     res.search_exhausted = True
                     return False
