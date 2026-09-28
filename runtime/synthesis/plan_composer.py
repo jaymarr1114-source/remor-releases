@@ -108,6 +108,10 @@ class ComposeResult:
     refused_type_incoherent: int = 0
     search_exhausted: bool = False
     bank_size: int = 0                  # behavior-distinct lambdas banked
+    # GEN-SYNTH-4: map-completions of binary intermediates banked during
+    # the binary post-pass, in attention order. The nested binary pass
+    # feeds these into a second level of binary combination.
+    nested_candidates: List[Any] = field(default_factory=list)
 
     @property
     def found(self) -> bool:
@@ -167,6 +171,10 @@ class PlanComposer:
         # A cached lambda built from an allowed prim must never leak into
         # a later contrast run where that prim is forbidden.
         self._pair_lam_cache = {}
+        # GEN-SYNTH-4: per-compose stash of the distinct probe pairs behind
+        # each cached pair-lambda set, for the sound first-element
+        # pre-filter (zero new evaluations).
+        self._pair_lam_pairs = {}
         # Forward (bottom-up) behavior-banked search: builds
         # observationally-distinct values layer by layer from the params,
         # checking the goal examples after each layer. Example-driven, not
@@ -736,6 +744,15 @@ class PlanComposer:
                     continue
                 nfrag = self._extend_frags(frags, prim, args, None)
                 banked[bkey] = (nfrag, out_vals, prim.output)
+                # GEN-SYNTH-4: nested binary combination FIRST (cheap,
+                # targeted). Derives M = map(B, Q) banking them, then
+                # tries P(M, v) / P(v, M). Runs before the expensive
+                # _complete_mapped so nesting gets attention while
+                # budget remains.
+                if self._nest_binary(
+                        objective, res, banked, prims, bank,
+                        bkey, nfrag, out_vals, exp_key):
+                    return True
                 if self._complete_mapped(
                         objective, res, banked, prims, bank, map_prim,
                         map_inputs if map_prim else None,
@@ -838,6 +855,12 @@ class PlanComposer:
             if mkey not in banked:
                 mfrag = self._extend_frag(nfrag, map_prim, args, lam)
                 banked[mkey] = (mfrag, map_vals, map_prim.output)
+                # GEN-SYNTH-4: record map-completions of binary
+                # intermediates for the nested binary pass.
+                try:
+                    res.nested_candidates.append(mkey)
+                except Exception:
+                    pass
             else:
                 mfrag = banked[mkey][0]
             # Completion: map(M, L) for static L passing the
@@ -1107,6 +1130,308 @@ class PlanComposer:
                     continue
         return False
 
+    def _nest_binary(self, objective, res, banked, prims, bank,
+                     bkey, bfrag, bvals, exp_key) -> bool:
+        """Interleaved nested binary combination (GEN-SYNTH-4).
+
+        Called from _bank_binary_postpass BEFORE the expensive
+        _complete_mapped, for each binary result B. Derives the
+        map-completions M = map(B, Q) (banking them so the later
+        _complete_mapped reuses them without re-evaluation), then
+        builds nested shapes P(M, v) and P(v, M) where v ranges over
+        the plan params, completing each nested N with the lean
+        pair-lambda direct match. This is the missing wiring the
+        exhaustion diagnosis named: the post-pass never fed a
+        completed intermediate back into a binary prim. Runs before
+        the expensive completion so nesting gets attention while
+        budget remains. Returns True if the goal was reached.
+        """
+        map_prim = next((q for q in prims if q.name == "map"), None)
+        if map_prim is None or not _outputs_goal(
+                map_prim, objective.output_kind):
+            return False
+        map_inputs = list(map_prim.inputs.items())
+        coll = [(nn, ss) for nn, ss in map_inputs
+                if ss.kind is not Kind.CALLABLE]
+        fn_name = [nn for nn, ss in map_inputs
+                   if ss.kind is Kind.CALLABLE]
+        if not coll or not fn_name:
+            return False
+        (cname, cspec), fn_name = coll[0], fn_name[0]
+        # Guard: nesting needs B pair-valued (each example a list of
+        # 2-element scalar pairs) -- pair-lambdas probe pairs. Skip
+        # non-pair B's (e.g. append) without spending budget.
+        def _scalar(x):
+            return isinstance(x, (int, float, str, bool)) or x is None
+        if not all(isinstance(v, (list, tuple)) and
+                   all(isinstance(p, (list, tuple)) and len(p) == 2
+                       and all(_scalar(e) for e in p) for p in v)
+                   for v in bvals):
+            return False
+        # Derive M = map(B, Q) for each pair-lambda Q, banking them.
+        # _complete_mapped (called after) will find them banked and
+        # skip re-evaluation.
+        pair_lams = [lam for lam in self._pair_lambdas(bvals, prims)
+                     if lam.output_kind.kind.name != "LIST"]
+        if not pair_lams:
+            return False
+        mkeys = []
+        for lam in pair_lams:
+            if res.candidates_evaluated >= objective.max_candidates:
+                res.search_exhausted = True
+                return False
+            args = {cname: bfrag.out_ref, fn_name: lam.ref}
+            plan = self._plan_from_frag(objective, bfrag, map_prim, args)
+            if plan is None:
+                res.refused_type_incoherent += 1
+                continue
+            map_vals = self._exec_vals(plan, objective)
+            res.candidates_evaluated += 1
+            if map_vals is None:
+                continue
+            try:
+                if tuple(self._value_key(v)
+                         for v in map_vals) == exp_key:
+                    mfrag = self._extend_frag(bfrag, map_prim, args, lam)
+                    self._finish(objective, res, mfrag)
+                    return True
+            except Exception:
+                pass
+            mkey = ("map", bkey, lam.behavior_key,
+                    tuple(self._value_key(v) for v in map_vals))
+            if mkey not in banked:
+                mfrag = self._extend_frag(bfrag, map_prim, args, lam)
+                banked[mkey] = (mfrag, map_vals, map_prim.output)
+                try:
+                    res.nested_candidates.append(mkey)
+                except Exception:
+                    pass
+            mkeys.append(mkey)
+        # binary prims: 2-input, LIST-output, both inputs LIST-accepting,
+        # AND pair-valued output (LIST of LIST) -- the nested N must be
+        # pair-valued for the lean pair-lambda completion. This restricts
+        # to zip-like prims, not append/concat.
+        bin_prims = []
+        for prim in prims:
+            if prim.name in objective.forbidden:
+                continue
+            inputs = list(prim.inputs.items())
+            if len(inputs) != 2:
+                continue
+            if any(s.kind is Kind.CALLABLE for _, s in inputs):
+                continue
+            try:
+                if prim.output.kind.name != "LIST":
+                    continue
+                if not (prim.output.args and
+                        prim.output.args[0].kind.name == "LIST"):
+                    continue
+            except Exception:
+                continue
+            (aname, aspec), (bname, bspec) = inputs[0], inputs[1]
+            try:
+                if not (aspec.accepts(LIST()) and bspec.accepts(LIST())):
+                    continue
+            except Exception:
+                continue
+            bin_prims.append((prim, aname, aspec, bname, bspec))
+        if not bin_prims:
+            return False
+        pkeys = [k for k in banked
+                 if isinstance(k, tuple) and k and k[0] == "param"]
+        if not pkeys:
+            return False
+        for mkey in mkeys:
+            if mkey not in banked:
+                continue
+            mfrag, mvals, mkind = banked[mkey]
+            if not mfrag.uses_param:
+                continue
+            for pkey in pkeys:
+                pfrag, pvals, pkind = banked[pkey]
+                for prim, aname, aspec, bname, bspec in bin_prims:
+                    for (k1, f1, kd1, k2, f2, kd2) in (
+                            (mkey, mfrag, mkind, pkey, pfrag, pkind),
+                            (pkey, pfrag, pkind, mkey, mfrag, mkind)):
+                        try:
+                            if not aspec.accepts(kd1):
+                                continue
+                            if not bspec.accepts(kd2):
+                                continue
+                        except Exception:
+                            continue
+                        if res.candidates_evaluated >= \
+                                objective.max_candidates:
+                            res.search_exhausted = True
+                            return False
+                        frags = [f1] if k1 == k2 else [f1, f2]
+                        args = {aname: f1.out_ref, bname: f2.out_ref}
+                        plan = self._plan_from_frags(
+                            objective, frags, prim, args)
+                        if plan is None:
+                            res.refused_type_incoherent += 1
+                            continue
+                        out_vals = self._exec_vals(plan, objective)
+                        res.candidates_evaluated += 1
+                        if out_vals is None:
+                            continue
+                        try:
+                            if tuple(self._value_key(v)
+                                     for v in out_vals) == exp_key:
+                                nfrag = self._extend_frags(
+                                    frags, prim, args, None)
+                                self._finish(objective, res, nfrag)
+                                return True
+                        except Exception:
+                            pass
+                        nkey = (prim.name, k1, k2,
+                                tuple(self._value_key(v)
+                                      for v in out_vals))
+                        if nkey in banked:
+                            res.pruned_equivalent += 1
+                            continue
+                        nfrag = self._extend_frags(
+                            frags, prim, args, None)
+                        banked[nkey] = (nfrag, out_vals, prim.output)
+                        if self._complete_nested(
+                                objective, res, banked, prims, bank,
+                                map_prim, cname, cspec, fn_name,
+                                nfrag, out_vals, prim.output, exp_key):
+                            return True
+        return False
+
+    def _complete_nested(self, objective, res, banked, prims, bank,
+                         map_prim, cname, cspec, fn_name,
+                         nfrag, out_vals, vkind, exp_key) -> bool:
+        """Lean pair-lambda direct match over a nested binary result.
+
+        GEN-SYNTH-4: for N = P(M, v), try map(N, Q) == goal for
+        pair-lambdas Q passing the sound first-element pre-filter.
+        Deliberately lean: no static-lambda lookahead, no filter
+        fusion on the nested level (documented next boundary). Returns
+        True if the goal was reached.
+        """
+        # pair-valued check (LIST of LIST)
+        try:
+            if not (vkind.kind.name == "LIST" and vkind.args
+                    and vkind.args[0].kind.name == "LIST"):
+                return False
+        except Exception:
+            return False
+        if not all(isinstance(v, (list, tuple)) for v in out_vals):
+            return False
+        # Guard: pair-lambdas probe JSON-scalar pairs. A nested result
+        # whose examples are not lists of 2-element scalar pairs (e.g.
+        # bytearray from an exotic binary prim) cannot be completed by
+        # pair-lambdas; skip soundly rather than crashing the probe.
+        def _scalar(x):
+            return isinstance(x, (int, float, str, bool)) or x is None
+        if not all(all(isinstance(p, (list, tuple)) and len(p) == 2
+                       and all(_scalar(e) for e in p) for p in v)
+                   for v in out_vals):
+            return False
+        pair_lams = [lam for lam in self._pair_lambdas(out_vals, prims)
+                     if lam.output_kind.kind.name != "LIST"]
+        if not pair_lams:
+            return False
+        # NOTE: No first-element pre-filter here. The pre-filter is
+        # sound for direct map(N,Q)==goal, but the static-lambda path
+        # needs Q's that produce an intermediate S (not directly the
+        # goal). Filtering would prune the Q's the static completion
+        # needs. The Q-loop evals are required anyway to bank S.
+        try:
+            if not cspec.accepts(vkind):
+                return False
+        except Exception:
+            return False
+        for lam in pair_lams:
+            if res.candidates_evaluated >= objective.max_candidates:
+                res.search_exhausted = True
+                return False
+            args = {cname: nfrag.out_ref, fn_name: lam.ref}
+            plan = self._plan_from_frag(objective, nfrag, map_prim, args)
+            if plan is None:
+                res.refused_type_incoherent += 1
+                continue
+            map_vals = self._exec_vals(plan, objective)
+            res.candidates_evaluated += 1
+            if map_vals is None:
+                continue
+            try:
+                if tuple(self._value_key(v)
+                         for v in map_vals) == exp_key:
+                    mfrag = self._extend_frag(nfrag, map_prim, args, lam)
+                    self._finish(objective, res, mfrag)
+                    return True
+            except Exception:
+                continue
+            mkey = ("map-nested", id(nfrag), lam.behavior_key,
+                    tuple(self._value_key(v) for v in map_vals))
+            if mkey not in banked:
+                mfrag = self._extend_frag(nfrag, map_prim, args, lam)
+                banked[mkey] = (mfrag, map_vals, map_prim.output)
+            else:
+                mfrag = banked[mkey][0]
+            # GEN-SYNTH-4: static-lambda completion over the nested
+            # scalar list S = map(N, Q). Tries map(S, L) == goal for
+            # static L (including distilled T), with the sound
+            # first-element pre-filter. This is what lets a distilled
+            # source technique remain causally necessary on nested
+            # tasks.
+            try:
+                s_first = map_vals[0][0] if map_vals and map_vals[0] \
+                    else None
+            except Exception:
+                continue
+            if s_first is None:
+                continue
+            # Static lambdas for S's element kind (Q's output kind).
+            try:
+                elem_kind = map_prim.output.args[0] if \
+                    map_prim.output.args else None
+                static_lams = bank.for_element_kind(elem_kind)
+            except Exception:
+                continue
+            s_ek = lam.output_kind
+            prim_by_name = {p.name: p for p in prims}
+            for slam in static_lams:
+                try:
+                    p = prim_by_name.get(
+                        slam.used[0] if slam.used else "")
+                    if p is None or len(p.inputs) != 1:
+                        continue
+                    ispec = list(p.inputs.values())[0]
+                    if not ispec.accepts(s_ek):
+                        continue
+                except Exception:
+                    continue
+                if self._probe_first(slam, s_first) != \
+                        self._value_key(objective.examples[0][1][0]):
+                    continue
+                if res.candidates_evaluated >= objective.max_candidates:
+                    res.search_exhausted = True
+                    return False
+                sargs = {cname: mfrag.out_ref, fn_name: slam.ref}
+                splan = self._plan_from_frag(
+                    objective, mfrag, map_prim, sargs)
+                if splan is None:
+                    res.refused_type_incoherent += 1
+                    continue
+                svals = self._exec_vals(splan, objective)
+                res.candidates_evaluated += 1
+                if svals is None:
+                    continue
+                try:
+                    if tuple(self._value_key(v)
+                             for v in svals) == exp_key:
+                        sfrag = self._extend_frag(
+                            mfrag, map_prim, sargs, slam)
+                        self._finish(objective, res, sfrag)
+                        return True
+                except Exception:
+                    continue
+        return False
+
     def _probe_first(self, lam: Any, elem: Any) -> Any:
         """Execute a single-prim lambda on one element (value key).
 
@@ -1198,7 +1523,68 @@ class PlanComposer:
                     ref=ref, output_kind=prim.output,
                     used=[prim.name], behavior_key=key))
         cache[ckey] = out
+        # GEN-SYNTH-4: stash the distinct probe pairs behind this set so
+        # the sound first-element pre-filter can map behaviors back to
+        # pairs with zero new evaluations.
+        try:
+            if getattr(self, "_pair_lam_pairs", None) is None:
+                self._pair_lam_pairs = {}
+            self._pair_lam_pairs[ckey] = pairs
+        except Exception:
+            pass
         return out
+
+    def _pair_lams_first_filtered(self, pair_lams: List[Any],
+                                    out_vals: tuple,
+                                    objective: CompositionObjective
+                                    ) -> List[Any]:
+        """Sound first-element pre-filter for pair-lambdas (GEN-SYNTH-4).
+
+        For map(Z, Q) to equal the goal, Q must map each example's first
+        pair to that example's first goal element. The probe behaviors
+        cached by _pair_lambdas already record Q's output on every
+        distinct pair, so this check costs zero new evaluations. Sound:
+        a Q that could match is never pruned -- the condition is
+        necessary, not heuristic. Only sharpens the economics.
+        """
+        try:
+            pairs = (getattr(self, "_pair_lam_pairs", None) or {}).get(
+                tuple(sorted(set(
+                    _LambdaBank._val_key(p) for v in out_vals
+                    for p in (v if isinstance(v, (list, tuple))
+                              else [])))))
+            if not pairs:
+                return pair_lams
+            pidx: Dict[Any, int] = {}
+            for i, p in enumerate(pairs):
+                k = _LambdaBank._val_key(p)
+                if k not in pidx:
+                    pidx[k] = i
+            goal_firsts = []
+            for _, g in objective.examples:
+                if not isinstance(g, (list, tuple)) or not g:
+                    return pair_lams
+                goal_firsts.append(_LambdaBank._val_key(g[0]))
+            out = []
+            for lam in pair_lams:
+                bk = lam.behavior_key
+                ok = True
+                for e, v in enumerate(out_vals):
+                    if not isinstance(v, (list, tuple)) or not v:
+                        ok = False
+                        break
+                    i = pidx.get(_LambdaBank._val_key(v[0]))
+                    if i is None or i >= len(bk):
+                        ok = False
+                        break
+                    if bk[i] != goal_firsts[e]:
+                        ok = False
+                        break
+                if ok:
+                    out.append(lam)
+            return out
+        except Exception:
+            return pair_lams
 
     def _probe_lambda(self, prim: Any, ref: Dict[str, Any],
                       pairs: list) -> Optional[tuple]:
