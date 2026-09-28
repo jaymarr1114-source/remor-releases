@@ -242,6 +242,12 @@ def _status_entry(probe, method: str,
     missing output file -> available False with the reason recorded.
     Probes never raise: a broken probe is itself evidence of
     unavailability.
+
+    Unavailable entries ALWAYS include `missing_substrate`: a
+    gap-registry-compatible target naming the missing runtime piece.
+    If the probe detail identifies a concrete substrate (ffmpeg, piper,
+    PIL, numpy), that name is used; otherwise a diagnostic gap name is
+    recorded (never "none reported").
     """
     try:
         ok, detail = probe()
@@ -256,7 +262,40 @@ def _status_entry(probe, method: str,
     }
     if not ok:
         entry["reason"] = detail
+        entry["missing_substrate"] = _infer_missing_substrate(detail, method)
     return entry
+
+
+def _infer_missing_substrate(detail: str, method: str) -> str:
+    """Infer a gap-registry-compatible missing-substrate name from probe detail.
+
+    Never returns "none reported": if no concrete substrate is identified,
+    returns a diagnostic gap name for the medium.
+    """
+    low = detail.lower()
+    # Concrete substrate names, in priority order
+    if "ffmpeg" in low:
+        return "ffmpeg"
+    if "piper" in low:
+        return "piper"
+    if "voice synthesis" in low or "tts" in low:
+        return "voice-substrate"
+    if "pil" in low or "pillow" in low:
+        return "pillow"
+    if "numpy" in low:
+        return "numpy"
+    if "substrate import failed" in low:
+        # Import failed but module not named in detail; use method as hint
+        if "video" in method.lower():
+            return "video-substrate"
+        if "voice" in method.lower() or "piper" in method.lower():
+            return "voice-substrate"
+        if "song" in method.lower():
+            return "song-substrate"
+        return "media-substrate"
+    # Fallback: diagnostic gap, never "none reported"
+    safe = "".join(c if c.isalnum() else "_" for c in method.lower())[:32]
+    return f"diagnostic-gap:{safe}"
 
 
 def status() -> Dict[str, Any]:
