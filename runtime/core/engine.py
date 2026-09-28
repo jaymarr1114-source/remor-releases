@@ -1073,6 +1073,24 @@ class SwarmEngine:
             if record.get("status", "active") != "active":
                 refused.append(record["name"])
                 continue
+            if (record.get("source") or "").startswith("verdict_promotion:"):
+                # Verdict-gated rehydration (V10-P4): a verdict-promoted
+                # technique is restored through the SAME trust story that
+                # admitted it -- the live verdict is re-derived at load
+                # time and the code re-promoted through the bridge. A
+                # superseded verdict, broken chain, or anchor mismatch
+                # refuses here; the capability is not resurrected. This
+                # is not the scanner lineage above (the two registration
+                # lineages stay un-conflated).
+                if self._rehydrate_verdict_promoted(record):
+                    restored.append(record["name"])
+                    self.provenance.log(
+                        record["capability_id"], "rehydrated",
+                        "verdict-promoted source restored at boot; "
+                        "verdict re-derived")
+                else:
+                    refused.append(record["name"])
+                continue
             candidate = AcquiredCandidate(
                 name=record["name"], source=record["source"],
                 code=record["code"], entrypoint=record["entrypoint"],
@@ -1161,6 +1179,60 @@ class SwarmEngine:
                 except Exception:
                     pass
         return {"restored": restored, "refused": refused}
+
+    def _rehydrate_verdict_promoted(self, record: Dict[str, Any]) -> bool:
+        """Restore one verdict-promoted technique at boot.
+
+        Trust story (same as the original promotion, re-derived now):
+        the stored code's digest must have a live admitted verdict --
+        require_admitted_verdict refuses a superseded/rejected verdict,
+        a broken chain, or an anchor mismatch -- and the code is then
+        re-promoted through VerdictPromotionBridge, whose wired primitive
+        exec's the admitted bytes under the sandbox policy on every call.
+        Any failure returns False: the capability stays unrestored, never
+        half-registered.
+        """
+        try:
+            from swarm_engine.agent_org.store import digest
+            from swarm_engine.capability.verdict_promotion import (
+                ARTIFACT_KIND, VerdictPromotionBridge)
+            from swarm_engine.primitives.core import Effect, Kind, TypeSpec
+            if self.primitives.get(record.get("name")) is not None:
+                return True  # already registered this boot; idempotent
+            review = self.ensure_review_board()
+            if review is None:
+                _log.warning("_rehydrate_verdict_promoted(%r): ReviewBoard "
+                             "unavailable at boot", record.get("name"))
+                return False
+            code = record.get("code") or ""
+            entrypoint = record.get("entrypoint") or ""
+            if not code or not entrypoint:
+                return False
+            # The gate: re-derive the live verdict for these exact bytes.
+            # Raises VerificationFailed on any trust failure.
+            review.require_admitted_verdict(digest(code), ARTIFACT_KIND)
+            spec = record.get("spec") or {}
+            kinds = spec.get("input_kinds") or {}
+            inputs = {k: TypeSpec(kind=Kind(v)) for k, v in kinds.items()}
+            if not inputs:
+                inputs = {"input": TypeSpec(kind=Kind.ANY)}
+            output = TypeSpec(
+                kind=Kind(spec.get("output_kind") or "any"))
+            effects = tuple(Effect(e) for e in (record.get("effects") or []))
+            if not effects:
+                effects = (Effect.PURE,)
+            bridge = VerdictPromotionBridge(registry=self.primitives,
+                                            review=review)
+            bridge.promote(
+                code,
+                artifact_ref=spec.get("artifact_ref") or record.get("name"),
+                inputs=inputs, output=output, entrypoint=entrypoint,
+                effects=effects, name=record.get("name"))
+            return self.primitives.get(record.get("name")) is not None
+        except Exception as exc:
+            _log.warning("_rehydrate_verdict_promoted(%r) refused: %s: %s",
+                         record.get("name"), type(exc).__name__, exc)
+            return False
 
     def project_modification_guard(self, root: str):
         """A ProjectModificationGuard scoped to `root`. A factory rather than
@@ -1414,6 +1486,34 @@ class SwarmEngine:
                 inputs=inputs, output=output_spec,
                 entrypoint=candidate.entrypoint, effects=effects,
                 examples=bridge_examples)
+            # V10-P4: persist the verdict-promoted source so the technique
+            # survives a process restart. AcquiredCodeStore holds source +
+            # evidence, never a callable; boot-time rehydration re-derives
+            # the live verdict and re-promotes through the bridge (the same
+            # trust story, re-derived at load time -- NOT the scanner
+            # lineage; the two registration lineages stay un-conflated).
+            # Without this, a distilled technique exists only until the
+            # process ends: code generation with extra steps.
+            try:
+                from swarm_engine.agent_org.store import digest as _digest
+                self.acquired_code.save(
+                    name=promoted_name,
+                    capability_id=f"verdict_{_digest(candidate.code)[:20]}",
+                    code=candidate.code,
+                    entrypoint=candidate.entrypoint,
+                    source=f"verdict_promotion:{name}",
+                    effects=[e.value for e in effects],
+                    spec={"input_kinds": {
+                              k: v.kind.value for k, v in inputs.items()},
+                          "output_kind": output_spec.kind.value,
+                          "artifact_ref": f"acq_{name}"},
+                    evidence={"code_digest": _digest(candidate.code),
+                              "artifact_kind": "synthesis",
+                              "promoted_name": promoted_name})
+            except Exception as _persist_exc:
+                _log.warning("_verdict_promote_acquired(%r): promoted but "
+                             "source persist failed: %s: %s", name,
+                             type(_persist_exc).__name__, _persist_exc)
             return promoted_name
         except Exception as exc:
             _log.warning("_verdict_promote_acquired(%r) failed: %s: %s",
