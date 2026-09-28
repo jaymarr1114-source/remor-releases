@@ -1,0 +1,37 @@
+[PASS] target cert matches pin
+[PASS] A1 hello with fabricated token refused -- handshake refused: {'reason': 'hello refused: invalid session token'}
+[PASS] A1 consent with wrong user token refused -- consent refused: invalid user token
+[PASS] A2 out-of-bounds move refused -- target refused: scope refused action: coordinates (800,600) outside se
+[PASS] A2 launch_app not in scope refused -- target refused: scope refused action: action 'launch_app' not in sessi
+[PASS] A2 non-allowlisted app refused -- target refused: scope refused action: app '/bin/evil' not in session a
+[PASS] A2 unknown action refused -- target refused: scope refused action: unknown action type 'format_disk
+[PASS] A2b batch with OOB action refused atomically -- target refused: scope refused action: coordinates (900,900)  used 0->0
+[PASS] A3 action after controller kill refused -- session killed: action refused (not live)
+[PASS] A3 indicator off
+[PASS] A4 spoofed target refused -- target identity proof FAILED authentication (spoofed target refused)
+[PASS] A27 rogue cert differs -- 151baac08761a6cf
+[PASS] A27 wrong-pin target refused -- target certificate fingerprint mismatch: possible impersonation (spoofed target 
+[PASS] A27 connect() refuses wrong-pin target -- target certificate fingerprint mismatch: possible impersonation (spoofed target 
+[PASS] A28 plaintext gets no answer -- connection dropped before any protocol reply
+[PASS] A29 unpinned channel refused -- no pinned certificate fingerprint: refusing to connect without target 
+[PASS] A5 first action accepted -- action_ok
+[PASS] A5 exact-byte replay refused -- action_refused {'reason': 'seq mismatch: got 2, expected 3 (replay or reord
+[PASS] A5 duplicate-nonce refused -- action_refused {'reason': 'duplicate nonce: replay refused'}
+[PASS] A5 sequence jump refused -- action_refused {'reason': 'seq mismatch: got 9, expected 3 (replay or reord
+[PASS] A6 action on expired consent refused -- target refused: consent no longer live: action refused
+[PASS] A7 budget escape refused -- target refused: session action budget exhausted
+[PASS] A7b batch charged per-action -- target refused: session action budget exhausted
+[PASS] A8 concurrent duplicate refused -- handshake refused: {'reason': 'hello refused: session already has a li
+[PASS] A8 reconnect after close works (fresh hello) -- [{'x': 11, 'y': 12}]
+[PASS] A8 action before second disconnect -- [{'x': 21, 'y': 22}]
+[PASS] A8b reconnect-after-action continues sequence -- [{'x': 31, 'y': 32}]
+[PASS] A30 second live session refused (target busy) -- handshake failed: handshake refused: {'reason': 'hello refused: target
+[PASS] A30 session connects after prior ends -- [{'x': 41, 'y': 42}]
+[PASS] A9 chain tamper detected -- bad rows: row_digest mismatch at seq=1
+[PASS] A10a typing stops when session dies -- keystrokes before stop: 11
+[PASS] A10b in-flight type refused after user kill -- target refused: session killed/expired during action: interrupted
+[PASS] A10b interrupted action not charged to budget -- actions_used=0
+[PASS] A10b session killed -- killed
+
+RD1 adversarial: 34/34 green
+EXIT=0
