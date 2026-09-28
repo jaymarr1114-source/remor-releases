@@ -18,6 +18,16 @@ from .controller import (
     BASELINE_HOLDS,
     BASELINE_BREAKS,
 )
+from .envelope_probe import (
+    EnvelopeProber,
+    VariantSpec,
+    VariantOutcome,
+    ProbeReport,
+    generate_sweep_variants,
+    technique_bound_constants,
+    verify_agreement,
+    ENVELOPE_REPORT_MARKER,
+)
 
 __all__ = [
     "GeneralizationController",
@@ -26,4 +36,12 @@ __all__ = [
     "ENVELOPE_BASELINE_KIND",
     "BASELINE_HOLDS",
     "BASELINE_BREAKS",
+    "EnvelopeProber",
+    "VariantSpec",
+    "VariantOutcome",
+    "ProbeReport",
+    "generate_sweep_variants",
+    "technique_bound_constants",
+    "verify_agreement",
+    "ENVELOPE_REPORT_MARKER",
 ]
