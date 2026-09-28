@@ -1,6 +1,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+# Gradle / Android build outputs (dispatch-target app module)
+.gradle/
+build/
+local.properties
 tests/batteryE/work/
 tests/agent_org/work/
 tests/track3_new/{work_root}/

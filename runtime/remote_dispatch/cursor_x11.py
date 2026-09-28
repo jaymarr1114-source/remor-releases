@@ -12,8 +12,9 @@ Honest substrate classification (Linux/X11/XTEST):
   CANNOT: touch gestures / multi-touch (no touch device on Xvfb), pressure,
        hover-without-move distinction, biometric-gated actions.
   An Android target would need a different substrate module
-  (AccessibilityService) -- this module is explicitly the X11 bench
-  substrate, selected by RemoteDispatchTarget(substrate="x11").
+  (AccessibilityService bridge) -- this module is explicitly the X11 bench
+  substrate, selected by RemoteDispatchTarget() by default via
+  substrates.X11_PROFILE.
 """
 from __future__ import annotations
 

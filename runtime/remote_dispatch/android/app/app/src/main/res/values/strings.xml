@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="service_description">REMOR remote-dispatch input substrate. Performs taps, swipes, text entry and app launches ONLY while a user-consented remote session is live, and shows the on-screen LIVE indicator with a kill switch.</string>
+    <string name="kill_channel">dispatch-kill</string>
+</resources>

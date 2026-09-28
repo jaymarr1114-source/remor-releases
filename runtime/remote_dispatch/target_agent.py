@@ -12,9 +12,12 @@ The target is the enforcement point. It does NOT trust the controller:
 - while a session is live the target shows a real on-screen indicator
   window; it is destroyed on kill/end.
 
-Substrate: X11/XTEST on the bench (cursor_x11.X11Cursor). An Android
-target would subclass RemoteDispatchTarget with an AccessibilityService
-substrate -- the enforcement logic above is substrate-independent.
+Substrate: selected by capability profile via substrates.resolve_substrate
+(X11/XTEST on the bench; AccessibilityService bridge on Android).
+An Android target passes substrate=ANDROID_PROFILE -- the enforcement
+logic above is substrate-independent and is never rewritten per
+substrate: substrates compose under RemoteDispatchTarget, they do not
+subclass or fork it.
 """
 from __future__ import annotations
 
@@ -27,12 +30,11 @@ from typing import Any, Callable, Dict, List, Optional
 from . import channel as chan
 from . import protocol as proto
 from . import tls
-from .cursor_x11 import X11Cursor
 from .session_model import (CONSENTED, LIVE, RemoteDispatchStore, Scope,
                             SessionError)
-
-
-INDICATOR_WM_NAME = "REMOR Remote Session LIVE"
+from .substrates import (ANDROID_PROFILE, CursorError, SubstrateRefusal,
+                         X11_PROFILE, ExecutionTargetProfile, Substrate,
+                         resolve_substrate)
 
 
 class TargetRefusal(RuntimeError):
@@ -43,14 +45,28 @@ class RemoteDispatchTarget:
     def __init__(self, db_path: str, device_id: str, agent_id: str,
                  agent_token: str, host: str = "127.0.0.1", port: int = 0,
                  display: Optional[str] = None,
-                 cert_dir: Optional[str] = None):
+                 cert_dir: Optional[str] = None,
+                 substrate: Optional[ExecutionTargetProfile] = None,
+                 substrate_config: Optional[Dict[str, Any]] = None):
         self.store = RemoteDispatchStore(db_path)
         self.db_path = db_path
         self.device_id = device_id
         self.agent_id = agent_id
         self.agent_token = agent_token  # presented as identity proof
-        self._cursor: Optional[X11Cursor] = None
-        self._display = display
+        # Substrate resolution is by capability profile, never by device
+        # identity. Default keeps the historical bench behavior (x11).
+        self._substrate: Substrate = resolve_substrate(
+            substrate or X11_PROFILE)
+        cfg: Dict[str, Any] = dict(substrate_config or {})
+        if "display" not in cfg and display is not None:
+            cfg["display"] = display
+        cfg.setdefault("on_failure", self.store.log_event)
+        self._substrate_config = cfg
+        self._cursor = None  # created lazily via the substrate
+        self._indicator = self._substrate.make_indicator(**cfg)
+        # Substrate event channel (Android: app->Python user_kill).
+        # Target-local entry points only; the controller has no path.
+        self._substrate.wire_target_events(self)
         # TLS identity: self-signed cert, generated once per target.
         # The fingerprint is the target's pinned identity; the
         # controller binds it at pairing and refuses any other cert.
@@ -65,8 +81,6 @@ class RemoteDispatchTarget:
                                          "agent_token": agent_token}
         self._listener.on_hello = self._on_hello
         self._listener.on_message = self._dispatch_message
-        # per-session indicator windows: {session_id: (win, display)}
-        self._indicators: Dict[str, Any] = {}
         self._lock = threading.Lock()
         # one live connection per session: a second concurrent hello for
         # the same session is refused; the slot is released on disconnect
@@ -263,8 +277,20 @@ class RemoteDispatchTarget:
 
     def _execute(self, action: Dict[str, Any],
                  scope: Scope, is_live) -> Dict[str, Any]:
+        # A substrate policy refusal (e.g. the Android app's local kill
+        # latch) is an explicit action_refused, never a transport error.
+        # All other CursorErrors keep their existing behavior, so the X11
+        # substrate's wire semantics are unchanged.
+        try:
+            return self._execute_inner(action, scope, is_live)
+        except SubstrateRefusal as e:
+            raise TargetRefusal(str(e))
+
+    def _execute_inner(self, action: Dict[str, Any],
+                       scope: Scope, is_live) -> Dict[str, Any]:
         if self._cursor is None:
-            self._cursor = X11Cursor(self._display)
+            self._cursor = self._substrate.make_cursor(
+                **self._substrate_config)
         kind = action["type"]
         if kind == "move":
             return self._cursor.move(action["x"], action["y"])
@@ -283,78 +309,17 @@ class RemoteDispatchTarget:
                                            scope.apps or [])
         raise TargetRefusal(f"unexecutable action {kind!r}")
 
-    # -- live-session indicator (real X11 window) ------------------------
+    # -- live-session indicator (delegated to the substrate) -----------
     def _show_indicator(self, session_id: str) -> None:
-        """A mapped, override-redirect red banner named
-        INDICATOR_WM_NAME on the target's own display, tracked per
-        session. Verified by querying the X server (indicator_live),
-        not by a cached handle."""
-        self._hide_indicator(session_id)
-        try:
-            from Xlib import X
-            from Xlib.display import Display
-            d = Display(self._display or os.environ.get("DISPLAY", ":99"))
-            screen = d.screen()
-            win = screen.root.create_window(
-                screen.width_in_pixels - 360, 10, 340, 44, 0,
-                screen.root_depth, X.InputOutput, X.CopyFromParent,
-                override_redirect=True,
-                background_pixel=screen.black_pixel)
-            cmap = screen.default_colormap
-            red = cmap.alloc_named_color("red").pixel
-            win.change_attributes(background_pixel=red)
-            win.set_wm_name(INDICATOR_WM_NAME)
-            win.map()
-            try:
-                gc = win.create_gc(foreground=screen.white_pixel,
-                                   background=red)
-                font = d.open_font("fixed")
-                gc.change(font=font.fid)
-                win.draw_text(gc, 12, 28,
-                              f"REMOTE SESSION LIVE {session_id[:13]}")
-            except Exception:
-                pass  # text is decoration; the window is the signal
-            d.sync()
-            self._indicators[session_id] = (win, d)
-        except Exception:
-            # indicator failure must never break the session; the session
-            # itself is still governed. Record the miss visibly.
-            self.store.log_event("indicator_failed", session_id, {})
+        """Show the live-session indicator via the substrate. Indicator
+        failure never breaks the session; the substrate records the
+        miss and the session itself stays governed."""
+        self._indicator.show(session_id)
 
     def _hide_indicator(self, session_id: Optional[str] = None) -> None:
-        targets = ([session_id] if session_id
-                   else list(self._indicators.keys()))
-        for sid in targets:
-            entry = self._indicators.pop(sid, None)
-            if not entry:
-                continue
-            win, d = entry
-            try:
-                win.destroy()
-                d.sync()
-                d.close()
-            except Exception:
-                pass
-
-    def _find_indicator(self):
-        """The indicator window as the X server sees it right now."""
-        from Xlib.display import Display
-        d = Display(self._display or os.environ.get("DISPLAY", ":99"))
-        try:
-            found = []
-
-            def walk(w):
-                for c in w.query_tree().children:
-                    try:
-                        if c.get_wm_name() == INDICATOR_WM_NAME:
-                            found.append(c)
-                    except Exception:
-                        pass
-                    walk(c)
-            walk(d.screen().root)
-            return found[0] if found else None
-        finally:
-            d.close()
+        self._indicator.hide(session_id)
 
     def indicator_live(self) -> bool:
-        return self._find_indicator() is not None
+        """The indicator as the target's display stack sees it right
+        now -- never a cached handle."""
+        return self._indicator.live()
