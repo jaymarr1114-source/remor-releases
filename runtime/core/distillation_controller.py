@@ -73,20 +73,26 @@ What this file ADDS (the genuinely missing wiring):
      substrate before marking the loop resolved -- the stack unwinds
      bottom-up to the controller, which resolves to the executive.
 
+  6. The cadence entry point: on_tick(cycle_n=..., budget_s=...) -- the
+     inlet the Run Controller's tick invokes for the distillation step
+     (DIS-SWEEP-1). It reuses cycle(), never a parallel path; aligns on
+     the Run tick's numbering; observes a cooperative per-tick budget;
+     and refuses refused-ticks as values, never exceptions. The Run-side
+     adoption (calling this from _distill_sweep in run_controller.py)
+     belongs to the Run track; this file declares the exact seam.
+
 Run Controller relationship (standing architectural decision,
 2026-09-27): the Run Controller owns cadence and execution control; the
 scheduler is subordinate infrastructure. This controller is INVOCABLE on
 that cadence: cycle(limit=...) mirrors the sweep's calling convention
 and returns the same summary shape the RunController's tick step 2
-consumes (examined/distilled/refused/errors), so the tick can delegate
-its _distill_sweep to DistillationController.cycle() with a one-line
-change. That wiring edit belongs to the Run track (RUN-EXEC-1 owns the
-run layer); this file declares the seam and does not touch
-run_controller.py. Idempotency per cycle is inherited: the existing
-append-only consumption records guarantee no double-consumption, and
-this controller reuses them (DIS-SWEEP-1, parked, later makes the sweep
-the standing cycle under Run cadence -- this mission establishes the
-entity that will own it).
+consumes (examined/distilled/refused/errors), and on_tick() is the
+standing cadence inlet with the exact call signature the Run Controller
+will use. The _distill_sweep -> on_tick wiring edit belongs to the Run
+track (RUN-EXEC-1 owns the run layer); this file declares the seam and
+does not touch run_controller.py. Idempotency per tick is inherited: the
+existing append-only consumption records guarantee no double-consumption
+across ticks, and this controller reuses them.
 """
 
 from __future__ import annotations
@@ -205,6 +211,76 @@ class DistillationController:
             self._idle_streak += 1
         self._recompute_state()
         return summary
+
+    # ------------------------------------------------------------------
+    # Standing loop: the cadence entry point (DIS-SWEEP-1)
+    # ------------------------------------------------------------------
+
+    def on_tick(self, *, cycle_n: int, budget_s: Optional[float] = None
+                ) -> Dict[str, Any]:
+        """One authorized tick of the standing distillation loop.
+
+        The Run Controller owns cadence (standing architectural decision,
+        2026-09-27); this is the inlet its tick invokes for the
+        distillation step -- the distillation side of the declared seam.
+        It reuses cycle(), never a parallel convergence path: the sweep
+        remains the one convergence mechanism, and this controller is its
+        owner. There is no second scheduler, dispatcher, or ticking
+        authority here -- this method only runs when the Run Controller
+        calls it.
+
+        cycle_n: the Run Controller's tick number (required keyword).
+            Tick numbering is the Run Controller's authority; aligning on
+            it keeps the controller's cycle count and the run's tick
+            count from diverging into two clocks.
+        budget_s: cooperative per-tick budget for the distillation step
+            (seconds). Checked BEFORE the cycle starts -- a step already
+            running is never killed mid-flight (the RunController's own
+            principle) -- and the elapsed time is reported after. None
+            means the Run tick imposed no bound.
+
+        Returns a tick summary shaped for the Run tick's step-2 slot:
+        the sweep's examined/distilled/refused/errors keys plus tick,
+        controller, cycle, elapsed_s, budget_exceeded, and state.
+        Refusals are values under "tick_refused", never exceptions, so a
+        refused tick never kills the run.
+
+        The Run-side adoption (Run track's edit, not this file's --
+        _distill_sweep in runtime/core/run_controller.py currently calls
+        run_distillation_sweep directly; RUN-EXEC-1 owns that file):
+            ctl = DistillationController(engine, epistemic, substrate)
+            ...
+            summary["sweep"] = ctl.on_tick(cycle_n=cycle_n,
+                                           budget_s=remaining_budget_s)
+        """
+        base = {"tick": cycle_n, "controller": LOOP_ID,
+                "cycle": self._cycles, "state": self._state}
+        if self._state == STATE_RESOLVED:
+            base["tick_refused"] = (
+                f"controller resolved: {self._resolution}")
+            return base
+        if budget_s is not None and budget_s <= 0:
+            base["tick_refused"] = (
+                "tick budget exhausted before distillation step "
+                f"(budget_s={budget_s})")
+            return base
+        started = time.monotonic()
+        summary = self.cycle()
+        elapsed = time.monotonic() - started
+        if "cycle_refused" in summary:
+            base["tick_refused"] = summary["cycle_refused"]
+            base["elapsed_s"] = round(elapsed, 2)
+            return base
+        return {"tick": cycle_n, "controller": LOOP_ID,
+                "cycle": summary.get("cycle", self._cycles),
+                "examined": summary.get("examined", 0),
+                "distilled": summary.get("distilled", []),
+                "refused": summary.get("refused", []),
+                "errors": summary.get("errors", []),
+                "elapsed_s": round(elapsed, 2),
+                "budget_exceeded": bool(budget_s is not None
+                                       and elapsed > budget_s),
+                "state": self._state}
 
     def _recompute_state(self) -> None:
         """idle iff nothing is pending and no microcontrollers are active;
