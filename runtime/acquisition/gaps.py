@@ -1148,6 +1148,64 @@ def _independent_scale_specific(record: GapRecord) -> bool:
     return any(n > bound for n in nums)
 
 
+def _acquire_composition(registry: GapRegistry, record: GapRecord,
+                       context: Dict[str, Any]
+                       ) -> Tuple[str, str, Optional[Dict[str, Any]]]:
+    """Route 'composition' -- a failed NL request with verifiable
+    composition examples goes through the V10 composition inlet: real
+    PlanComposer search over the primitive vocabulary, Q8 authentication
+    (train re-verification + held-out generalization, no memorization),
+    admission through the engine's governed path with the failed request
+    bound as the goal. The gap closes ONLY when the originally failed
+    request now dispatches through the real NL path and produces the
+    expected value -- utilization verified live, not claimed."""
+    from swarm_engine.synthesis.compose_inlet import drive_composition_gap
+    engine = registry._engine
+    result = drive_composition_gap(engine, record)
+    if not result.ok:
+        return ("open",
+                f"composition inlet did not admit: {result.refusal}", None)
+    # Utilization: the failed request must now work through real dispatch.
+    from swarm_engine.synthesis.nl_dispatch import NLToolDispatcher
+    from swarm_engine.synthesis.compose_inlet import (
+        _gap_request_text, _gap_examples)
+    request_text = _gap_request_text(record)
+    train, held_out = _gap_examples(record)
+    probe_args, probe_expect = (held_out[0] if held_out else train[0])
+    try:
+        dispatcher = NLToolDispatcher(engine)
+        retry = dispatcher.dispatch(request_text, dict(probe_args),
+                                    producer="gap-route-composition")
+    except Exception as exc:
+        return ("open",
+                f"admitted {result.capability_id} but utilization "
+                f"re-dispatch raised {type(exc).__name__}: {exc}", None)
+    if not (retry.ok and retry.result == probe_expect):
+        return ("open",
+                f"admitted {result.capability_id} but the failed request "
+                f"still does not dispatch correctly "
+                f"(ok={retry.ok} result={retry.result!r} "
+                f"refusal={retry.refusal})", None)
+    return ("closed",
+            f"composed {result.capability_id} from {result.composed_of} "
+            f"({result.evaluations} candidates searched, Q8-passed); "
+            f"failed request now dispatches to {retry.result!r}",
+            {"utilization_verified": True,
+             "capability_id": result.capability_id,
+             "composed_of": result.composed_of,
+             "evaluations": result.evaluations,
+             "request_text": request_text,
+             "utilization_result": retry.result})
+
+
+def _is_composition_gap(record: GapRecord) -> bool:
+    """Constraint for the composition route: a real failed NL request
+    plus verifiable composition examples carried as evidence
+    observations (no block shape required)."""
+    from swarm_engine.synthesis.compose_inlet import is_composition_gap
+    return is_composition_gap(record)
+
+
 def _builtin_routes() -> List[Route]:
     """The route table. Each route declares the shape it serves; the
     dispatcher picks the most specific satisfied route. No type labels,
@@ -1199,6 +1257,11 @@ def _builtin_routes() -> List[Route]:
             name="data",
             requires=frozenset({"data.description", "data.source"}),
             acquire=_acquire_data),
+        Route(
+            name="composition",
+            requires=frozenset(),
+            constraint=_is_composition_gap,
+            acquire=_acquire_composition),
     ]
 
 def _governed_install(dep: DependencyBlock,
