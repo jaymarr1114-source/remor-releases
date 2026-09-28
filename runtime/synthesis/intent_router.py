@@ -57,7 +57,7 @@ class RouteResult:
     ok: bool
     capability_id: Optional[str] = None
     capability_name: Optional[str] = None
-    via: Optional[str] = None          # "exact_goal" | "structural" | "effect_fallback"
+    via: Optional[str] = None          # "exact_goal" | "structural" | "effect_fallback" | "literal_entity"
     score: float = 0.0
     effects: List[str] = field(default_factory=list)
     reasons: List[str] = field(default_factory=list)
@@ -159,7 +159,14 @@ class IntentRouter:
             via="effect_fallback", score=0.0, effects=effects,
             reasons=r2)
     # -- routing ----------------------------------------------------------
-    def route(self, text: str) -> RouteResult:
+    def route(self, text: str, frame=None) -> RouteResult:
+        """Route text to a capability.
+
+        ``frame`` is an optional pre-parsed IntentFrame (the dispatcher
+        parses once and shares it). It feeds exactly one rule -- the
+        literal-entity preference below; every other rule is text-only
+        and behaves as before when frame is None.
+        """
         if not isinstance(text, str):
             return RouteResult(ok=False, refusal="invalid_input",
                                reasons=["request text must be a string"])
@@ -196,6 +203,50 @@ class IntentRouter:
                            "not routable")
             return RouteResult(ok=False, refusal="capability_unavailable",
                                effects=effects, reasons=reasons)
+
+        # 1b. literal-entity preference (ACQ-MEDIA-1): when the frame
+        # carries a complete literal color+shape pair for an image
+        # request, the explicit literal reading is more specific than any
+        # structural lexical overlap, so it outranks structural scoring.
+        # Routes to the effectively-active capability declaring
+        # "media_image_spec", deterministically by capability_id. When no
+        # such candidate exists (e.g. the spec capability was never
+        # admitted), falls through to the normal path -- today's
+        # behavior, unchanged.
+        if frame is not None:
+            try:
+                _ent = getattr(frame, "entities", None) or {}
+                _intent_name = getattr(
+                    getattr(frame, "intent", None), "name", "")
+                _literal = (_intent_name == "CREATE_IMAGE"
+                            and _ent.get("literal_color")
+                            and _ent.get("literal_shape"))
+            except Exception:
+                _literal = False
+                _ent = {}
+            if _literal:
+                _cands = self._active_candidates()
+                _spec_cands = [
+                    r for r in _cands
+                    if "media_image_spec"
+                    in self._declared_plan_effects(r)]
+                if _spec_cands:
+                    _spec_cands.sort(key=lambda r: r.capability_id)
+                    _rec = _spec_cands[0]
+                    _cap_id = _rec.capability_id
+                    _full = self.engine.capabilities.get(_cap_id)
+                    return RouteResult(
+                        ok=True, capability_id=_cap_id,
+                        capability_name=getattr(_full, "name", None),
+                        via="literal_entity", score=1.0,
+                        effects=effects,
+                        reasons=reasons + [
+                            "literal-entity preference: frame carries "
+                            "color=%r shape=%r -> media_image_spec "
+                            "capability %s..."
+                            % (_ent.get("literal_color"),
+                               _ent.get("literal_shape"),
+                               _cap_id[:12])])
 
         # 2. structural ranking over effectively-active candidates
         candidates = self._active_candidates()

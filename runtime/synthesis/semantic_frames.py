@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional
 
 from swarm_engine.primitives.core import ANY, BOOL, DICT, LIST, NUM, STR, TypeSpec
 from swarm_engine.synthesis import nlu_substrate as _nlu_substrate
+from swarm_engine.media import literal as _literal
 
 
 class Intent(Enum):
@@ -60,7 +61,12 @@ class Intent(Enum):
 # Entities per intent (all optional; absent = not expressed):
 #   CREATE_FILE:  artifact ("file"), language ("python"|...), purpose (str),
 #                 filename_hint (str|None)
-#   CREATE_IMAGE/VIDEO/SONG/VOICE: prompt (str), the media description
+#   CREATE_IMAGE/VIDEO/SONG/VOICE: prompt (str), the media description;
+#                 filename_hint (str|None); CREATE_IMAGE additionally:
+#                 literal_color, literal_shape (str|None),
+#                 literal_width/literal_height (int|None) +
+#                 literal_size_explicit (bool) -- present only when the
+#                 frame's NP names explicit literal entities (ACQ-MEDIA-1)
 #   ANSWER_META:  topic ("capabilities"|"tasks"|"abilities"|...)
 #   ANSWER_FACTUAL: question (str)
 #   COMPUTE:      expression (str, normalised arithmetic), description (str)
@@ -491,6 +497,30 @@ def _extract_filename(toks: List[_Token]) -> tuple:
             if nxt.kind in ("WORD", "QUOTE"):
                 return nxt.text, ["'named/called %s' -> filename_hint"
                                   % nxt.text]
+    # "save it as blue.png" / "store as out.png": reassemble a dotted
+    # WORD ("." WORD)* tail after "as". Structural slot pattern over the
+    # grammar's own token kinds (same class as the branches above); the
+    # name must carry an extension to count as a filename.
+    for i, t in enumerate(toks):
+        if t.kind == "WORD" and t.lower in ("save", "store"):
+            for j in range(i + 1, len(toks)):
+                u = toks[j]
+                if u.kind == "WORD" and u.lower == "as" and \
+                        j + 1 < len(toks) and toks[j + 1].kind == "WORD":
+                    parts = [toks[j + 1].text]
+                    k = j + 2
+                    while k + 1 < len(toks) and \
+                            toks[k].kind == "PUNCT" and \
+                            toks[k].text == "." and \
+                            toks[k + 1].kind == "WORD":
+                        parts.append(".")
+                        parts.append(toks[k + 1].text)
+                        k += 2
+                    name = "".join(parts)
+                    if "." in name:
+                        return name, ["'save/store ... as %s' -> "
+                                      "filename_hint" % name]
+                    break
     return None, []
 
 
@@ -680,6 +710,16 @@ def _rule_imperative_creation(toks: List[_Token], verb: str, vclass: str,
             ent["prompt"] = prompt
         if filename:
             ent["filename_hint"] = filename
+        # Literal-image entities (ACQ-MEDIA-1): the substrate's NP content
+        # words carry the user's size/color/shape; the vocabulary match is
+        # the product's own artifact list, not a linguistic rule. Absent
+        # here = the request is not literal and the dispatcher keeps the
+        # generative path.
+        lit = _literal.extract_literal_entities(np.mods,
+                                                np.phrase_text or "")
+        if lit:
+            ent.update(lit)
+            trace.append("literal entities: %r" % (lit,))
         return ent
 
     if vtax is not None and head_tax is not None and vtax != head_tax:

@@ -60,6 +60,7 @@ from swarm_engine.primitives.core import coerce
 from swarm_engine.synthesis.integrity import effective_status
 from swarm_engine.synthesis.intent_router import IntentRouter
 from swarm_engine.synthesis.semantic_frames import parse_frame
+from swarm_engine.media import literal as _literal_media
 
 MAX_ARGS_BYTES = 64 * 1024
 MAX_ARG_DEPTH = 6
@@ -81,13 +82,11 @@ CREATE TABLE IF NOT EXISTS intent_dispatches (
 """
 
 
-_SPEC_COLORS = {
-    "red": "#ff0000", "green": "#00a86b", "blue": "#2563eb",
-    "yellow": "#facc15", "white": "#ffffff", "black": "#000000",
-    "orange": "#f97316", "purple": "#8b5cf6", "pink": "#ec4899",
-    "cyan": "#22d3ee", "gray": "#9ca3af", "grey": "#9ca3af",
-}
-_SPEC_SHAPES = ("circle", "square", "rectangle", "triangle")
+# Literal-image product vocabulary: single location is
+# swarm_engine.media.literal (ACQ-MEDIA-1 relocation). Aliases kept so
+# existing references keep working.
+_SPEC_COLORS = _literal_media.LITERAL_COLORS
+_SPEC_SHAPES = _literal_media.LITERAL_SHAPES
 
 
 # -- cross-capability composition (M4) --------------------------------------
@@ -163,46 +162,17 @@ _MEDIA_LEG_WORDS = (
 )
 
 
-def _spec_from_shape_words(prompt: str, text: str, seed: int):
-    """Synthesize an image spec ONLY from explicit color+shape words.
+def _spec_from_entities(entities: Dict[str, Any], seed: int):
+    """Synthesize an image spec from the frame's literal entities.
 
-    Returns (spec, None) when the prompt names exactly one recognized
-    color and exactly one recognized shape; the shape is centered on a
-    flat dark background and the subject label is the literal
-    "<color> <shape>" (a descriptive label, never a depiction).
-    Returns (None, reason) otherwise -- fabricating a geometric spec
-    for an undrawable subject (e.g. "a sunset") would claim a depiction
-    the renderer cannot produce, so the caller must answer
-    "underspecified_media" instead.
+    ACQ-MEDIA-1 replacement for the old ``_spec_from_shape_words``: the
+    color/shape/size/filename now arrive as frame entities parsed via the
+    acquired NLU substrate (semantic_frames), not from a hand-rolled
+    regex word scan of the prompt surface. Geometry, refusal contract,
+    and legacy defaults live in ``swarm_engine.media.literal``; this is
+    the thin call-site adapter.
     """
-    words = re.findall(r"[a-z]+", (prompt or "").lower())
-    colors = [c for c in _SPEC_COLORS if c in words]
-    shapes = [s for s in _SPEC_SHAPES if s in words]
-    if len(colors) != 1 or len(shapes) != 1:
-        return None, (
-            "the spec renderer draws only explicit shapes from an "
-            "explicit spec (e.g. 'draw a red circle'); it cannot depict "
-            "subjects it has no geometry for. Provide {'spec': ...} via "
-            "dispatch_by_id, or ask for a '<color> <shape>'.")
-    color, shape = colors[0], shapes[0]
-    w = h = 512
-    cx = cy = 256
-    fill = _SPEC_COLORS[color]
-    if shape == "circle":
-        geo = {"kind": "circle", "center": [cx, cy], "radius": 120,
-               "fill": fill}
-    elif shape in ("square", "rectangle"):
-        geo = {"kind": "rect", "box": [cx - 100, cy - 100,
-                                       cx + 100, cy + 100], "fill": fill}
-    else:  # triangle
-        geo = {"kind": "polygon",
-               "points": [[cx, cy - 110], [cx - 110, cy + 90],
-                          [cx + 110, cy + 90]], "fill": fill}
-    spec = {"subject": f"{color} {shape}", "width": w, "height": h,
-            "style": "flat", "seed": seed,
-            "background": {"color": "#0b1e3a"},
-            "shapes": [geo], "texts": []}
-    return spec, None
+    return _literal_media.build_literal_spec(entities or {}, seed)
 
 
 @dataclass
@@ -315,7 +285,7 @@ class NLToolDispatcher:
         name = f"{uuid.uuid4().hex[:12]}_image.{ext}"
         return os.path.join(os.path.abspath(self.media_out_dir), name)
 
-    def _synthesize_media_args(self, text: str, rec):
+    def _synthesize_media_args(self, text: str, rec, frame=None):
         """Build full capability args for a media request the parser
         understood, when the caller supplied none.
 
@@ -323,21 +293,40 @@ class NLToolDispatcher:
         from the frame entities; width/height/voice/etc. take sane
         defaults; the seed derives deterministically from the request
         text; the output path is server-chosen under the governed media
-        dir (callers never choose it). Returns (args, None) on success,
-        (None, reason) when synthesis is impossible -- never a partial
-        or fabricated arg set.
+        dir (callers never choose it -- except a sanitized filename_hint
+        basename for literal renders, still confined to the governed
+        dir). Returns (args, None) on success, (None, reason) when
+        synthesis is impossible -- never a partial or fabricated arg set.
+
+        ``frame`` may be a pre-parsed IntentFrame (dispatch() parses once
+        for routing); when None it is parsed here.
         """
         op = self._media_op(rec)
         seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16)
-        frame = parse_frame(text)
-        prompt = (frame.entities or {}).get("prompt")
+        if frame is None:
+            frame = parse_frame(text)
+        entities = frame.entities or {}
+        prompt = entities.get("prompt")
         prompt = prompt.strip() if isinstance(prompt, str) else ""
         if op == "media.image_render_spec":
-            spec, why = _spec_from_shape_words(prompt or "", text, seed)
+            # Literal rendering (ACQ-MEDIA-1): the spec comes from the
+            # frame's literal entities (color/shape/size via the acquired
+            # NLU substrate); the filename from a sanitized filename_hint
+            # basename confined to the governed media dir.
+            if self.media_out_dir is None:
+                return None, ("server has no governed media output dir "
+                              "configured; cannot choose an output path")
+            spec, why = _spec_from_entities(entities, seed)
             if spec is None:
                 return None, why
-            return {"spec": spec,
-                    "path": self._governed_media_path("png")}, None
+            fname = _literal_media.sanitize_filename(
+                entities.get("filename_hint"))
+            if fname is not None:
+                path = os.path.join(
+                    os.path.abspath(self.media_out_dir), fname)
+            else:
+                path = self._governed_media_path("png")
+            return {"spec": spec, "path": path}, None
         if self.media_out_dir is None:
             return None, ("server has no governed media output dir "
                           "configured; cannot choose an output path")
@@ -838,8 +827,15 @@ class NLToolDispatcher:
                 return DispatchResult(
                     ok=False, refusal="composition_leg_unroutable",
                     route_via="composition", reasons=reasons)
-        # 1. route
-        route = self.router.route(text)
+        # 1. route. The frame is parsed once here: the router consults it
+        # for the literal-entity cue (ACQ-MEDIA-1), and argument synthesis
+        # reuses it below. A parse failure degrades to frame=None --
+        # routing then behaves exactly as before.
+        try:
+            frame = parse_frame(text)
+        except Exception:
+            frame = None
+        route = self.router.route(text, frame=frame)
         if not route.ok:
             result = DispatchResult(
                 ok=False, refusal=route.refusal, reasons=route.reasons)
@@ -861,7 +857,8 @@ class NLToolDispatcher:
         if not args:
             rec0 = self.engine.capabilities.get(cap_id)
             if rec0 is not None and self._media_plan(rec0):
-                synth, why = self._synthesize_media_args(text, rec0)
+                synth, why = self._synthesize_media_args(text, rec0,
+                                                         frame=frame)
                 if synth is None:
                     return DispatchResult(
                         ok=False, refusal="underspecified_media",
