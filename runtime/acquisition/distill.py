@@ -80,6 +80,102 @@ class DistillationLoop:
         self.engine = engine
         self.epistemic = epistemic
 
+    def _render_second_order(self, plan: Dict[str, Any],
+                             delta_id: str) -> str:
+        """Render a plan that composes acquired primitives by directly
+        composing their persisted standalone code.
+
+        Codegen cannot embed a verdict-promoted primitive's runtime wrapper
+        (closure over trust machinery), nor the lambda-based op helpers in
+        a previously rendered technique module. For the second-order case --
+        a plan whose steps are all acquired primitives -- we compose the
+        verified stored code strings directly. Each dependency's `run` is
+        renamed to a unique symbol, its module-level helpers are prefixed,
+        and the new `run` wires the dataflow from the plan steps.
+
+        This is honest: the composed code contains exactly the verified
+        bytes from the AcquiredCodeStore, wired according to the admitted
+        plan. No new logic is invented.
+        """
+        import re as _re
+        engine = self.engine
+        steps = plan.get("steps") or []
+        # Verify all steps are acquired primitives.
+        dep_names = []
+        for step in steps:
+            op = step.get("op")
+            if not (isinstance(op, str) and op.startswith("acquired.")):
+                raise ValueError(
+                    f"_render_second_order: non-acquired op {op!r}")
+            if op not in dep_names:
+                dep_names.append(op)
+        # Load and rename each dependency's code.
+        dep_runs = {}  # op name -> renamed run symbol
+        parts = []
+        for idx, op in enumerate(dep_names):
+            rec = engine.acquired_code.get(op)
+            if rec is None:
+                raise ValueError(f"_render_second_order: {op} not in store")
+            code = rec.get("code") or ""
+            entrypoint = rec.get("entrypoint") or "run"
+            if not code:
+                raise ValueError(f"_render_second_order: {op} has no code")
+            prefix = f"_dep{idx}_"
+            # Rename the entrypoint and module-level helpers.
+            code2 = _re.sub(r'\bdef\s+' + _re.escape(entrypoint) + r'\b',
+                            f'def {prefix}{entrypoint}', code)
+            code2 = _re.sub(r'\b_PLAN_DEFAULTS\b', prefix + 'PLAN_DEFAULTS',
+                            code2)
+            code2 = _re.sub(r'\bop_([A-Za-z0-9_]+)\b', prefix + r'op_\1',
+                            code2)
+            # Also rename _require_num and similar helpers if present.
+            code2 = _re.sub(r'\b_require_([A-Za-z0-9_]+)\b',
+                            prefix + r'_require_\1', code2)
+            parts.append(f"# --- dependency: {op} ---\n" + code2)
+            dep_runs[op] = f"{prefix}{entrypoint}"
+        # Wire the dataflow according to the plan steps.
+        run_lines = []
+        run_lines.append("def run(**_kw):")
+        # Map plan params.
+        params = plan.get("params") or {}
+        for pname in params:
+            run_lines.append(f"    {pname} = _kw[{pname!r}]")
+        # Execute steps in order.
+        for step in steps:
+            sid = step.get("id")
+            op = step.get("op")
+            args = step.get("args") or {}
+            dep_run = dep_runs[op]
+            # Resolve args: $param -> var, $step -> var
+            arg_strs = []
+            for aname, aval in args.items():
+                if isinstance(aval, dict):
+                    if "$param" in aval:
+                        arg_strs.append(f"{aname}={aval['$param']}")
+                    elif "$step" in aval:
+                        arg_strs.append(f"{aname}=_var_{aval['$step']}")
+                    else:
+                        raise ValueError(
+                            f"unsupported arg ref {aval!r}")
+                else:
+                    arg_strs.append(f"{aname}={aval!r}")
+            run_lines.append(
+                f"    _var_{sid} = {dep_run}({', '.join(arg_strs)})")
+        # Return value from plan output.
+        output = plan.get("output") or {}
+        if isinstance(output, dict) and "$step" in output:
+            run_lines.append(f"    return _var_{output['$step']}")
+        elif isinstance(output, dict) and "$param" in output:
+            run_lines.append(f"    return {output['$param']}")
+        else:
+            raise ValueError(f"unsupported plan output {output!r}")
+        parts.append("\n".join(run_lines))
+        header = ('"""Second-order distillation: composed from verified '
+                  'acquired techniques.\n\n'
+                  f'Delta: {delta_id}\n'
+                  'Dependencies: ' + ", ".join(dep_names) + '\n"""\n')
+        return header + "\n\n".join(parts) + "\n"
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -280,11 +376,20 @@ class DistillationLoop:
     def _source_code(self, source: "DistillationResult") -> str:
         """Recover the distilled technique's standalone code from its
         retained capability record."""
-        from swarm_engine.synthesis.codegen import render_plan_to_source
         rec = self.engine.capabilities.get(source.capability_id)
         if rec is None or not getattr(rec, "plan", None):
             raise ValueError("no retained plan for "
                              f"{source.capability_id}")
+        _steps = rec.plan.get("steps") or []
+        _all_acq = _steps and all(
+            isinstance(s.get("op"), str) and
+            s.get("op").startswith("acquired.")
+            for s in _steps)
+        if _all_acq:
+            return self._render_second_order(rec.plan, source.delta_id
+                                             if hasattr(source, "delta_id")
+                                             else source.promoted_name)
+        from swarm_engine.synthesis.codegen import render_plan_to_source
         code, _meta = render_plan_to_source(
             rec.plan, self.engine.primitives,
             purpose=f"generalization source {source.promoted_name}")
@@ -480,10 +585,24 @@ class DistillationLoop:
         # 2. Render the admitted plan to standalone code.
         try:
             rec = engine.capabilities.get(cap_id)
-            from swarm_engine.synthesis.codegen import render_plan_to_source
-            code, _meta = render_plan_to_source(
-                rec.plan, engine.primitives,
-                purpose=f"distillation of {delta.delta_id}")
+            # Second-order case: plan composes acquired primitives. Compose
+            # their verified stored code directly (codegen cannot embed
+            # verdict-promotion wrappers or lambda-based helpers).
+            _steps = rec.plan.get("steps") or []
+            _all_acq = _steps and all(
+                isinstance(s.get("op"), str) and
+                s.get("op").startswith("acquired.")
+                for s in _steps)
+            if _all_acq:
+                code = self._render_second_order(
+                    rec.plan, delta.delta_id)
+                _meta = {"second_order": True}
+            else:
+                from swarm_engine.synthesis.codegen import (
+                    render_plan_to_source)
+                code, _meta = render_plan_to_source(
+                    rec.plan, engine.primitives,
+                    purpose=f"distillation of {delta.delta_id}")
         except Exception as exc:
             result.reason = (f"fresh synthesis: render failed "
                              f"{type(exc).__name__}: {exc}")
