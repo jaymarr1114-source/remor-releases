@@ -222,6 +222,20 @@ class PlanComposer:
                    tuple(self._value_key(v) for v in vals))
             frag = _Fragment([], {"$param": pname}, [], uses_param=True)
             banked[key] = (frag, vals, pkind)
+        # GEN-SYNTH-1: seed example literals as constant values so binary
+        # heads have constant args (e.g. divide(5, square(x))). Literals
+        # never satisfy the param-use requirement on their own; the head
+        # loop's constant-plan guard enforces that when outputs vary.
+        for lit in self._literals:
+            try:
+                lkind = infer(lit)
+            except Exception:
+                continue
+            lkey = ("lit", self._value_key(lit))
+            if lkey in banked:
+                continue
+            banked[lkey] = (_Fragment([], lit, [], uses_param=False),
+                            tuple(lit for _ in examples), lkind)
 
         frontier = list(banked.keys())
         # Banking focuses on the two fundamental higher-order list prims
@@ -277,16 +291,23 @@ class PlanComposer:
         heads = [p for p in prims if p.name not in objective.forbidden]
         heads = [p for p in heads
                  if _outputs_goal(p, objective.output_kind)]
-        # Only shapes the head-trying loop handles: 1-input, or
+        # Only shapes the head-trying loop handles: 1-input, 2-input
+        # non-callable (GEN-SYNTH-1: binary combinations), or
         # (collection, fn) 2-input.
         def head_shape_ok(p: Any) -> bool:
             inputs = list(p.inputs.items())
             callables = [n for n, s in inputs
                          if s.kind is Kind.CALLABLE]
             return ((not callables and len(inputs) == 1) or
+                    (not callables and len(inputs) == 2) or
                     (len(callables) == 1 and len(inputs) == 2))
         heads = [p for p in heads if head_shape_ok(p)]
         heads.sort(key=head_relevance)
+        # A plan that ignores every param is constant: it cannot match
+        # varying expected outputs. Enforced at try time, since literals
+        # are now banked as values (GEN-SYNTH-1).
+        outputs_vary = (len({self._value_key(exp)
+                             for _, exp in examples}) > 1)
 
         def vsort(kv):
             frag = kv[1][0]
@@ -315,6 +336,11 @@ class PlanComposer:
                         if not ispec.accepts(vkind):
                             continue
                     except Exception:
+                        continue
+                    if outputs_vary and not frag.uses_param:
+                        # Constant plan over banked literals: cannot match
+                        # varying outputs (GEN-SYNTH-1 literal seeding).
+                        res.pruned_constant += 1
                         continue
                     plan = self._plan_from_frag(
                         objective, frag, prim, {iname: frag.out_ref})
@@ -382,6 +408,79 @@ class PlanComposer:
                                 return res
                         except Exception:
                             continue
+        # ---- binary heads -------------------------------------------------
+        # GEN-SYNTH-1: 2-input non-callable heads over ordered pairs of
+        # banked values (e.g. divide(5, square(x))). A dedicated loop:
+        # nesting the pair enumeration inside the value-outer loop above
+        # would be cubic in banked values. Heads-outer, pairs-inner;
+        # binary heads are tried only after the unary/(coll, fn) shapes,
+        # preserving existing search order.
+        #
+        # Pair order is a tractability bound, not an answer hint: binary
+        # operators commonly combine a computed value with a constant, so
+        # constant-involving pairs come before derived-derived pairs. The
+        # per-head pair cap keeps the candidate budget fair across heads.
+        # The forbidden filter on `heads` (GEN-XDOM-1 repair) applies here:
+        # bin_heads draws from the same filtered list.
+        BINARY_HEAD_PAIR_CAP = 1024
+        derived = [(k, v) for k, v in ordered_values if v[0].uses_param]
+        consts = [(k, v) for k, v in ordered_values
+                  if not v[0].uses_param]
+        # Occam over constants: raw example literals (no prims) before
+        # constants derived by applying prims to literals, so the found
+        # plan reads divide(5.0, square(x)), not divide(abs(5.0), ...).
+        # Stable: preserves vsort order within each group.
+        consts.sort(key=lambda kv: len(kv[1][0].used))
+        bin_heads = [
+            p for p in heads
+            if len(p.inputs) == 2 and not any(
+                s.kind is Kind.CALLABLE for _, s in p.inputs.items())]
+        for prim in bin_heads:
+            inputs = list(prim.inputs.items())
+            (aname, aspec), (bname, bspec) = inputs[0], inputs[1]
+            pairs = ([(c, d) for c in consts for d in derived] +
+                     [(d, c) for d in derived for c in consts] +
+                     [(d1, d2) for d1 in derived for d2 in derived])
+            tried = 0
+            for (key1, (frag1, _v1, _p1)), (key2, (frag2, _v2, _p2)) \
+                    in pairs:
+                _, _, vkind1 = banked[key1]
+                _, _, vkind2 = banked[key2]
+                try:
+                    if not aspec.accepts(vkind1):
+                        continue
+                    if not bspec.accepts(vkind2):
+                        continue
+                except Exception:
+                    continue
+                if outputs_vary and not (
+                        frag1.uses_param or frag2.uses_param):
+                    res.pruned_constant += 1
+                    continue
+                if tried >= BINARY_HEAD_PAIR_CAP:
+                    break
+                if res.candidates_evaluated >= objective.max_candidates:
+                    res.search_exhausted = True
+                    return res
+                tried += 1
+                frags = [frag1] if key1 == key2 else [frag1, frag2]
+                args = {aname: frag1.out_ref, bname: frag2.out_ref}
+                plan = self._plan_from_frags(objective, frags, prim, args)
+                if plan is None:
+                    res.refused_type_incoherent += 1
+                    continue
+                out_vals = self._exec_vals(plan, objective)
+                res.candidates_evaluated += 1
+                if out_vals is None:
+                    continue
+                try:
+                    if tuple(self._value_key(v) for v in out_vals) \
+                            == exp_key:
+                        nfrag = self._extend_frags(frags, prim, args, None)
+                        self._finish(objective, res, nfrag)
+                        return res
+                except Exception:
+                    continue
         res.search_exhausted = True
         return res
 
@@ -560,15 +659,19 @@ class PlanComposer:
                     continue
         return False
 
-    def _plan_from_frag(self, objective: CompositionObjective,
-                        frag: _Fragment, prim: Any,
-                        args: Dict[str, Any]) -> Any:
-        """Full plan = frag's steps + prim applied. None if analyze()
-        refuses it (type-incoherent: counted by the caller)."""
+    def _plan_from_frags(self, objective: CompositionObjective,
+                         frags: List[_Fragment], prim: Any,
+                         args: Dict[str, Any]) -> Any:
+        """Full plan = merged frag steps + prim applied. None if analyze()
+        refuses it (type-incoherent: counted by the caller). GEN-SYNTH-1:
+        generalizes the single-fragment path to binary heads/banking."""
         self._frag_seq += 1
         head_id = f"__f_{self._frag_seq}__"
-        steps = list(frag.steps) + [{"id": head_id, "op": prim.name,
-                                     "args": dict(args)}]
+        steps: List[Dict[str, Any]] = []
+        for f in frags:
+            steps.extend(f.steps)
+        steps.append({"id": head_id, "op": prim.name,
+                      "args": dict(args)})
         plan = {"version": 1, "name": f"composed_{objective.gap_id[:8]}",
                 "params": {k: str(v.kind.value)
                            for k, v in objective.params.items()},
@@ -580,6 +683,13 @@ class PlanComposer:
         if not analysis.ok:
             return None
         return plan
+
+    def _plan_from_frag(self, objective: CompositionObjective,
+                        frag: _Fragment, prim: Any,
+                        args: Dict[str, Any]) -> Any:
+        """Full plan = frag's steps + prim applied. None if analyze()
+        refuses it (type-incoherent: counted by the caller)."""
+        return self._plan_from_frags(objective, [frag], prim, args)
 
     def _exec_vals(self, plan: Any,
                    objective: CompositionObjective) -> Any:
@@ -595,24 +705,37 @@ class PlanComposer:
             out.append(r.get("value"))
         return tuple(out)
 
-    def _extend_frag(self, frag: _Fragment, prim: Any,
-                     args: Dict[str, Any], lam: Any) -> _Fragment:
+    def _extend_frags(self, frags: List[_Fragment], prim: Any,
+                      args: Dict[str, Any], lam: Any) -> _Fragment:
+        """GEN-SYNTH-1: generalizes _extend_frag to binary application."""
         self._frag_seq += 1
         head_id = f"__f_{self._frag_seq}__"
-        steps = list(frag.steps) + [{"id": head_id, "op": prim.name,
-                                     "args": dict(args)}]
+        steps: List[Dict[str, Any]] = []
+        for f in frags:
+            steps.extend(f.steps)
+        steps.append({"id": head_id, "op": prim.name,
+                      "args": dict(args)})
         # Rebind: replace the arg refs that pointed at frag.out_ref with
         # the new head where they were the fragment output. The args dict
         # already holds frag.out_ref for the collection input; that ref
         # is correct as-is (it points into frag.steps).
-        used = list(frag.used)
+        used: List[str] = []
+        for f in frags:
+            for u in f.used:
+                if u not in used:
+                    used.append(u)
         if lam is not None:
             for u in lam.used:
                 if u not in used:
                     used.append(u)
         used.append(prim.name)
+        uses_param = any(f.uses_param for f in frags)
         return _Fragment(steps, {"$step": head_id}, used,
-                         uses_param=frag.uses_param)
+                         uses_param=uses_param)
+
+    def _extend_frag(self, frag: _Fragment, prim: Any,
+                     args: Dict[str, Any], lam: Any) -> _Fragment:
+        return self._extend_frags([frag], prim, args, lam)
 
     def _finish(self, objective: CompositionObjective,
                 res: ComposeResult, frag: _Fragment) -> ComposeResult:
