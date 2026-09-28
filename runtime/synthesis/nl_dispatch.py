@@ -841,8 +841,12 @@ class NLToolDispatcher:
         # 1. route
         route = self.router.route(text)
         if not route.ok:
-            return DispatchResult(
+            result = DispatchResult(
                 ok=False, refusal=route.refusal, reasons=route.reasons)
+            # V10-GAP-GENESIS: a routing failure is a potential composition
+            # gap. Attempt genesis (never breaks dispatch; the result is
+            # returned unchanged).
+            return self._wire_genesis_gap(result, text, args)
 
         cap_id = route.capability_id
         # 1b. argument synthesis for pure-NL media requests: when the
@@ -1050,6 +1054,33 @@ class NLToolDispatcher:
                 "gap registered: %s (route %s, outcome %s)" % (
                     wire.get("gap_id"), wire.get("route"),
                     wire.get("outcome")))
+        return result
+
+    # -- gap genesis wiring (V10-GAP-GENESIS) --------------------------------
+    # A routing failure (unknown_intent: no capability matched) is not a
+    # limitation or a missing dependency -- the existing dispatch_gaps
+    # wiring does not cover it. This hook attempts gap GENESIS: the failed
+    # request becomes a composition gap with VERIFIED examples synthesized
+    # by decomposition (gap_genesis), which the existing gap route
+    # dispatcher then drives through the composition inlet. Double-
+    # contained like _wire_failure_gap; the dispatch result is returned
+    # unchanged.
+
+    def _wire_genesis_gap(self, result: DispatchResult, text: str,
+                          args: Optional[Dict[str, Any]]) -> DispatchResult:
+        try:
+            from swarm_engine.synthesis.gap_genesis import (
+                maybe_genesis_composition_gap)
+            genesis = maybe_genesis_composition_gap(
+                self.engine, text, args, result)
+        except Exception:
+            return result
+        if genesis.get("genesis"):
+            result.reasons.append(
+                "gap genesis: %s (%s verified examples; use "
+                "registry.dispatch to process)" % (
+                    genesis.get("gap_id"),
+                    genesis.get("examples")))
         return result
 
     # -- production limitation recorder (Q12) -------------------------------
