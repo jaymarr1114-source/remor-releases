@@ -128,11 +128,13 @@ ENTRIES: List[Dict[str, Any]] = [
         kind="remote-dispatch",
         feature="Remote Dispatch",
         code="remote_dispatch",
-        reason=("the runtime has no remote substrate: no remote endpoints, "
-                "no remote agent transport, and no target pairing or "
-                "credentials. This GUI is local-only, so dispatching agents "
-                "to remote machines cannot be served."),
-        missing_substrate="remote endpoint / device fleet / dispatch protocol",
+        reason=("the backend remote-dispatch route is implemented and "
+                "bench-verified for X11 targets (device pairing, explicit "
+                "user consent, scoped cursor control with kill switch), but "
+                "the GUI Dispatch tab is not bound to it and no general "
+                "device substrate exists: there is no user-facing remote "
+                "cursor control yet."),
+        missing_substrate="GUI Dispatch-tab binding / non-X11 target substrate",
         route=None, probe=None, http_status=None,
     ),
     _entry(

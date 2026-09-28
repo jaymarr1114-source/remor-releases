@@ -1,0 +1,17 @@
+[PASS] F1 event chain verifies in fresh process -- bad=rd_events chain intact
+[PASS] F2 replay session state persisted -- live
+[PASS] F3 killed sessions stayed killed -- 2 killed
+[PASS] F3b restarted target cert matches pin -- 47f25e28046af0e8
+[PASS] F4 hello on old session still accepted -- hello_ok
+[PASS] F5 replayed nonce refused after restart -- action_refused {'reason': 'duplicate nonce: replay refused'}
+[PASS] F6 API request session -- {'ok': True, 'session_id': 'sess_c315c297a3eb86e5214742b8', 'state': 'pending'}
+[PASS] F7 API list sessions (history populates) -- 17 sessions
+[PASS] F8 DB holds only the user-token hash
+[PASS] F9 API dispatch moves the real cursor -- {'ok': True, 'results': [{'x': 123, 'y': 321}]}
+[PASS] F10 API dispatch refusal is body data -- {'ok': False, 'refused': "target refused: scope refused action: action 'launch_a
+[PASS] F11 API kill -- {'ok': True, 'session_id': 'sess_c315c297a3eb86e5214742b8', 
+[PASS] F12 API dispatch after kill refused -- {'ok': False, 'refused': "connect: handshake failed: handshake refused: {'reason
+[PASS] F13 API end -- {'ok': True, 'session_id': 'sess_c315c297a3eb86e5214742b8', 
+
+RD1 fresh-process: 14/14 green
+EXIT=0

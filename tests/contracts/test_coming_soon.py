@@ -8,10 +8,14 @@ unavailable control. These tests enforce that, per entry:
     entry's code/reason/missing_substrate must EXACTLY match the live
     handler output. Any drift in the handlers fails the suite until the
     entry is updated -- the listing cannot go stale silently.
-  * absent entries (remote_dispatch, evidence_doc_generation): the route
+  * absent entries (evidence_doc_generation): the route
     table is scanned for any matching route (none may exist), plausible
     paths are driven to honest 404s, and the corresponding honest-absence
     evidence is asserted (fresh evidence store has no produced documents).
+  * remote_dispatch is backend-present but gui-absent: the /api/remote/*
+    routes exist on the engine-bound service, while the availability
+    entry keeps the user-facing capability coming-soon with its bounded
+    reason.
   * coverage: the listing's code set must exactly equal the authoritative
     inventory -- report MISSION_REPORT_2026-09-26_BACKEND_CONTRACTS.md
     sections 1/7/8 (11 codes) plus the design-batch kind evidence-docs
@@ -87,16 +91,8 @@ REPORT_CODES = {
 }
 EXPECTED_CODES = REPORT_CODES | {"evidence_doc_generation"}
 
-# Plausible-but-nonexistent remote paths: all must 404 honestly.
-# (GET /api/agents/<id> is deliberately NOT probed: it is a real route
-# whose {agent_id} variable collides with the string "remote"; the
-# route-table scan below is the honest absence check for remote paths.)
-REMOTE_PROBE_PATHS = [
-    ("GET", "/api/remote/dispatch"),
-    ("POST", "/api/remote/dispatch"),
-    ("POST", "/api/dispatch"),
-    ("POST", "/api/agents/dispatch-remote"),
-]
+# (retired by REMOTE-DISPATCH-1: /api/remote/* now exists on the
+# engine-bound service; absence is no longer the honest claim.)
 
 
 class ComingSoonContractTest(unittest.TestCase):
@@ -213,17 +209,35 @@ class ComingSoonContractTest(unittest.TestCase):
             self.services["artifacts"].list_artifacts(), [],
             "a coming-soon probe saved an artifact")
 
-    # -- per-entry verification: genuinely absent ----------------------
-    def test_remote_dispatch_genuinely_absent(self):
-        paths = [p for (_m, p) in self.routes]
-        self.assertFalse([p for p in paths if "remote" in p],
-                         "a remote route exists -- entry is no longer absent")
-        for method, path in REMOTE_PROBE_PATHS:
-            res = dispatch(self.routes, method, path, {})
-            self.assertFalse(res.get("ok"))
-            self.assertEqual(res.get("http_status"), 404,
-                             f"{method} {path}: expected honest 404, "
-                             f"got {str(res)[:160]}")
+    # -- per-entry verification: remote-dispatch backend present --------
+    # REMOTE-DISPATCH-1: the backend route exists (mounted on the
+    # engine-bound _Service, over the canonical AgentDirectory), but the
+    # GUI Dispatch tab is not bound to it -- the user-facing capability
+    # stays coming-soon with the bounded reason.
+    def test_remote_dispatch_backend_present_gui_coming_soon(self):
+        from swarm_engine.services.http_adapter import _Service
+        tmp = tempfile.mkdtemp(prefix="remor_ff_rd1_")
+        try:
+            svc = _Service(
+                db_path=os.path.join(tmp, "eng.db"),
+                base_dir=os.path.join(tmp, "svc"),
+                enable_dispatch_learning=False)
+            routes = svc.ff["contract_routes"]
+            remote = sorted(p for (_m, p) in routes if "/api/remote/" in p)
+            self.assertTrue(
+                {"/api/remote/pair", "/api/remote/sessions",
+                 "/api/remote/dispatch", "/api/remote/kill",
+                 "/api/remote/end"} <= set(remote),
+                f"backend remote routes missing: {remote}")
+            self.assertIn("remote_dispatch", svc.ff,
+                          "remote_dispatch service not wired")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        entry = self.by_code["remote_dispatch"]
+        un = entry["unavailable"]
+        self.assertEqual(un["gui"], "coming_soon")
+        self.assertIn("bench-verified", un["reason"])
+        self.assertIn("not bound", un["reason"])
 
     def test_evidence_doc_generation_genuinely_absent(self):
         paths = [p for (_m, p) in self.routes]

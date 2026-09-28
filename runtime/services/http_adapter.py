@@ -945,6 +945,12 @@ class _Service:
         # governed HTTP media fronts (auth + scoped WRITE_FS grant +
         # governed dispatch with persisted records). Fail-closed at boot.
         self._wire_media()
+        # [REMOTE-DISPATCH-1] wire the remote-dispatch service: pair /
+        # session / dispatch / kill / end routes. Built over the
+        # Handler's canonical AgentDirectory (engine.oracle_registry) --
+        # not a parallel identity store -- and merged into the contract
+        # route table. Fail-closed at boot.
+        self._wire_remote_dispatch()
 
     # -- dispatch learning (Worker 1 / LIVE DISPATCH FLOW) ----------------------------
     def _boot_dispatch_learning(self):
@@ -1347,6 +1353,26 @@ class _Service:
         if row is None:
             return 404, {"error": f"unknown dispatch evidence {evidence_id!r}"}
         return 200, {"evidence": dict(row)}
+
+    # -- remote dispatch (REMOTE-DISPATCH-1) ---------------------------------
+    def _wire_remote_dispatch(self):
+        """Mount the remote-dispatch route handlers on the contract table.
+
+        The service is built over the Handler's canonical AgentDirectory
+        (engine.oracle_registry) -- the same identity machinery every
+        agent<->REMOR choke point uses -- and the engine's oracle as the
+        grant-holding caller for pairing. No duplicate stores, routers,
+        or identity systems. Routes inherit the contract table's auth
+        and status mapping via _contract_dispatch.
+        """
+        from swarm_engine.services.remote_dispatch_api import (
+            build_remote_dispatch_service, routes_for_remote_dispatch)
+        rd_dir = os.path.join(self.base_dir, "remote_dispatch")
+        svc = build_remote_dispatch_service(
+            rd_dir, self.agents, self.engine.oracle)
+        self.ff["remote_dispatch"] = svc
+        self.ff["contract_routes"].update(
+            routes_for_remote_dispatch(svc))
 
     # -- media front (wired to the verified substrate) -------------------------
     def _wire_media(self):
