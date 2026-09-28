@@ -291,6 +291,35 @@ class AcceptanceLoop:
                                presented_at=time.time())
         return self.store.save(rec)
 
+    def present_retry(self, run_id: str, attempt: Attempt,
+                      auth: AuthReport) -> AcceptanceRecord:
+        """Re-present after a rejection as the next round, with the evidence
+        chain INTACT: near_miss_ids and rounds carry forward (plain
+        present() would wipe them via INSERT OR REPLACE). V10-P6 repair:
+        without this, dissatisfaction -> near-miss -> steered retry ->
+        accept is not queryable as one chain."""
+        if not auth.passed:
+            raise ValueError(
+                "present_retry: authentication gate did not pass; a failed "
+                "attempt is not presentable as completed")
+        prior = self.store.get(run_id)
+        if prior is None:
+            raise KeyError(
+                f"present_retry: no acceptance record for {run_id!r}; "
+                "a retry with no prior round is a fabricated chain")
+        if prior.state is AcceptanceState.ACCEPTED:
+            raise ValueError(
+                f"present_retry: run {run_id!r} is already accepted; "
+                "a retry is only presentable after a rejection")
+        rec = AcceptanceRecord(
+            run_id=run_id, goal=prior.goal,
+            system_status=self.system_status_of(run_id) or SYSTEM_COMPLETED,
+            auth=auth, state=AcceptanceState.CANDIDATE,
+            rounds=prior.rounds,
+            near_miss_ids=list(prior.near_miss_ids),
+            attempt=attempt, presented_at=time.time())
+        return self.store.save(rec)
+
     # -- user side: the verdict ------------------------------------------
 
     def record_verdict(self, run_id: str, satisfied: bool,

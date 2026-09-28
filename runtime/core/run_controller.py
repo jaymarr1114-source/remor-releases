@@ -715,22 +715,39 @@ class RunController:
         return attempt
 
     # -- acceptance-loop invocation (owned here; Q8's present() calls in) --
+    def _acceptance_driver(self):
+        """The production acceptance driver behind this inlet (V10-P6).
+        Built once from the Controller's own engine + epistemic store;
+        M6's AcceptanceLoop is called, never rebuilt."""
+        drv = getattr(self, "_driver", None)
+        if drv is None:
+            from swarm_engine.services.acceptance_driver import (
+                AcceptanceDriver)
+            store_path = os.path.join(
+                os.path.dirname(os.path.abspath(self.checkpoint_path)),
+                "acceptance.db")
+            drv = AcceptanceDriver.from_controller(self, store_path)
+            self._driver = drv
+        return drv
+
+    def acceptance_driver(self):
+        """Access to the production driver (verdict submission, chains)."""
+        return self._acceptance_driver()
+
     def invoke_acceptance(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Acceptance-loop invocation inlet. OWNED BY THE CONTROLLER.
 
         Q8's present() is an inlet into this mechanism, not the owner of
-        the loop. The production acceptance driver lands in V10-P6; until
-        then the invocation is recorded honestly, never faked complete."""
-        obs_id = self._observe(
-            "acceptance_invoked",
-            "Run Controller: acceptance-loop invocation recorded "
-            "(production driver: V10-P6).",
-            {"kind": "acceptance_invocation",
-             "result_summary": str(result)[:1000]},
-            causal_chain=[self._run_id])
-        return {"invoked": True, "observation_id": obs_id,
-                "note": "production acceptance driver lands in V10-P6; "
-                        "the invocation inlet is owned here"}
+        the loop. A produced result enters the acceptance/review pathway:
+        the production driver (V10-P6) authenticates it with real
+        executions and presents it as a CANDIDATE. Completed is a
+        candidate state -- never terminal, never accepted-by-default."""
+        drv = self._acceptance_driver()
+        rec = drv.present_result(result)
+        return {"invoked": True, "run_id": rec.run_id,
+                "state": rec.state.value, "rounds": rec.rounds,
+                "note": "production acceptance driver (V10-P6) behind "
+                        "the Controller-owned inlet"}
 
     # -- developmental-stage hooks (dormant until V10-P7) ------------------
     def note_stage_transition(self, from_stage: str, to_stage: str,
