@@ -38,6 +38,13 @@ class ExecutionTargetProfile:
                               # per-keystroke interruption point)
     global_keys: bool         # back/home/recents style keys available
     app_launch: bool
+    # Declared screen-capture mechanism, e.g. "xlib-image" |
+    # "mediaprojection-bridge" | "none". Informational: substrate
+    # resolution still keys on the (input, indicator) capability pair,
+    # and Substrate.make_screen_capture fails closed when the resolved
+    # substrate has no capture path. Same attestation caveat as the
+    # rest of the profile (declared, not yet probed).
+    capture_mechanism: str = "none"
 
 
 X11_PROFILE = ExecutionTargetProfile(
@@ -49,6 +56,7 @@ X11_PROFILE = ExecutionTargetProfile(
     atomic_text=False,
     global_keys=True,
     app_launch=True,
+    capture_mechanism="xlib-image",
 )
 
 ANDROID_PROFILE = ExecutionTargetProfile(
@@ -60,6 +68,7 @@ ANDROID_PROFILE = ExecutionTargetProfile(
     atomic_text=True,
     global_keys=True,
     app_launch=True,
+    capture_mechanism="mediaprojection-bridge",
 )
 
 
@@ -113,6 +122,30 @@ class SubstrateIndicator(ABC):
     def live(self) -> bool: ...
 
 
+class ScreenCapture(ABC):
+    """Target-side screen capture for the session stream.
+
+    capture() returns a frame dict:
+      {"width": int, "height": int, "format": "png",
+       "data_b64": str,            # base64-encoded PNG bytes
+       "ts": float,                # capture time (target clock)
+       "synthesized": bool}        # True ONLY for harness stand-ins
+    clip is {"x","y","w","h"} in target pixels, or None for the full
+    display. Scope-clipping is applied by the TARGET AGENT before
+    capture is called: the substrate clips to the given rect, never a
+    full frame blurred after the fact.
+
+    A frame that cannot be captured raises CursorError (fail-closed):
+    the channel reports an explicit error frame, never a stale or
+    fabricated image.
+    """
+
+    @abstractmethod
+    def capture(self, clip: Optional[Dict[str, int]]) -> Dict[str, Any]: ...
+    @abstractmethod
+    def close(self) -> None: ...
+
+
 class Substrate(ABC):
     profile: ExecutionTargetProfile
 
@@ -120,6 +153,14 @@ class Substrate(ABC):
     def make_cursor(self, **config) -> TargetCursor: ...
     @abstractmethod
     def make_indicator(self, **config) -> SubstrateIndicator: ...
+
+    def make_screen_capture(self, **config) -> ScreenCapture:
+        """Fail-closed default: a substrate with no capture path
+        refuses the stream rather than faking frames."""
+        raise CursorError(
+            "screen capture unsupported on this substrate"
+            f" ({self.profile.capture_mechanism!r}): the stream is"
+            " unavailable, not silently degraded")
 
     def wire_target_events(self, target) -> None:
         """Optional: wire app/device->Python events (e.g. user-local
@@ -138,6 +179,10 @@ class X11Substrate(Substrate):
     def make_indicator(self, **config) -> SubstrateIndicator:
         return X11Indicator(display=config.get("display"),
                             on_failure=config.get("on_failure"))
+
+    def make_screen_capture(self, **config) -> "ScreenCapture":
+        from .cursor_x11 import X11ScreenCapture
+        return X11ScreenCapture(display=config.get("display"))
 
 
 INDICATOR_WM_NAME = "REMOR Remote Session LIVE"

@@ -18,6 +18,8 @@ Honest substrate classification (Linux/X11/XTEST):
 """
 from __future__ import annotations
 
+import base64
+import io
 import os
 import subprocess
 import time
@@ -27,6 +29,8 @@ from Xlib import X
 from Xlib.display import Display
 from Xlib.ext import xtest
 from Xlib import XK
+
+from .substrates import ScreenCapture
 
 
 class CursorError(RuntimeError):
@@ -129,6 +133,82 @@ class X11Cursor:
                                 stderr=subprocess.DEVNULL,
                                 stdin=subprocess.DEVNULL, start_new_session=True)
         return {"pid": proc.pid}
+
+    def close(self) -> None:
+        try:
+            self._d.close()
+        except Exception:
+            pass
+
+
+class X11ScreenCapture(ScreenCapture):
+    """Real frame capture on the X11 bench substrate: XGetImage on the
+    root window (the real X server), cropped to the clip rect at
+    capture time, encoded to PNG. Any failure raises CursorError --
+    fail-closed, never a stale or fabricated frame."""
+
+    def __init__(self, display: Optional[str] = None):
+        self.display_name = display or os.environ.get("DISPLAY", ":99")
+        try:
+            self._d = Display(self.display_name)
+        except Exception as e:
+            raise CursorError(
+                f"x11 capture: no X server on {self.display_name}: {e}")
+        screen = self._d.screen()
+        self._root = screen.root
+        self._dw = screen.width_in_pixels
+        self._dh = screen.height_in_pixels
+
+    def display_size(self) -> Dict[str, int]:
+        return {"width": self._dw, "height": self._dh}
+
+    def capture(self, clip: Optional[Dict[str, int]] = None,
+                max_dim: Optional[int] = None) -> Dict[str, object]:
+        if clip:
+            x = max(0, int(clip.get("x", 0)))
+            y = max(0, int(clip.get("y", 0)))
+            w = int(clip.get("w", self._dw))
+            h = int(clip.get("h", self._dh))
+        else:
+            x, y, w, h = 0, 0, self._dw, self._dh
+        # intersect with the real display: never read out of bounds
+        w = max(1, min(w, self._dw - x))
+        h = max(1, min(h, self._dh - y))
+        try:
+            img = self._root.get_image(x, y, w, h, X.ZPixmap,
+                                       0xFFFFFFFF)
+        except Exception as e:
+            raise CursorError(f"x11 capture: get_image failed: {e}")
+        if img.depth not in (24, 32):
+            raise CursorError(
+                f"x11 capture: unsupported depth {img.depth}"
+                " (refusing to guess pixel layout)")
+        # 32-bit TrueColor: 4 bytes/pixel; the server's image byte
+        # order (from connection setup) decides the channel layout.
+        try:
+            lsb = self._d.display.info.image_byte_order == 0
+        except Exception:
+            lsb = True  # x86 bench default; the proof verifies color
+        raw_mode = "BGRX" if lsb else "XRGB"
+        try:
+            from PIL import Image
+            pil = Image.frombytes("RGB", (w, h), img.data, "raw",
+                                  raw_mode)
+            if max_dim and max(w, h) > max_dim:
+                scale = max_dim / max(w, h)
+                pil = pil.resize((max(1, int(w * scale)),
+                                  max(1, int(h * scale))))
+                w, h = pil.size
+            buf = io.BytesIO()
+            pil.save(buf, format="PNG")
+            png = buf.getvalue()
+        except CursorError:
+            raise
+        except Exception as e:
+            raise CursorError(f"x11 capture: PNG encode failed: {e}")
+        return {"width": w, "height": h, "format": "png",
+                "data_b64": base64.b64encode(png).decode("ascii"),
+                "ts": time.time(), "synthesized": False}
 
     def close(self) -> None:
         try:

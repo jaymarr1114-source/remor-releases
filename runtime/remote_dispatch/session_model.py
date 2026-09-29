@@ -148,6 +148,13 @@ class Scope:
     apps: Optional[List[str]] = None
     max_actions: int = 200
     ttl_s: float = 600.0
+    # Screen-streaming grants. screen_share gates the get_frame stream:
+    # the target refuses frames unless the consented scope carries it.
+    # record_frames gates persistence of frames on the controller side:
+    # the sanctioned save path refuses without it, so frames are never
+    # persisted by default. Both are surfaced in the consent UI.
+    screen_share: bool = False
+    record_frames: bool = False
 
     def allows(self, action: Dict[str, Any]) -> Tuple[bool, str]:
         kind = action.get("type")
@@ -177,7 +184,8 @@ class Scope:
         return {"actions": self.actions, "x_min": self.x_min,
                 "y_min": self.y_min, "x_max": self.x_max, "y_max": self.y_max,
                 "apps": self.apps, "max_actions": self.max_actions,
-                "ttl_s": self.ttl_s}
+                "ttl_s": self.ttl_s, "screen_share": self.screen_share,
+                "record_frames": self.record_frames}
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Scope":
@@ -188,6 +196,8 @@ class Scope:
         if "ttl_s" in d:
             s.ttl_s = d["ttl_s"]
         s.apps = d.get("apps")
+        s.screen_share = bool(d.get("screen_share", False))
+        s.record_frames = bool(d.get("record_frames", False))
         return s
 
 

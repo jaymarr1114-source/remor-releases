@@ -28,8 +28,9 @@ import socket
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from .substrates import (ANDROID_PROFILE, CursorError, Substrate,
-                         SubstrateIndicator, SubstrateRefusal, TargetCursor)
+from .substrates import (ANDROID_PROFILE, CursorError, ScreenCapture,
+                         Substrate, SubstrateIndicator, SubstrateRefusal,
+                         TargetCursor)
 
 BRIDGE_DEFAULT_HOST = "127.0.0.1"
 BRIDGE_DEFAULT_PORT = 47631
@@ -318,6 +319,53 @@ class AndroidIndicator(SubstrateIndicator):
             return False
 
 
+class AndroidScreenCapture(ScreenCapture):
+    """Screen capture on the Android substrate via the bridge
+    `capture_frame` command.
+
+    The REAL capture path is the target app's MediaProjection flow
+    (BridgeProtocol.md): the app acquires the projection, renders to
+    an ImageReader surface, and returns PNG bytes. Fail-closed: if
+    the app has no media-projection permission it returns
+    CAPTURE_UNAVAILABLE and this raises CursorError -- never a stale
+    or fabricated frame.
+
+    A latched user kill refuses capture like any actuator command
+    (KILL_LATCHED -> SubstrateRefusal): in the lost-event case the
+    screen must not keep streaming after the user pressed KILL.
+    """
+
+    def __init__(self, bridge: Optional[AndroidBridge] = None,
+                 host: str = BRIDGE_DEFAULT_HOST,
+                 port: int = BRIDGE_DEFAULT_PORT):
+        self._bridge = bridge or AndroidBridge(host, port)
+        self._owns_bridge = bridge is None
+
+    def capture(self, clip: Optional[Dict[str, int]] = None,
+                max_dim: Optional[int] = None) -> Dict[str, Any]:
+        # Scope-clipping is applied by the target agent before this
+        # call; the clip here is defense-in-depth on the same rect.
+        params: Dict[str, Any] = {
+            "max_w": int(max_dim) if max_dim else 0,
+            "max_h": int(max_dim) if max_dim else 0,
+        }
+        if clip:
+            params["clip"] = {k: int(clip.get(k, 0))
+                              for k in ("x", "y", "w", "h")}
+        res = self._bridge.request("capture_frame", params)
+        # Pass the harness label through untouched: synthesized frames
+        # are only ever admissible when labeled as such.
+        return {"width": int(res["width"]), "height": int(res["height"]),
+                "format": str(res.get("format", "png")),
+                "data_b64": str(res["data_b64"]),
+                "ts": float(res.get("ts", 0.0)),
+                "synthesized": bool(res.get("synthesized", False))}
+
+    def close(self) -> None:
+        if self._owns_bridge:
+            self._bridge.close()
+
+
 class AndroidSubstrate(Substrate):
     profile = ANDROID_PROFILE
 
@@ -344,6 +392,9 @@ class AndroidSubstrate(Substrate):
     def make_indicator(self, **config) -> SubstrateIndicator:
         return AndroidIndicator(bridge=self._shared(config),
                                 on_failure=config.get("on_failure"))
+
+    def make_screen_capture(self, **config) -> ScreenCapture:
+        return AndroidScreenCapture(bridge=self._shared(config))
 
     def wire_target_events(self, target) -> None:
         """App->Python events. user_kill goes through the target's own

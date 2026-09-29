@@ -1,0 +1,49 @@
+== A. X11 real capture (live X server) ==
+[PASS] A1 full frame has display dims -- 1280x800
+[PASS] A2 frame is PNG, not synthesized
+[PASS] A3 PNG decodes to RGB image -- (1280, 800)
+[PASS] A4 frame fits protocol max frame
+[PASS] A5 real pixels, correct color (red block) -- (255, 0, 0)
+[PASS] A6 clip respected at capture
+[PASS] A7 downscale respected -- 320x200
+[PASS] A8 consecutive frames differ (live, not cached)
+== B. stream over the real TLS session channel ==
+[PASS] B1 three frames stream through the channel
+[PASS] B2 frames decode, display-sized, real (not synthesized)
+[PASS] B3 frames not charged to the action budget -- actions_used=0
+[PASS] B4 action still works after frames (seq in sync)
+== C. kill stops the stream (refused, not frozen) ==
+[PASS] C1 frame flows while live
+[PASS] C2 post-kill frame refused (controller relay) -- session killed: frame refused (not live)
+[PASS] C3 refusal is prompt, not a frozen hang -- 0.00s
+[PASS] C4 target-local user kill stops the stream -- action_refused: session killed: frame refused
+[PASS] C5 burst of 5 post-kill fetches: zero frames, all refused -- 5/5 refused
+== D. expiry + scope governance ==
+[PASS] D1 no frames after consent expiry -- action_refused: consent no longer live: frame refused
+[PASS] D2 frame without screen_share grant refused explicitly -- action_refused: screen sharing not in session scope: frame refused
+[PASS] D3 scope-clipping at capture (100x100, never full frame) -- 100x100
+== E. no persistence by default ==
+[PASS] E1 save_frame refused without record_frames grant -- frame persistence refused: session scope does not grant record_frames
+[PASS] E2 target persisted zero frames -- []
+[PASS] E3 save_frame works WITH the record_frames grant
+== F. replay guards on frame fetches ==
+[PASS] F1 manual frame fetch ok
+[PASS] F2 duplicate seq on get_frame refused -- action_refused: seq mismatch: got 2, expected 3 (replay or reorder refused)
+[PASS] F3 stream continues after refused replay
+== G. Android bridge capture path (HARNESS-SYNTHESIZED) ==
+[PASS] G1 harness frame labeled synthesized -- synth=True
+[PASS] G2 harness PNG decodes -- 216x480
+[PASS] G3 harness honors clip
+[PASS] G4 harness frames advance (not a still)
+[PASS] G5 latched kill refuses capture (KILL_LATCHED)
+[PASS] G6 android-target stream frame, labeled synthesized
+[PASS] G7 android frame PNG decodes
+== H. fail-closed paths ==
+[PASS] H1 default make_screen_capture fails closed
+[PASS] H2 substrate resolution unchanged
+== I. action-path regression (refactor safety) ==
+[PASS] I1 move still works after enforcement refactor
+[PASS] I2 click works interleaved with frames
+[PASS] I3 out-of-scope action still refused
+
+==== DSS battery: 38/38 pass, 0 fail (102.0s) ====

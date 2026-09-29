@@ -63,6 +63,7 @@ class RemoteDispatchTarget:
         cfg.setdefault("on_failure", self.store.log_event)
         self._substrate_config = cfg
         self._cursor = None  # created lazily via the substrate
+        self._capture = None  # screen capture, created lazily per stream
         self._indicator = self._substrate.make_indicator(**cfg)
         # Substrate event channel (Android: app->Python user_kill).
         # Target-local entry points only; the controller has no path.
@@ -106,7 +107,16 @@ class RemoteDispatchTarget:
 
     def stop(self) -> None:
         self._listener.stop()
+        self._close_capture()
         self._hide_indicator()
+
+    def _close_capture(self) -> None:
+        cap, self._capture = self._capture, None
+        if cap is not None:
+            try:
+                cap.close()
+            except Exception:
+                pass
 
     # -- target-local USER entry points (never on the channel) --------
     def user_grant_consent(self, session_id: str, user_token: str,
@@ -121,6 +131,7 @@ class RemoteDispatchTarget:
         per-action session check."""
         self.store._check_user(user_token)  # authenticate the user
         out = self.store.kill_session(session_id, by="user:target")
+        self._close_capture()
         self._hide_indicator(session_id)
         # Release the target: a killed session no longer holds the
         # cursor, so a new session may connect.
@@ -193,12 +204,16 @@ class RemoteDispatchTarget:
         if kind == "kill":
             # Fail-closed relay convenience: killing only ever stops.
             self.store.kill_session(session_id, by="controller-relay")
+            self._close_capture()
             self._hide_indicator(session_id)
             return {"kind": "kill_ok", "body": {"state": "killed"}}
         if kind == "end":
             self.store.end_session(session_id)
+            self._close_capture()
             self._hide_indicator(session_id)
             return {"kind": "end_ok", "body": {"state": "ended"}}
+        if kind == "get_frame":
+            return self._on_get_frame(msg)
         if kind not in ("action", "action_batch"):
             raise chan.ChannelError(f"unknown kind {kind!r}")
         actions = body.get("actions", [body.get("action")])
@@ -206,27 +221,8 @@ class RemoteDispatchTarget:
         if not actions:
             raise chan.ChannelError("no actions")
         # --- enforcement: every action, every time ---
-        s = self.store._get_session(session_id)
-        if s["state"] != LIVE:
-            raise TargetRefusal(
-                f"session {s['state']}: action refused")
-        # consent still live? (checked per action, not cached from hello)
-        if not self.store.consent_live(session_id):
-            raise TargetRefusal("consent no longer live: action refused")
-        # replay guards: exact seq + unseen nonce
-        seq, nonce = msg.get("seq"), msg.get("nonce")
-        with self._lock:
-            if seq != s["seq_next"]:
-                raise TargetRefusal(
-                    f"seq mismatch: got {seq}, expected {s['seq_next']}"
-                    " (replay or reorder refused)")
-            if self._nonce_seen(session_id, nonce):
-                raise TargetRefusal("duplicate nonce: replay refused")
-        # the message is new: consume its sequence number and record the
-        # nonce BEFORE application checks, so a scope refusal cannot
-        # desync the channel (the next message still lines up).
-        self.store.advance_seq(session_id)
-        self._record_nonce(session_id, nonce, seq)
+        s = self._enforce_channel(session_id, msg.get("seq"),
+                                  msg.get("nonce"), what="action")
         scope = self.store.get_scope(session_id)
         if s["actions_used"] + len(actions) > scope.max_actions:
             raise TargetRefusal("session action budget exhausted")
@@ -253,6 +249,70 @@ class RemoteDispatchTarget:
         # budget charged only for actions that actually executed
         self.store.charge_budget(session_id, len(actions))
         return {"kind": "action_ok", "body": {"results": results}}
+
+    def _enforce_channel(self, session_id: str, seq, nonce,
+                         what: str = "message"):
+        """Per-message enforcement shared by actions and frame fetches:
+        session live, consent live, exact seq + unseen nonce; the seq is
+        consumed and the nonce recorded BEFORE application checks, so a
+        refusal cannot desync the channel."""
+        s = self.store._get_session(session_id)
+        if s["state"] != LIVE:
+            raise TargetRefusal(
+                f"session {s['state']}: {what} refused")
+        # consent still live? (checked per message, not cached from hello)
+        if not self.store.consent_live(session_id):
+            raise TargetRefusal(f"consent no longer live: {what} refused")
+        with self._lock:
+            if seq != s["seq_next"]:
+                raise TargetRefusal(
+                    f"seq mismatch: got {seq}, expected {s['seq_next']}"
+                    " (replay or reorder refused)")
+            if self._nonce_seen(session_id, nonce):
+                raise TargetRefusal("duplicate nonce: replay refused")
+        self.store.advance_seq(session_id)
+        self._record_nonce(session_id, nonce, seq)
+        return s
+
+    def _on_get_frame(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """Serve one stream frame. Enforcement is identical to actions:
+        the stream lives only inside a live, consented session, and a
+        kill/end/expiry refuses the next fetch -- refused, not frozen.
+        Scope-clipping is applied to the capture rect BEFORE capture:
+        the controller never receives pixels outside the granted
+        bounds. Frames are never persisted here (see controller-side
+        save_frame, gated on the record_frames scope grant)."""
+        body = msg.get("body", {})
+        session_id = msg.get("session_id", "")
+        self._enforce_channel(session_id, msg.get("seq"), msg.get("nonce"),
+                              what="frame")
+        scope = self.store.get_scope(session_id)
+        if not scope.screen_share:
+            raise TargetRefusal(
+                "screen sharing not in session scope: frame refused")
+        if self._capture is None:
+            try:
+                self._capture = self._substrate.make_screen_capture(
+                    **self._substrate_config)
+            except CursorError as e:
+                raise TargetRefusal(
+                    f"screen capture unavailable: {e}")
+        clip = {"x": scope.x_min, "y": scope.y_min,
+                "w": scope.x_max - scope.x_min,
+                "h": scope.y_max - scope.y_min}
+        max_dim = body.get("max_dim")
+        if not isinstance(max_dim, int) or max_dim <= 0:
+            max_dim = None
+        try:
+            frame = self._capture.capture(clip, max_dim=max_dim)
+        except SubstrateRefusal as e:
+            # e.g. the Android target-local kill latch: the screen must
+            # not keep streaming after the user pressed KILL, even in
+            # the lost-event case.
+            raise TargetRefusal(str(e))
+        # A CursorError from capture (no X server, projection denied)
+        # propagates as an explicit error frame -- never a fake frame.
+        return {"kind": "frame_ok", "body": frame}
 
     def _nonce_seen(self, session_id: str, nonce: str) -> bool:
         conn = sqlite3.connect(self.db_path)

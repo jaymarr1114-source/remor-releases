@@ -309,6 +309,28 @@ public class DispatchAccessibilityService extends AccessibilityService {
     }
 
     // ------------------------------------------------------------------
+    // Screen capture (session stream)
+    // ------------------------------------------------------------------
+
+    /**
+     * Serve one capture_frame bridge command.
+     *
+     * FAIL-CLOSED STUB: the real implementation is the app's
+     * MediaProjection flow (see BridgeProtocol.md: request the
+     * projection via MediaProjectionManager.createScreenCaptureIntent,
+     * render into an ImageReader surface, acquireLatestImage per call,
+     * intersect clip, downscale to max_w/max_h, PNG, base64). Until
+     * that flow exists and the user has granted the projection, this
+     * throws CAPTURE_UNAVAILABLE -- the bridge replies ok:false and
+     * the Python side raises, never a stale or placeholder image.
+     */
+    JSONObject doCaptureFrame(JSONObject p) throws Exception {
+        throw new Exception("CAPTURE_UNAVAILABLE: media projection"
+                + " permission not granted (MediaProjection capture flow"
+                + " not yet implemented in the target app)");
+    }
+
+    // ------------------------------------------------------------------
     // Indicator overlay + kill
     // ------------------------------------------------------------------
 

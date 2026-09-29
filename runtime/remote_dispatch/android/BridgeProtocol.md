@@ -36,6 +36,7 @@ tokens and cannot grant consent.
 | `indicator_show` | `{"session_id": str}` | `{}` | show the overlay banner for the session |
 | `indicator_hide` | `{"session_id": str}` ("" = all) | `{}` | hide the overlay |
 | `indicator_live` | — | `{"live": bool}` | is the overlay currently shown (real query, not cached) |
+| `capture_frame` | `{"clip": {"x","y","w","h"}?, "max_w": int, "max_h": int}` | `{"width": int, "height": int, "format": "png", "data_b64": str, "ts": float, "synthesized": bool}` | screen capture for the session stream. `clip` (target pixels) is applied at capture; the app intersects it with the real display. `max_w`/`max_h` (0 = none) bound the returned size; the app downscales preserving aspect. `synthesized` is false for real captures. Fail-closed errors: `CAPTURE_UNAVAILABLE` (media-projection permission not granted — the app must not return a stale or placeholder image), `KILL_LATCHED` (the user kill latch gates capture like every actuator command: in the lost-event case the screen must not keep streaming after the user pressed KILL). The app never persists frames. |
 
 Unknown `cmd` → `ok: false`. All failures carry an explicit `error`
 string; the Python side raises, never fakes success.
@@ -52,10 +53,37 @@ Pressing KILL sets a latch in the app (`killLatchedSession`) FIRST, before
 any network I/O. While the latch is set, `BridgeServer` refuses every
 actuator command (`tap`, `swipe`, `scroll`, `set_text`, `global_action`,
 `launch`) with `{"ok": false, "error": "KILL_LATCHED: ..."}` — even if the
-`user_kill` event never reached Python. Indicator commands bypass the
-latch (hide/show must work during and after a kill; `indicator_live` is
-read-only), as do control-plane commands, which travel the TLS dispatch
-channel rather than the bridge.
+`user_kill` event never reached Python. `capture_frame` is gated by the
+latch the same way: a latched kill must stop the screen stream even in
+the lost-event case. Indicator commands bypass the latch (hide/show must
+work during and after a kill; `indicator_live` is read-only), as do
+control-plane commands, which travel the TLS dispatch channel rather
+than the bridge.
+
+## Screen capture (MediaProjection contract)
+
+`capture_frame` is served by the app's MediaProjection flow, which the
+app owns end to end:
+
+1. The app requests the projection via `MediaProjectionManager
+   .createScreenCaptureIntent()` and the user's one-time system grant
+   (the standard media-projection consent dialog). No grant ->
+   `capture_frame` returns `ok: false, error: "CAPTURE_UNAVAILABLE:
+   media projection permission not granted"` -- fail-closed, never a
+   placeholder image.
+2. On grant, the app holds the `MediaProjection` and renders into an
+   `ImageReader` surface sized to the current display.
+3. Per `capture_frame`: `acquireLatestImage()`, intersect the requested
+   `clip` with the real display, downscale to `max_w`/`max_h` keeping
+   aspect, compress to PNG, base64, reply. Timestamps come from the
+   image's acquisition time.
+4. The app keeps no frame history and writes no frame to storage.
+
+Until the app implements this flow, its `capture_frame` handler must
+return `CAPTURE_UNAVAILABLE` (fail-closed). The bench harness
+(`harness_bridge.py`) stands in with labeled synthesized frames to
+prove the command path; real MediaProjection capture is unproven until
+the app implements it against the real API.
 
 The Python side maps the `KILL_LATCHED` token to `SubstrateRefusal`,
 which the target agent converts to an explicit `action_refused`

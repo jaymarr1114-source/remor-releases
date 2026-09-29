@@ -153,6 +153,46 @@ class RemoteSession:
             return self.store.kill_session(self.session_id,
                                            by="controller-relay")
 
+    def get_frame(self, max_dim: int = 0) -> Dict[str, Any]:
+        """Fetch one stream frame from the target. The target enforces
+        session liveness, consent liveness, replay guards, the
+        screen_share scope grant, and scope-clipping at capture; a
+        killed/ended/expired session or ungranted scope raises
+        ControllerError (refused, never a frozen or fabricated frame).
+        Frames are observation only: they are never charged to the
+        session action budget."""
+        try:
+            st = self.store._get_session(self.session_id)["state"]
+        except SessionError:
+            st = "gone"
+        if st != "live":
+            raise ControllerError(
+                f"session {st}: frame refused (not live)")
+        body: Dict[str, Any] = {}
+        if isinstance(max_dim, int) and max_dim > 0:
+            body["max_dim"] = max_dim
+        reply = self.channel.request("get_frame", body)
+        if reply["kind"] == "action_refused":
+            raise ControllerError(
+                f"target refused frame: {reply['body'].get('reason')}")
+        if reply["kind"] != "frame_ok":
+            raise ControllerError(f"unexpected reply {reply['kind']}")
+        return reply["body"]
+
+    def save_frame(self, frame: Dict[str, Any], path: str) -> str:
+        """The sanctioned persistence path for stream frames. Refuses
+        unless the session scope carries the record_frames grant, so
+        frames are never persisted by default. Returns the path."""
+        scope = self.store.get_scope(self.session_id)
+        if not scope.record_frames:
+            raise ControllerError(
+                "frame persistence refused: session scope does not"
+                " grant record_frames")
+        import base64
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(frame["data_b64"]))
+        return path
+
     def end(self) -> Dict[str, Any]:
         # tell the target first so it drops its indicator; the store
         # transition is the authority either way.

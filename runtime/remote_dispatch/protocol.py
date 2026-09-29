@@ -5,9 +5,18 @@ Frame: 4-byte big-endian length + UTF-8 JSON. Every message:
 
 Message kinds:
   controller -> target: "hello" (handshake), "action" (cursor action),
-                         "action_batch", "kill" (relay), "bye"
+                         "action_batch", "kill" (relay), "bye",
+                         "get_frame" (request one stream frame)
   target -> controller: "hello_ok", "action_ok", "action_refused", "error",
-                        "session_event"
+                        "session_event", "frame_ok" (one captured frame)
+
+A frame body is {"width","height","format":"png","data_b64","ts",
+"synthesized"}: base64 PNG bytes captured on the target inside the
+live, consented session, clipped to the session scope bounds at
+capture time. get_frame carries the same per-message enforcement as
+actions (session live, consent live, exact seq + unseen nonce); a
+killed/ended/expired session or a scope without the screen_share
+grant gets action_refused, never a frame.
 
 Replay protection: the target keeps the highest seen seq per session and a
 set of seen nonces; any duplicate nonce or seq <= high-water is refused.

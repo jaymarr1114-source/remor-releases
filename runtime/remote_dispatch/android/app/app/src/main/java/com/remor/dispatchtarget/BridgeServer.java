@@ -227,12 +227,15 @@ public class BridgeServer {
             // Fail-closed user kill latch: while the user has pressed KILL
             // and no fresh consented session has rearmed the app, every
             // actuator command is refused here -- independent of whether
-            // the user_kill event reached the Python target. Indicator
-            // commands intentionally bypass the latch (hide/show must work
+            // the user_kill event reached the Python target. capture_frame
+            // is gated the same way: a latched kill must stop the screen
+            // stream even in the lost-event case. Indicator commands
+            // intentionally bypass the latch (hide/show must work
             // during and after a kill; indicator_live is read-only).
             if (cmd.equals("tap") || cmd.equals("swipe")
                     || cmd.equals("scroll") || cmd.equals("set_text")
-                    || cmd.equals("global_action") || cmd.equals("launch")) {
+                    || cmd.equals("global_action") || cmd.equals("launch")
+                    || cmd.equals("capture_frame")) {
                 service.checkKillLatch();
             }
             switch (cmd) {
@@ -265,6 +268,8 @@ public class BridgeServer {
                     JSONObject r = new JSONObject();
                     r.put("live", service.isIndicatorLive());
                     return r;
+                case "capture_frame":
+                    return service.doCaptureFrame(p);
                 default:
                     throw new Exception("unknown cmd " + cmd);
             }

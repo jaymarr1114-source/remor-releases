@@ -11,6 +11,13 @@ handling, error propagation, event/ack round-trip) -- mechanism
 evidence only. Gesture execution, overlays, and the kill UI on a real
 device are UNPROVEN until James's hardware acceptance.
 
+capture_frame returns HARNESS-SYNTHESIZED pixel data (result carries
+"synthesized": true and the bytes are a generated pattern, never a
+real screen): it proves the capture_frame command path -- framing,
+clip handling, kill-latch gating, error propagation -- not real
+MediaProjection capture, which is UNPROVEN until the app implements
+it against the real API.
+
 Test-only helpers (focus_field/blur) are LOCAL methods, not protocol
 commands: the real app derives focus from the real UI.
 """
@@ -52,6 +59,7 @@ class HarnessBridge:
         # command is refused; cleared only by indicator_show for a
         # different session (fresh consented session rearms).
         self.kill_latched_session: Optional[str] = None
+        self._frame_no = 0  # harness-synthesized frame counter
         self._clients: List[socket.socket] = []
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()
@@ -156,7 +164,7 @@ class HarnessBridge:
         # HARNESS model of the app-side kill latch gate
         # (BridgeServer.dispatch -> checkKillLatch()).
         if cmd in ("tap", "swipe", "scroll", "set_text",
-                   "global_action", "launch"):
+                   "global_action", "launch", "capture_frame"):
             with self._lock:
                 latched = self.kill_latched_session
             if latched is not None:
@@ -234,7 +242,48 @@ class HarnessBridge:
             with self._lock:
                 live = self.indicator_session is not None
             return {"live": live}
+        if cmd == "capture_frame":
+            return self._synth_frame(p)
         raise ValueError(f"unknown cmd {cmd}")
+
+    def _synth_frame(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        """HARNESS-SYNTHESIZED frame: a generated pattern, never a real
+        screen. Labeled synthesized=true in the result; proves the
+        capture_frame command path only."""
+        import base64
+        import io
+        import time
+        from PIL import Image, ImageDraw
+        clip = p.get("clip") or {}
+        if clip:
+            x = max(0, min(self.width - 1, int(clip.get("x", 0))))
+            y = max(0, min(self.height - 1, int(clip.get("y", 0))))
+            w = max(1, min(int(clip.get("w", 0)), self.width - x))
+            h = max(1, min(int(clip.get("h", 0)), self.height - y))
+        else:
+            w, h = self.width, self.height
+            mw, mh = int(p.get("max_w", 0)), int(p.get("max_h", 0))
+            if mw <= 0 and mh <= 0:
+                mw, mh = 480, 480  # default bench bound
+            if mw > 0 and w > mw or mh > 0 and h > mh:
+                s = min(mw / w if mw > 0 else 1.0,
+                        mh / h if mh > 0 else 1.0)
+                w, h = max(1, int(w * s)), max(1, int(h * s))
+        with self._lock:
+            self._frame_no += 1
+            n = self._frame_no
+        img = Image.new("RGB", (w, h),
+                        ((n * 53) % 256, (n * 97) % 256,
+                         (n * 37) % 256))
+        d = ImageDraw.Draw(img)
+        d.rectangle([8, 8, w - 9, h - 9], outline=(255, 255, 255))
+        d.line([0, 0, w - 1, h - 1], fill=(255, 255, 255))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return {"width": w, "height": h, "format": "png",
+                "data_b64": base64.b64encode(buf.getvalue()).decode(
+                    "ascii"),
+                "ts": time.time(), "synthesized": True}
 
     # -- app -> python event injection (the KILL button path) -----------
     def send_event(self, event: Dict[str, Any],
