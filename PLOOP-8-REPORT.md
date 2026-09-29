@@ -1,7 +1,7 @@
 # PLOOP-8 Mission Report — Checkpoint/recovery across loop transitions
 
 **Status: COMPLETE.** Branch `ploop-8-checkpoint` in `~/workspace/ploop-8-work`
-(base `cfe7915`), committed as `$(git rev-parse --short HEAD)` — 3 files changed
+(base `cfe7915`), committed as `f0d3ccd` — 3 files changed
 in runtime, 3 proof files, no existing behavior changed.
 
 ## What was built
