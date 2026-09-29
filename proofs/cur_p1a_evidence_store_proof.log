@@ -1,0 +1,24 @@
+1-min load: 1.1
+[PASS] terminal-state vocabulary parity (frozen interface) — curiosity=11 primary=11
+[PASS] well-formed write persists through stub->writer->store — evidence_id=a2b091dda71a
+[PASS] A1-note: __main__ cannot reach validation (fence fires first) — DomainFenceError
+[PASS] A1: finding without provenance refused (EvidenceRefused)
+[PASS] A1: refused record not persisted
+[PASS] A2: finding without terminal_state refused
+[PASS] A2: refused record not persisted
+[PASS] A3: unlisted terminal_state refused
+[PASS] A3: refused record not persisted
+[PASS] duplicate evidence_id refused loudly
+[PASS] A4: true-but-irrelevant retained (not discarded)
+[PASS] A4: no promote/present/publish/admit/commit API in evidence pkg
+[PASS] A4: DB holds exactly one table (the fenced curiosity table) — ['curiosity_evidence']
+  primary_probe stdout: PROBE-REFUSED DomainFenceError
+[PASS] A5: Primary-side module write refused at runtime — PROBE-REFUSED DomainFenceError
+[PASS] A5: refused attempt left the store untouched — before=2 after=2
+[PASS] A5b: no non-curiosity runtime module imports runtime.curiosity — clean
+  child wrote, then SIGKILLed (rc=-9)
+[PASS] fresh-process persistence after SIGKILL — evidence_id=c3080067b55f
+[PASS] no shared tables with Primary acceptance store — acceptance tables=[]
+[PASS] read API: all() returns every persisted record — count=3
+
+19/19 checks passed
