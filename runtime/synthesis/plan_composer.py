@@ -65,14 +65,16 @@ Boundaries (honest, current):
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from swarm_engine.primitives.core import (
-    ANY, CALLABLE, LIST, NUM, STR, Effect, Kind, TypeSpec, infer,
+    ANY, CALLABLE, LIST, NUM, STR, Effect, ExecContext, Kind, TypeSpec, infer,
 )
 
 
@@ -112,6 +114,16 @@ class ComposeResult:
     # the binary post-pass, in attention order. The nested binary pass
     # feeds these into a second level of binary combination.
     nested_candidates: List[Any] = field(default_factory=list)
+    # GEN-SYNTH-5-REPAIR: probe accounting. Probes run on a dedicated
+    # ExecContext with their own budget (zero-eval w.r.t. the candidate
+    # budget). If that budget runs out mid-search, probes become
+    # unreliable and pruning gates fail open (see _nest_may_complete);
+    # the flag records that degradation honestly on the result.
+    # probe_evals counts successful _probe_invoke calls; probes that
+    # raise (inapplicable prim, bad args) also spend probe budget but
+    # are not counted here.
+    probe_budget_exhausted: bool = False
+    probe_evals: int = 0
 
     @property
     def found(self) -> bool:
@@ -160,6 +172,46 @@ class PlanComposer:
         self._composer = composer
         self._reg = composer.reg
         self._frag_seq = 0
+        # GEN-SYNTH-5-REPAIR: probe machinery. Behavior probes go through
+        # PrimitiveRegistry.invoke -- the identical call real per-step plan
+        # execution makes (PlanExecutor._exec_steps -> reg.invoke) -- so
+        # there is no wrapper-equivalence question: the probe IS the
+        # wrapper path. Probes execute on a dedicated daemon worker thread
+        # (own event loop, via _ensure_probe_worker) so probing is safe
+        # whether or not the calling thread already runs an event loop,
+        # and on a dedicated ExecContext (own primitive-invocation
+        # budget), so they stay zero-eval w.r.t. the candidate budget and
+        # never consume the mission's budget. Results are memoized per
+        # compose() call. Probe-budget exhaustion is explicit and
+        # fail-safe: _probe_budget_exhausted is set the moment the probe
+        # context cannot spend, further probes short-circuit to unknown,
+        # and pruning gates fail open (recorded on ComposeResult).
+        self._probe_worker_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._probe_worker_thread: Optional[threading.Thread] = None
+        self._probe_ctx: Optional[ExecContext] = None
+        self._probe_cache: Dict[Any, Tuple[bool, Any]] = {}
+        self._probe_budget_exhausted: bool = False
+        self._probe_evals: int = 0
+
+    # GEN-SYNTH-5: maximum nesting depth for recursive binary nesting.
+    # Depth counts binary-combination levels: B = zip(xs,xs) is depth 1,
+    # N = zip(map(B,sum),ys) is depth 2, N' = zip(map(N,sum),zs) is
+    # depth 3. Each level multiplies fan-out (~150x: pair-lambdas x
+    # params x zip-like prims x orders), so depth is capped; a deeper
+    # chain is a named future boundary, not a silent budget increase.
+    MAX_NEST_DEPTH = 3
+
+    # GEN-SYNTH-5-REPAIR: probe plumbing constants.
+    # PROBE_BUDGET: primitive invocations available to the per-compose
+    # probe ExecContext. Probes are zero-eval w.r.t. the mission's
+    # candidate budget; this caps probe spend per compose() call.
+    # Exhaustion is explicit (probe_budget_exhausted on ComposeResult)
+    # and fail-safe (pruning gates fail open) -- never silent.
+    PROBE_BUDGET = 1_000_000
+    # PROBE_TIMEOUT_S: wall-clock cap for driving one probe coroutine on
+    # the probe worker thread. A hung primitive fails its probe as
+    # unknown (False, None) instead of hanging the search.
+    PROBE_TIMEOUT_S = 30.0
 
     # -- public -----------------------------------------------------------
 
@@ -179,7 +231,187 @@ class PlanComposer:
         # observationally-distinct values layer by layer from the params,
         # checking the goal examples after each layer. Example-driven, not
         # blind enumeration.
-        return self._compose_forward(objective, res)
+        # GEN-SYNTH-5-REPAIR: per-compose probe state. The probe context,
+        # cache, budget flag, and eval counter are created fresh per
+        # top-level compose() so probe accounting can never leak across
+        # objectives (and a cached probe built under one forbidden-set can
+        # never leak into a contrast run -- same discipline as
+        # _pair_lam_cache). The worker thread is per-instance (created
+        # lazily); it carries no per-compose state. Save/restore keeps
+        # nested compose() calls honest.
+        prev = (self._probe_ctx, self._probe_cache,
+                self._probe_budget_exhausted, self._probe_evals)
+        self._probe_cache = {}
+        self._probe_ctx = ExecContext(self._reg.governor, self._reg,
+                                     budget=self.PROBE_BUDGET)
+        self._probe_budget_exhausted = False
+        self._probe_evals = 0
+        try:
+            out = self._compose_forward(objective, res)
+            return out
+        finally:
+            res.probe_budget_exhausted = self._probe_budget_exhausted
+            res.probe_evals = self._probe_evals
+            (self._probe_ctx, self._probe_cache,
+             self._probe_budget_exhausted,
+             self._probe_evals) = prev
+
+    def _ensure_probe_worker(self) -> asyncio.AbstractEventLoop:
+        """Dedicated daemon worker thread driving probe coroutines.
+
+        GEN-SYNTH-5-REPAIR: probes previously ran via
+        loop.run_until_complete on a per-compose loop, which raises
+        RuntimeError when compose() is called on a thread that already
+        runs an event loop (the same hazard invoke_sync refuses with
+        "use await invoke()" -- but probes must not refuse; compose()
+        is synchronous and must work from any thread). Probes now run on
+        a dedicated daemon worker thread with its own loop via
+        asyncio.run_coroutine_threadsafe, so behavior is identical
+        whether or not the calling thread runs a loop. The worker is
+        per-PlanComposer-instance and carries no per-compose state;
+        per-compose probe state (ctx/cache/budget flag) stays on the
+        calling thread as before. Concurrent compose() on one instance
+        remains unsupported (pre-existing, unchanged).
+        """
+        loop = self._probe_worker_loop
+        if loop is None:
+            loop = asyncio.new_event_loop()
+            ready = threading.Event()
+
+            def _run() -> None:
+                asyncio.set_event_loop(loop)
+                ready.set()
+                loop.run_forever()
+
+            thread = threading.Thread(target=_run,
+                                      name="gensynth5-probe-worker",
+                                      daemon=True)
+            thread.start()
+            if not ready.wait(timeout=10.0):
+                raise RuntimeError("probe worker thread failed to start")
+            self._probe_worker_loop = loop
+            self._probe_worker_thread = thread
+        return loop
+
+    def _probe_freeze(self, value: Any) -> Any:
+        """Exact, type-preserving hashable freeze for probe-cache keys.
+
+        GEN-SYNTH-5-REPAIR: _value_key is a BEHAVIOR key -- it deliberately
+        conflates list/tuple and int/float because behavior banking
+        compares observed behavior (numeric equality). The probe cache is
+        different: it memoizes PrimitiveRegistry.invoke results, and the
+        wrapper's check_args/coerce_args distinguish list from tuple
+        (infer: TUPLE vs LIST; coerce has no LIST->TUPLE branch) and int
+        from float (infer: INT vs FLOAT; a primitive's own fn may branch
+        on the runtime type, e.g. type_of(3)="int" vs type_of(3.0)=
+        "float"). Reusing a probe result across those boundaries would
+        resurrect the phantom-probe soundness hole Repair 1 closed at the
+        invoke level -- this time at the cache level. The freeze therefore
+        preserves the exact runtime type at every nesting level, so a
+        cached probe can only be reused for an argument the wrapper would
+        treat identically. Behavior comparisons elsewhere keep using
+        _value_key; only the cache key uses this freeze.
+        """
+        if isinstance(value, bool):
+            return ("bool", value)
+        if isinstance(value, int):
+            return ("int", value)
+        if isinstance(value, float):
+            return ("float", value)
+        if isinstance(value, str):
+            return ("str", value)
+        if isinstance(value, bytes):
+            return ("bytes", bytes(value))
+        if isinstance(value, list):
+            return ("list", tuple(self._probe_freeze(v) for v in value))
+        if isinstance(value, tuple):
+            return ("tuple", tuple(self._probe_freeze(v) for v in value))
+        if isinstance(value, frozenset):
+            return ("frozenset", tuple(sorted(
+                (self._probe_freeze(v) for v in value), key=repr)))
+        if isinstance(value, set):
+            return ("set", tuple(sorted(
+                (self._probe_freeze(v) for v in value), key=repr)))
+        if isinstance(value, dict):
+            return ("dict", tuple(sorted(
+                ((self._probe_freeze(k), self._probe_freeze(v))
+                 for k, v in value.items()), key=repr)))
+        if value is None:
+            return ("none",)
+        return ("repr", type(value).__name__, repr(value))
+
+    def _probe_args_key(self, args: Dict[str, Any]) -> Any:
+        """Hashable cache key for probe args (exact type-preserving)."""
+        return ("args", tuple(sorted(
+            (k, self._probe_freeze(v)) for k, v in args.items())))
+
+    def _probe_invoke(self, op: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+        """Probe a single op through the registry wrapper.
+
+        GEN-SYNTH-5-REPAIR: this REPLACES the direct prim.fn fast path.
+        The probe calls PrimitiveRegistry.invoke -- the identical call
+        real per-step plan execution makes (PlanExecutor._exec_steps ->
+        reg.invoke(op, ctx, **kwargs)) -- including check_args validation,
+        coerce_args coercion, effect governance, and ctx.spend accounting.
+        Wrapper-equivalence therefore holds by construction: there is no
+        bypass to prove equivalent, because the probe and the execution
+        share the same invocation function. The cache key is the exact
+        type-preserving _probe_freeze (list/tuple and int/float never
+        share a cache entry), so wrapper-level distinctions cannot leak
+        across cached probes either.
+
+        Probes execute on the dedicated worker thread
+        (_ensure_probe_worker), so compose() is safe whether or not the
+        calling thread runs an event loop.
+
+        Zero-eval: probes run on the dedicated per-compose ExecContext
+        (own budget), never on the mission context, so they never consume
+        the mission's primitive-invocation budget and never charge the
+        candidate budget. Results are memoized per compose() call.
+
+        Budget exhaustion is explicit and fail-safe: the moment the probe
+        context cannot spend, _probe_budget_exhausted is set (also
+        recorded on ComposeResult) and further probes short-circuit to
+        unknown. Pruning gates must fail open on exhaustion (see
+        _nest_may_complete) -- an unknown probe must never prune a
+        recursion that might complete.
+
+        Returns (True, value) on success, (False, None) when the op
+        cannot be probed (unknown prim, validation failure, exception,
+        timeout, or exhausted probe budget).
+        """
+        key = (op, self._probe_args_key(args))
+        hit = self._probe_cache.get(key)
+        if hit is not None:
+            return hit
+        if self._probe_budget_exhausted:
+            # Fail-safe short-circuit: every further probe would raise on
+            # spend(); report unknown without invoking.
+            result = (False, None)
+        elif self._probe_ctx is not None and self._probe_ctx.budget <= 0:
+            self._probe_budget_exhausted = True
+            result = (False, None)
+        else:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._reg.invoke(op, self._probe_ctx, **args),
+                    self._ensure_probe_worker())
+                value = future.result(timeout=self.PROBE_TIMEOUT_S)
+                self._probe_evals += 1
+                result = (True, value)
+            except RuntimeError as exc:
+                # ExecContext.spend raises RuntimeError("primitive
+                # invocation budget exhausted"). Distinguish budget
+                # exhaustion from a semantic probe failure: exhaustion
+                # sets the flag so gates fail open instead of pruning on
+                # unknown probes.
+                if "budget exhausted" in str(exc):
+                    self._probe_budget_exhausted = True
+                result = (False, None)
+            except Exception:
+                result = (False, None)
+        self._probe_cache[key] = result
+        return result
 
     # -- forward search ----------------------------------------------------
     #
@@ -687,7 +919,15 @@ class PlanComposer:
             map_prim = None
         else:
             map_inputs = list(map_prim.inputs.items())
-        for prim in prims:
+        # GEN-SYNTH-5: try zip-like prims first in the postpass. Nested
+        # binary combination (_nest_binary) needs pair-valued B's, which
+        # only zip-like prims produce from scalar lists; trying them
+        # first finds nesting candidates without scanning hundreds of
+        # append/concat B's. Sound: reorders, never prunes.
+        def _prim_nest_key(p):
+            return (0 if p.name == "zip" else 1,
+                    len(p.inputs), p.name)
+        for prim in sorted(prims, key=_prim_nest_key):
             if prim.name in objective.forbidden:
                 continue
             inputs = list(prim.inputs.items())
@@ -1130,6 +1370,350 @@ class PlanComposer:
                     continue
         return False
 
+    # -- GEN-SYNTH-5 helpers: recursive nesting ---------------------------
+    #
+    # The three-level boundary: _complete_nested was terminal -- it never
+    # fed a nested result back into another binary combination, so
+    # binary->binary->binary chains were unreachable and the 20,000
+    # budget honestly exhausted (measured: 20000 evals, 130 nested
+    # candidates banked, found=False). These helpers make the nesting
+    # recursive with a sound zero-eval prune gating the fan-out.
+    # ---------------------------------------------------------------------
+
+    @staticmethod
+    def _pair_prims(prims):
+        """1-input LIST-accepting prims: the Q pool for pair-lambdas.
+
+        GEN-SYNTH-5: the prim selection behind _pair_lambdas' lazy
+        pair-lambda construction, factored out so the recursion prune
+        can probe the raw prims (deduped lambdas would make the
+        necessary condition unsound: two prims sharing behavior on one
+        pair set can differ on another).
+        """
+        out = []
+        for prim in prims:
+            if prim.output.kind is Kind.CALLABLE:
+                continue
+            inputs = list(prim.inputs.items())
+            if len(inputs) != 1:
+                continue
+            iname, ispec = inputs[0]
+            try:
+                if ispec.kind is Kind.CALLABLE:
+                    continue
+                if not ispec.accepts(LIST()):
+                    continue
+            except Exception:
+                continue
+            out.append((prim, iname))
+        return out
+
+    def _raw_probe_op(self, op, args_tmpl, elem):
+        """Execute a single op on elem; return the raw value or None.
+
+        GEN-SYNTH-5: like _probe_first but returns the value itself
+        (not its key) so the recursion prune can feed a pair-lambda's
+        output into a static-lambda probe. Zero-eval: never charges
+        the candidate budget.
+
+        GEN-SYNTH-5-REPAIR: the probe goes through _probe_invoke --
+        PrimitiveRegistry.invoke, the identical call real per-step plan
+        execution makes -- so wrapper-equivalence holds by construction.
+        The earlier direct prim.fn fast path is removed; the earlier
+        docstring's "conclusive explanation" was an argument, not a
+        proof, and is withdrawn.
+        """
+        try:
+            args = {}
+            for k, v in args_tmpl.items():
+                args[k] = (elem if isinstance(v, dict) and v.get("$var")
+                           else v)
+            ok, value = self._probe_invoke(op, args)
+            return value if ok else None
+        except Exception:
+            return None
+
+    def _nest_may_complete(self, m0, v0, m1, v1, pair_prims, static_ops,
+                           goal_first_key, goal_second_key) -> bool:
+        """Sound zero-eval gate for recursing on an (M', v) pair.
+
+        GEN-SYNTH-5: for N' = P(M', v) to complete via _complete_nested's
+        direct path (map(N',Q3)==goal) or static path (map(S3,L)==goal),
+        there must exist a pair-lambda Q3 with Q3(N'[0])==goal[0], or a
+        static L with L(Q3(N'[0]))==goal[0]. N'[0] is (M'[0],v[0]) or
+        (v[0],M'[0]). All probes are behavioral and zero-eval. Q3 prims
+        are deduplicated by observed behavior on the probe pair (prims
+        agreeing on N'[0] are interchangeable for the gate), so the
+        static cross-product runs over distinct qv values only.
+
+        GEN-SYNTH-5-REPAIR: the gate now checks the first TWO elements
+        (m1/v1/goal_second_key) when available. A full goal match
+        implies the first two elements match, so this is still a
+        necessary condition -- hence sound, never pruning a viable
+        recursion -- but strictly more discriminating than the
+        first-element-only check. This prunes coincidental
+        first-element matches (e.g. a static +11 lambda mapping 100 to
+        a goal's first element 111 while the second element cannot
+        match), which otherwise let dead-end recursions burn the
+        candidate budget. When second-element info is unavailable
+        (short vectors), the gate falls back to the first-element check.
+
+        Returns True when the pair MIGHT complete (do not prune);
+        False only when completion is impossible on the first example
+        -- hence sound, never pruning a viable recursion.
+
+        GEN-SYNTH-5-REPAIR (fail-safe): when the probe budget is
+        exhausted, every probe reports unknown, so a False here would
+        prune recursions that might complete -- unsound on unknown.
+        Fail open: never prune once probes are unreliable. The
+        exhaustion is recorded on ComposeResult.probe_budget_exhausted.
+        """
+        if self._probe_budget_exhausted:
+            return True
+        if m0 is None or v0 is None or goal_first_key is None:
+            return True
+        have_second = (m1 is not None and v1 is not None
+                       and goal_second_key is not None)
+        for (a0, b0, a1, b1) in ((m0, v0, m1, v1), (v0, m0, v1, m1)):
+            p0 = [a0, b0]
+            p1 = ([a1, b1] if have_second else None)
+            seen = set()
+            qvs = []
+            for prim, iname in pair_prims:
+                qv0 = self._raw_probe_op(
+                    prim.name, {iname: {"$var": "x"}}, p0)
+                if qv0 is None:
+                    continue
+                qk0 = self._value_key(qv0)
+                if qk0 == goal_first_key:
+                    # Direct-path candidate: verify second element too
+                    # when available (same prim must match both).
+                    if not have_second:
+                        return True
+                    qv1 = self._raw_probe_op(
+                        prim.name, {iname: {"$var": "x"}}, p1)
+                    if (qv1 is not None and self._value_key(qv1)
+                            == goal_second_key):
+                        return True
+                    continue
+                if qk0 not in seen:
+                    seen.add(qk0)
+                    qv1 = None
+                    if have_second:
+                        qv1 = self._raw_probe_op(
+                            prim.name, {iname: {"$var": "x"}}, p1)
+                    qvs.append((qv0, qv1, prim.output))
+            for qv0, qv1, qkind in qvs:
+                for sop, sargs, ispec in static_ops:
+                    try:
+                        if not ispec.accepts(qkind):
+                            continue
+                    except Exception:
+                        continue
+                    sv0 = self._raw_probe_op(sop, sargs, qv0)
+                    if (sv0 is None
+                            or self._value_key(sv0) != goal_first_key):
+                        continue
+                    # Static-path candidate: verify second element too
+                    # when available (same static op must match both).
+                    if not have_second or qv1 is None:
+                        return True
+                    sv1 = self._raw_probe_op(sop, sargs, qv1)
+                    if (sv1 is not None and self._value_key(sv1)
+                            == goal_second_key):
+                        return True
+        return False
+
+    @staticmethod
+    def _strict_removal(map_vals, examples) -> bool:
+        """True when some example has len(goal) < len(S).
+
+        GEN-SYNTH-5: sound gate for filter fusion over a nested scalar
+        list S. When filter removes nothing, map(filter(S,pred),L) ==
+        map(S,L), which the static lookahead already tries -- so fusion
+        can only add solutions under strict removal.
+        """
+        try:
+            for s_ex, (_, g_ex) in zip(map_vals, examples):
+                if not isinstance(g_ex, (list, tuple)):
+                    continue
+                s_list = (s_ex if isinstance(s_ex, (list, tuple))
+                          else [])
+                if len(g_ex) < len(s_list):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _nest_bin_prims(self, prims, objective):
+        """zip-like prims for nesting: 2-input, LIST-output, pair-valued
+        (LIST of LIST) output, both inputs LIST-accepting.
+
+        GEN-SYNTH-5: extracted from _nest_binary; shared by the initial
+        nesting and the recursive step.
+        """
+        out = []
+        for prim in prims:
+            if prim.name in objective.forbidden:
+                continue
+            inputs = list(prim.inputs.items())
+            if len(inputs) != 2:
+                continue
+            if any(s.kind is Kind.CALLABLE for _, s in inputs):
+                continue
+            try:
+                if prim.output.kind.name != "LIST":
+                    continue
+                if not (prim.output.args and
+                        prim.output.args[0].kind.name == "LIST"):
+                    continue
+            except Exception:
+                continue
+            (aname, aspec), (bname, bspec) = inputs[0], inputs[1]
+            try:
+                if not (aspec.accepts(LIST()) and bspec.accepts(LIST())):
+                    continue
+            except Exception:
+                continue
+            out.append((prim, aname, aspec, bname, bspec))
+        return out
+
+    def _nest_combine_one(self, objective, res, banked, prims, bank,
+                            map_prim, cname, cspec, fn_name,
+                            exp_key, depth, bin_prims,
+                            mkey, mfrag, mvals, mkind,
+                            pkey, pfrag, pvals, pkind) -> bool:
+        """Build P(M,v)/P(v,M) for one (M, v); bank N'; complete it.
+
+        GEN-SYNTH-5: the per-pair build half of _nest_combine. Returns
+        True if the goal was reached.
+        """
+        for prim, aname, aspec, bname, bspec in bin_prims:
+            for (k1, f1, kd1, k2, f2, kd2) in (
+                    (mkey, mfrag, mkind, pkey, pfrag, pkind),
+                    (pkey, pfrag, pkind, mkey, mfrag, mkind)):
+                try:
+                    if not aspec.accepts(kd1):
+                        continue
+                    if not bspec.accepts(kd2):
+                        continue
+                except Exception:
+                    continue
+                if res.candidates_evaluated >= objective.max_candidates:
+                    res.search_exhausted = True
+                    return False
+                frags = [f1] if k1 == k2 else [f1, f2]
+                args = {aname: f1.out_ref, bname: f2.out_ref}
+                plan = self._plan_from_frags(objective, frags, prim, args)
+                if plan is None:
+                    res.refused_type_incoherent += 1
+                    continue
+                out_vals = self._exec_vals(plan, objective)
+                res.candidates_evaluated += 1
+                if out_vals is None:
+                    continue
+                try:
+                    if tuple(self._value_key(v)
+                             for v in out_vals) == exp_key:
+                        nfrag = self._extend_frags(frags, prim, args, None)
+                        self._finish(objective, res, nfrag)
+                        return True
+                except Exception:
+                    pass
+                nkey = (prim.name, k1, k2,
+                        tuple(self._value_key(v) for v in out_vals))
+                if nkey in banked:
+                    res.pruned_equivalent += 1
+                    continue
+                nfrag = self._extend_frags(frags, prim, args, None)
+                banked[nkey] = (nfrag, out_vals, prim.output)
+                if self._complete_nested(
+                        objective, res, banked, prims, bank,
+                        map_prim, cname, cspec, fn_name,
+                        nfrag, out_vals, prim.output,
+                        exp_key, depth):
+                    return True
+        return False
+
+    def _nest_combine(self, objective, res, banked, prims, bank,
+                      map_prim, cname, cspec, fn_name, mkeys, exp_key,
+                      depth, prune_ctx=None) -> bool:
+        """Build P(M,v)/P(v,M) nested combinations; complete each.
+
+        GEN-SYNTH-5: the combination half of _nest_binary, extracted so
+        the recursion shares it. For each banked map-completion M and
+        each plan param v, builds both orders of every zip-like prim
+        application, banks each nested N', and completes it via
+        _complete_nested at the given depth. prune_ctx (None for the
+        initial GEN-SYNTH-4 nesting) carries the zero-eval
+        _nest_may_complete gate for the recursive step. For the
+        recursion, mkeys are grouped by M'[0]: the gate depends only
+        on (M'[0], v[0]), so one probe covers the group (members still
+        build separately -- their full vectors differ). Returns True
+        if the goal was reached.
+        """
+        bin_prims = self._nest_bin_prims(prims, objective)
+        if not bin_prims:
+            return False
+        pkeys = [k for k in banked
+                 if isinstance(k, tuple) and k and k[0] == "param"]
+        if not pkeys:
+            return False
+        if prune_ctx is not None:
+            _groups = {}
+            for mkey in mkeys:
+                if mkey not in banked:
+                    continue
+                mfrag, mvals, mkind = banked[mkey]
+                if not mfrag.uses_param:
+                    continue
+                try:
+                    m0k = (self._value_key(mvals[0][0])
+                           if mvals and mvals[0] else None)
+                except Exception:
+                    m0k = None
+                _groups.setdefault(m0k, []).append(mkey)
+            _miter = list(_groups.values())
+        else:
+            _miter = [[mkey] for mkey in mkeys if mkey in banked]
+        for _members in _miter:
+            mkey = _members[0]
+            mfrag, mvals, mkind = banked[mkey]
+            for pkey in pkeys:
+                pfrag, pvals, pkind = banked[pkey]
+                if prune_ctx is not None:
+                    try:
+                        m0 = (mvals[0][0] if mvals and mvals[0]
+                              else None)
+                        v0 = (pvals[0][0] if pvals and pvals[0]
+                              else None)
+                        # GEN-SYNTH-5-REPAIR: second elements for the
+                        # strengthened two-element gate.
+                        m1 = (mvals[0][1] if mvals and mvals[0]
+                              and len(mvals[0]) > 1 else None)
+                        v1 = (pvals[0][1] if pvals and pvals[0]
+                              and len(pvals[0]) > 1 else None)
+                    except Exception:
+                        m0, v0, m1, v1 = None, None, None, None
+                    _pp, _so, _gfk, _gsk = prune_ctx
+                    if not self._nest_may_complete(
+                            m0, v0, m1, v1, _pp, _so, _gfk, _gsk):
+                        continue
+                for _mkey in _members:
+                    if _mkey not in banked:
+                        continue
+                    _mfrag, _mvals, _mkind = banked[_mkey]
+                    if self._nest_combine_one(
+                            objective, res, banked, prims, bank,
+                            map_prim, cname, cspec, fn_name,
+                            exp_key, depth, bin_prims,
+                            _mkey, _mfrag, _mvals, _mkind,
+                            pkey, pfrag, pvals, pkind):
+                        return True
+                    if res.search_exhausted:
+                        return False
+        return False
+
     def _nest_binary(self, objective, res, banked, prims, bank,
                      bkey, bfrag, bvals, exp_key) -> bool:
         """Interleaved nested binary combination (GEN-SYNTH-4).
@@ -1211,105 +1795,37 @@ class PlanComposer:
         # AND pair-valued output (LIST of LIST) -- the nested N must be
         # pair-valued for the lean pair-lambda completion. This restricts
         # to zip-like prims, not append/concat.
-        bin_prims = []
-        for prim in prims:
-            if prim.name in objective.forbidden:
-                continue
-            inputs = list(prim.inputs.items())
-            if len(inputs) != 2:
-                continue
-            if any(s.kind is Kind.CALLABLE for _, s in inputs):
-                continue
-            try:
-                if prim.output.kind.name != "LIST":
-                    continue
-                if not (prim.output.args and
-                        prim.output.args[0].kind.name == "LIST"):
-                    continue
-            except Exception:
-                continue
-            (aname, aspec), (bname, bspec) = inputs[0], inputs[1]
-            try:
-                if not (aspec.accepts(LIST()) and bspec.accepts(LIST())):
-                    continue
-            except Exception:
-                continue
-            bin_prims.append((prim, aname, aspec, bname, bspec))
-        if not bin_prims:
-            return False
-        pkeys = [k for k in banked
-                 if isinstance(k, tuple) and k and k[0] == "param"]
-        if not pkeys:
-            return False
-        for mkey in mkeys:
-            if mkey not in banked:
-                continue
-            mfrag, mvals, mkind = banked[mkey]
-            if not mfrag.uses_param:
-                continue
-            for pkey in pkeys:
-                pfrag, pvals, pkind = banked[pkey]
-                for prim, aname, aspec, bname, bspec in bin_prims:
-                    for (k1, f1, kd1, k2, f2, kd2) in (
-                            (mkey, mfrag, mkind, pkey, pfrag, pkind),
-                            (pkey, pfrag, pkind, mkey, mfrag, mkind)):
-                        try:
-                            if not aspec.accepts(kd1):
-                                continue
-                            if not bspec.accepts(kd2):
-                                continue
-                        except Exception:
-                            continue
-                        if res.candidates_evaluated >= \
-                                objective.max_candidates:
-                            res.search_exhausted = True
-                            return False
-                        frags = [f1] if k1 == k2 else [f1, f2]
-                        args = {aname: f1.out_ref, bname: f2.out_ref}
-                        plan = self._plan_from_frags(
-                            objective, frags, prim, args)
-                        if plan is None:
-                            res.refused_type_incoherent += 1
-                            continue
-                        out_vals = self._exec_vals(plan, objective)
-                        res.candidates_evaluated += 1
-                        if out_vals is None:
-                            continue
-                        try:
-                            if tuple(self._value_key(v)
-                                     for v in out_vals) == exp_key:
-                                nfrag = self._extend_frags(
-                                    frags, prim, args, None)
-                                self._finish(objective, res, nfrag)
-                                return True
-                        except Exception:
-                            pass
-                        nkey = (prim.name, k1, k2,
-                                tuple(self._value_key(v)
-                                      for v in out_vals))
-                        if nkey in banked:
-                            res.pruned_equivalent += 1
-                            continue
-                        nfrag = self._extend_frags(
-                            frags, prim, args, None)
-                        banked[nkey] = (nfrag, out_vals, prim.output)
-                        if self._complete_nested(
-                                objective, res, banked, prims, bank,
-                                map_prim, cname, cspec, fn_name,
-                                nfrag, out_vals, prim.output, exp_key):
-                            return True
-        return False
+        # GEN-SYNTH-5: combination half extracted to _nest_combine
+        # (shared with the recursive step); depth 2 for this initial
+        # nesting, no prune (preserves GEN-SYNTH-4 behavior exactly).
+        return self._nest_combine(
+            objective, res, banked, prims, bank, map_prim,
+            cname, cspec, fn_name, mkeys, exp_key, 2,
+            prune_ctx=None)
 
     def _complete_nested(self, objective, res, banked, prims, bank,
                          map_prim, cname, cspec, fn_name,
-                         nfrag, out_vals, vkind, exp_key) -> bool:
+                         nfrag, out_vals, vkind, exp_key,
+                         depth) -> bool:
         """Lean pair-lambda direct match over a nested binary result.
 
         GEN-SYNTH-4: for N = P(M, v), try map(N, Q) == goal for
-        pair-lambdas Q passing the sound first-element pre-filter.
-        Deliberately lean: no static-lambda lookahead, no filter
-        fusion on the nested level (documented next boundary). Returns
-        True if the goal was reached.
+        pair-lambdas Q, banking the scalar lists S; then the
+        static-lambda map(S, L) == goal lookahead (the distilled-T
+        path).
+
+        GEN-SYNTH-5: depth is N's nesting depth (2 for the initial
+        _nest_binary products). Two extensions:
+        (a) filter fusion over the nested scalar lists S -- the mixed
+            higher-order class -- via the existing _complete_filtered,
+            gated on strict removal (sound: without strict removal the
+            static path already covers fusion solutions);
+        (b) recursive nesting: each banked S feeds back as a fresh M'
+            for another binary combination at depth+1, gated by the
+            sound zero-eval _nest_may_complete prune.
+        Both are skipped at MAX_NEST_DEPTH (the prune's necessary
+        condition covers only the direct/static paths). Returns True
+        if the goal was reached.
         """
         # pair-valued check (LIST of LIST)
         try:
@@ -1344,6 +1860,52 @@ class PlanComposer:
                 return False
         except Exception:
             return False
+        # GEN-SYNTH-5: shared context for the recursion prune and the
+        # filter-fusion call. static_lams mirrors the per-lam static
+        # loop below (same bank query); static_ops pre-extracts the
+        # (op, args, input-spec) triples so the zero-eval prune does no
+        # per-candidate ref parsing.
+        _prim_by_name = {p.name: p for p in prims}
+        _pair_prims = self._pair_prims(prims)
+        try:
+            _elem_kind = (map_prim.output.args[0]
+                          if map_prim.output.args else None)
+            _static_lams = bank.for_element_kind(_elem_kind)
+        except Exception:
+            _static_lams = []
+        _static_ops = []
+        for _slam in _static_lams:
+            try:
+                _p = _prim_by_name.get(
+                    _slam.used[0] if _slam.used else "")
+                if _p is None or len(_p.inputs) != 1:
+                    continue
+                _ispec = list(_p.inputs.values())[0]
+                _s = _slam.ref["$lambda"]["steps"][0]
+                _static_ops.append((_s["op"], _s["args"], _ispec))
+            except Exception:
+                continue
+        _goal_first_key = None
+        _goal_second_key = None
+        try:
+            _g0 = objective.examples[0][1]
+            if isinstance(_g0, (list, tuple)) and _g0:
+                _goal_first_key = self._value_key(_g0[0])
+                # GEN-SYNTH-5-REPAIR: second-element key for the
+                # strengthened two-element recursion gate. Still a
+                # necessary condition (full match implies first-two
+                # match), hence sound, but strictly more discriminating
+                # than the first-element-only check.
+                if len(_g0) > 1:
+                    _goal_second_key = self._value_key(_g0[1])
+        except Exception:
+            pass
+        try:
+            _map_inputs = list(map_prim.inputs.items())
+        except Exception:
+            _map_inputs = None
+        # Banked S keys in pair-lambda order: the recursion's M' pool.
+        skeys = []
         for lam in pair_lams:
             if res.candidates_evaluated >= objective.max_candidates:
                 res.search_exhausted = True
@@ -1372,6 +1934,8 @@ class PlanComposer:
                 banked[mkey] = (mfrag, map_vals, map_prim.output)
             else:
                 mfrag = banked[mkey][0]
+            # GEN-SYNTH-5: the recursion's M' pool, in pair-lambda order.
+            skeys.append(mkey)
             # GEN-SYNTH-4: static-lambda completion over the nested
             # scalar list S = map(N, Q). Tries map(S, L) == goal for
             # static L (including distilled T), with the sound
@@ -1430,13 +1994,49 @@ class PlanComposer:
                         return True
                 except Exception:
                     continue
-        return False
+            # GEN-SYNTH-5 (a): filter fusion over the nested scalar
+            # list S -- the mixed higher-order class. Gated on strict
+            # removal (sound: without it the static path above already
+            # covers fusion solutions). Skipped at MAX_NEST_DEPTH so
+            # the recursion prune's necessary condition stays sound.
+            if (depth < self.MAX_NEST_DEPTH and _map_inputs is not None
+                    and _goal_first_key is not None
+                    and self._strict_removal(map_vals,
+                                             objective.examples)):
+                if self._complete_filtered(
+                        objective, res, banked, prims, bank,
+                        map_prim, _map_inputs, mfrag, map_vals,
+                        exp_key, _goal_first_key):
+                    return True
+        # GEN-SYNTH-5 (b): recursive nesting. Feed each banked S back as
+        # a fresh M' for another binary combination, completing the new
+        # nested N' at depth+1. The sound zero-eval _nest_may_complete
+        # prune gates (M', v) pairs so the recursion does not multiply
+        # the budget; _nest_combine shares the combination machinery
+        # with the initial GEN-SYNTH-4 nesting.
+        # Skip recursion when the objective has no more params than the
+        # current depth (each nesting level adds at most one new param;
+        # deeper nesting cannot introduce new information). Sound: for
+        # a 2-param goal at depth 2, recursion is wasted work.
+        if depth >= self.MAX_NEST_DEPTH or not skeys:
+            return False
+        prune_ctx = (_pair_prims, _static_ops, _goal_first_key,
+                     _goal_second_key)
+        return self._nest_combine(
+            objective, res, banked, prims, bank, map_prim,
+            cname, cspec, fn_name, skeys, exp_key, depth + 1,
+            prune_ctx=prune_ctx)
 
     def _probe_first(self, lam: Any, elem: Any) -> Any:
         """Execute a single-prim lambda on one element (value key).
 
         Sound pre-filter for the completion head: None if the lambda
         cannot be probed (then the caller tries the full plan).
+
+        GEN-SYNTH-5-REPAIR: probes via _probe_invoke
+        (PrimitiveRegistry.invoke -- the same call real per-step
+        execution makes), so wrapper-equivalence holds by construction.
+        The direct prim.fn fast path is removed.
         """
         try:
             steps = lam.ref["$lambda"]["steps"]
@@ -1449,13 +2049,10 @@ class PlanComposer:
                     args[k] = elem
                 else:
                     args[k] = v
-            probe = {"name": "probe_first", "params": {},
-                     "steps": [{"id": "q0", "op": s["op"], "args": args}],
-                     "output": {"$step": "q0"}}
-            r = self._composer.execute_sync(probe, {})
-            if not r.get("success"):
+            ok, value = self._probe_invoke(s["op"], args)
+            if not ok:
                 return None
-            return self._value_key(r.get("value"))
+            return self._value_key(value)
         except Exception:
             return None
 
@@ -1495,20 +2092,9 @@ class PlanComposer:
         out: List[Any] = []
         if pairs:
             seen_behaviors: Dict[tuple, bool] = {}
-            for prim in prims:
-                if prim.output.kind is Kind.CALLABLE:
-                    continue
-                inputs = list(prim.inputs.items())
-                if len(inputs) != 1:
-                    continue
-                iname, ispec = inputs[0]
-                try:
-                    if ispec.kind is Kind.CALLABLE:
-                        continue
-                    if not ispec.accepts(LIST()):
-                        continue
-                except Exception:
-                    continue
+            # GEN-SYNTH-5: prim selection shared with the recursion
+            # prune via _pair_prims.
+            for prim, iname in self._pair_prims(prims):
                 ref = {"$lambda": {
                     "params": ["x"],
                     "steps": [{"id": "t1", "op": prim.name,

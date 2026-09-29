@@ -278,55 +278,73 @@ class GeneralizationController:
                 self.engine, self.epistemic, technique_ref, novel_goal,
                 list(train_examples) + list(held_out))
 
-        gres, gerr = _run_leg("probe:generalize", _leg_generalize)
-        if gerr == "budget_exhausted":
+        gres, gerr = None, ""
+        g_skip_reason = ""
+        # GEN-SYNTH-5 guard: skip the generalize leg honestly when
+        # bound-constant re-parameterization is inapplicable (wrong
+        # mechanism for new compositions), instead of attempting it and
+        # erroring. The skip is a recorded envelope observation; the
+        # cycle proceeds to the compose leg.
+        _applicable, _why = self._generalize_applicable(
+            technique_ref, params)
+        if not _applicable:
+            g_skip_reason = _why
             env_id = self._record_envelope(
                 technique_ref=technique_ref, novel_goal=novel_goal,
-                mechanism="generalize", outcome="budget_exhausted",
+                mechanism="generalize", outcome="skipped_inapplicable",
                 heldout="", capability_id="", composed_of=[],
-                reason="generalize leg exhausted its budget",
-                root_mc_id=root_id, leg_mc_ids=leg_ids,
-                holds=[], breaks=[])
-            return _finish("budget_exhausted", "generalize",
-                           reason="generalize leg exhausted its budget",
-                           envelope_observation_id=env_id)
-        if gerr:
-            env_id = self._record_envelope(
-                technique_ref=technique_ref, novel_goal=novel_goal,
-                mechanism="generalize", outcome="error",
-                heldout="", capability_id="", composed_of=[],
-                reason=gerr, root_mc_id=root_id, leg_mc_ids=leg_ids,
-                holds=[], breaks=[])
-            return _finish("error", "generalize", reason=gerr,
-                           envelope_observation_id=env_id)
-        if isinstance(gres, Exception):
-            env_id = self._record_envelope(
-                technique_ref=technique_ref, novel_goal=novel_goal,
-                mechanism="generalize", outcome="error",
-                heldout="", capability_id="", composed_of=[],
-                reason=f"{type(gres).__name__}: {gres}",
-                root_mc_id=root_id, leg_mc_ids=leg_ids,
-                holds=[], breaks=[])
-            return _finish("error", "generalize",
-                           reason=f"{type(gres).__name__}: {gres}",
-                           envelope_observation_id=env_id)
-        if gres.success:
-            held = f"{gres.heldout_passed}/{gres.heldout_examples}"
-            env_id = self._record_envelope(
-                technique_ref=technique_ref, novel_goal=novel_goal,
-                mechanism="generalize", outcome="crossed",
-                heldout=held, capability_id=gres.capability_id or "",
-                composed_of=[], reason="",
-                root_mc_id=root_id, leg_mc_ids=leg_ids,
-                holds=[f"bound-constant re-parameterization to: {novel_goal}"],
-                breaks=[])
-            return _finish(
-                "crossed", "generalize", heldout=held,
-                capability_id=gres.capability_id or "",
-                promoted_name=gres.promoted_name or "",
-                envelope_observation_id=env_id,
-                reason="generalized via DistillationLoop.generalize "
-                       "(ReviewBoard + verdict path inside the machinery)")
+                reason=_why, root_mc_id=root_id, leg_mc_ids=leg_ids,
+                holds=[], breaks=[_why])
+        else:
+            gres, gerr = _run_leg("probe:generalize", _leg_generalize)
+            if gerr == "budget_exhausted":
+                env_id = self._record_envelope(
+                    technique_ref=technique_ref, novel_goal=novel_goal,
+                    mechanism="generalize", outcome="budget_exhausted",
+                    heldout="", capability_id="", composed_of=[],
+                    reason="generalize leg exhausted its budget",
+                    root_mc_id=root_id, leg_mc_ids=leg_ids,
+                    holds=[], breaks=[])
+                return _finish("budget_exhausted", "generalize",
+                               reason="generalize leg exhausted its budget",
+                               envelope_observation_id=env_id)
+            if gerr:
+                env_id = self._record_envelope(
+                    technique_ref=technique_ref, novel_goal=novel_goal,
+                    mechanism="generalize", outcome="error",
+                    heldout="", capability_id="", composed_of=[],
+                    reason=gerr, root_mc_id=root_id, leg_mc_ids=leg_ids,
+                    holds=[], breaks=[])
+                return _finish("error", "generalize", reason=gerr,
+                               envelope_observation_id=env_id)
+            if isinstance(gres, Exception):
+                env_id = self._record_envelope(
+                    technique_ref=technique_ref, novel_goal=novel_goal,
+                    mechanism="generalize", outcome="error",
+                    heldout="", capability_id="", composed_of=[],
+                    reason=f"{type(gres).__name__}: {gres}",
+                    root_mc_id=root_id, leg_mc_ids=leg_ids,
+                    holds=[], breaks=[])
+                return _finish("error", "generalize",
+                               reason=f"{type(gres).__name__}: {gres}",
+                               envelope_observation_id=env_id)
+            if gres.success:
+                held = f"{gres.heldout_passed}/{gres.heldout_examples}"
+                env_id = self._record_envelope(
+                    technique_ref=technique_ref, novel_goal=novel_goal,
+                    mechanism="generalize", outcome="crossed",
+                    heldout=held, capability_id=gres.capability_id or "",
+                    composed_of=[], reason="",
+                    root_mc_id=root_id, leg_mc_ids=leg_ids,
+                    holds=[f"bound-constant re-parameterization to: {novel_goal}"],
+                    breaks=[])
+                return _finish(
+                    "crossed", "generalize", heldout=held,
+                    capability_id=gres.capability_id or "",
+                    promoted_name=gres.promoted_name or "",
+                    envelope_observation_id=env_id,
+                    reason="generalized via DistillationLoop.generalize "
+                           "(ReviewBoard + verdict path inside the machinery)")
 
         # ---- leg 2: compose (planner-level composition) ----
         def _leg_compose() -> Any:
@@ -346,7 +364,12 @@ class GeneralizationController:
                 return {"status": "no_plan",
                         "evaluated": res.candidates_evaluated,
                         "exhausted": res.search_exhausted,
-                        "composed_of": list(res.composed_of)}
+                        "composed_of": list(res.composed_of),
+                        # GEN-SYNTH-5-REPAIR: surface probe-budget
+                        # exhaustion so a degraded no-plan verdict is
+                        # distinguishable from a clean search exhaustion.
+                        "probe_budget_exhausted": bool(
+                            res.probe_budget_exhausted)}
             # Verify through the Q8 inlet -- never weakened, never skipped.
             q8ok, q8_reasons = q8_authenticate(
                 res.plan, self.engine.composer,
@@ -418,14 +441,20 @@ class GeneralizationController:
         if status == "crossed":
             cap_id = cres_out["capability_id"]
             held = f"{len(held_out)}/{len(held_out)}"
+            _holds = [f"planner-level composition over distilled "
+                      f"{technique_ref.get('promoted_name')}: {novel_goal}"]
+            # GEN-SYNTH-5: record the generalize-leg skip on the crossed
+            # path too -- the crossing came from compose after an honest
+            # inapplicability skip, not from a generalize attempt.
+            if g_skip_reason:
+                _holds.append(f"generalize leg skipped: {g_skip_reason}")
             env_id = self._record_envelope(
                 technique_ref=technique_ref, novel_goal=novel_goal,
                 mechanism="compose", outcome="crossed",
                 heldout=held, capability_id=cap_id,
                 composed_of=composed_of, reason="",
                 root_mc_id=root_id, leg_mc_ids=leg_ids,
-                holds=[f"planner-level composition over distilled "
-                       f"{technique_ref.get('promoted_name')}: {novel_goal}"],
+                holds=_holds,
                 breaks=[])
             return _finish(
                 "crossed", "compose", heldout=held,
@@ -440,6 +469,17 @@ class GeneralizationController:
                       f"({cres_out.get('evaluated')} evaluations): "
                       f"{novel_goal} is outside the searchable plan space"]
             reason = "composer honestly found no plan"
+            # GEN-SYNTH-5-REPAIR: probe exhaustion degrades the search
+            # (pruning gates fail open). A no-plan verdict reached with
+            # exhausted probes is a degraded verdict, not a clean
+            # exhaustion -- record that honestly on the envelope.
+            if cres_out.get("probe_budget_exhausted"):
+                breaks.append(
+                    "probe budget exhausted mid-search: pruning gates ran "
+                    "fail-open, so this no-plan verdict is degraded, not "
+                    "a clean search exhaustion")
+                reason = ("composer found no plan with probe budget "
+                          "exhausted (degraded search)")
         elif status == "q8_refused":
             breaks = [f"Q8 authentication refused the composed plan: "
                       f"{'; '.join(cres_out.get('reasons', []))}"]
@@ -455,10 +495,14 @@ class GeneralizationController:
         else:
             reason = f"unexpected compose status: {status}"
             breaks = [reason]
-        # The generalize leg's named refusal is part of the bound record.
+        # The generalize leg's named refusal -- or its honest skip under
+        # the GEN-SYNTH-5 inapplicability guard -- is part of the bound
+        # record.
         g_reason = getattr(gres, "reason", "") or ""
         if g_reason:
             breaks.append(f"generalize leg refused: {g_reason}")
+        elif g_skip_reason:
+            breaks.append(f"generalize leg skipped: {g_skip_reason}")
         env_id = self._record_envelope(
             technique_ref=technique_ref, novel_goal=novel_goal,
             mechanism="compose", outcome="bound_marked",
@@ -469,6 +513,37 @@ class GeneralizationController:
                        envelope_observation_id=env_id)
 
     # ------------------------------------------------------------------ helpers
+
+    def _generalize_applicable(self, technique_ref: Dict[str, Any],
+                               params: Dict[str, Any]) -> tuple:
+        """Whether bound-constant re-parameterization could apply.
+
+        GEN-SYNTH-5 guard: the generalize leg substitutes constants in
+        the distilled technique's OWN code. It cannot change the
+        technique's arity or build a new composition -- so when the
+        novel goal's param count differs from the technique's input
+        arity, re-parameterization is inapplicable by construction and
+        the leg is skipped honestly (recorded) instead of attempting
+        the wrong mechanism. Returns (applicable, reason).
+        """
+        regs = self._technique_registrations(technique_ref)
+        if not regs:
+            return False, ("generalize inapplicable: no registered "
+                           "primitive found for the technique")
+        try:
+            prim = self.engine.composer.reg.get(regs[0])
+            arity = len(list(prim.inputs.items()))
+        except Exception as exc:
+            return False, ("generalize inapplicable: technique arity "
+                           f"unresolvable ({type(exc).__name__})")
+        n_params = len(params or {})
+        if n_params != arity:
+            return False, (
+                f"generalize inapplicable: novel goal has {n_params} "
+                f"params, technique '{regs[0]}' is {arity}-ary; "
+                "bound-constant re-parameterization cannot change "
+                "arity or build new compositions")
+        return True, ""
 
     def _technique_registrations(
             self, technique_ref: Dict[str, Any]) -> List[str]:
