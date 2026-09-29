@@ -1,0 +1,35 @@
+[PASS] setup: real open gap registered
+[PASS] A1: tick entered through the executive
+[PASS] A2: cycle persisted through the real record_cycle
+[PASS] A3: first hop transitioned run -> acquisition
+[PASS] A4: handoff checkpointed the real transition
+[PASS] A5: acquisition inlet really entered
+[PASS] A6: chain terminated at a declared terminal with a real consumer
+[PASS] A7: open gap reached the real backoff consumer
+[PASS] A8: backoff really recorded (gap not spun, not dropped)
+[PASS] A9: terminal ledger holds the route
+[PASS] B1: capability quarantined through the engine's own path
+[PASS] B2: quarantine route took urgency priority (failure first)
+[PASS] B3: handoff carried the real capability id
+[PASS] B4: execution inlet really diagnosed the live record
+[PASS] B5: execution handoff checkpointed and consumed
+[PASS] C1: distillation really entered, real success
+[PASS] C2: distillation -> generalization handoff on the live path
+[PASS] C3: generalization really entered through the executive
+[PASS] C4: checkpoint carries the producing loop's entry boundary
+[PASS] C5: accepted boundary is fresh per accept (lineage link)
+[PASS] D1: quiet tick converged with no handoff (declared terminal)
+[PASS] D2: terminal reached the real consumer with ledger proof
+[PASS] D3: persisted cycle matches the routed outcome (no stale route)
+[PASS] E1: finding admitted by provenance link
+[PASS] E2: admitted finding delivered into the execution inlet
+[PASS] E3: delivery entered the loop for real
+[PASS] E4: ownership-contradicting declaration refused loudly
+[PASS] E5: gate record is the authority (outbox drained)
+[PASS] F1: status names the fallback explicitly
+[PASS] F2: every hop accounted for (none silently dropped)
+[PASS] F3: unrouted terminals recorded loudly with reason
+[PASS] G1: out-of-contract handoff refused loudly
+[PASS] G3: checkpoint single-use enforced (consume tail ran)
+
+PLOOP-11 live-path proof: 33/33 PASS, 0 FAIL

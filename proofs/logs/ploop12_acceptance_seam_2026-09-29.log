@@ -1,0 +1,22 @@
+[PASS] setup: live path built
+[PASS] A1: technique genuinely induced (47 candidates tried)
+[PASS] A2: claim genuinely executed
+[PASS] A3: held-out genuinely verified (3/3, unseen by induction)
+[PASS] A4: negative control failed closed
+[PASS] A5: counterfactual diverged (wrong plan caught)
+[PASS] A6: auth gate not vacuous (wrong held-out -> passed=False)
+[PASS] B1: completion_candidate boundary validated
+[PASS] B2: entered through the executive into the acceptance inlet
+[PASS] B3: real present() ran -> CANDIDATE record
+[PASS] B4: surface() took the terminal path (declared terminal)
+[PASS] B5: seam router reached the real verdict-awaiting consumer
+[PASS] B6: terminal ledger holds the route with evidence refs
+[PASS] B7: stored record still CANDIDATE (never auto-advanced)
+[PASS] D1: failing auth refused at the boundary gate
+[PASS] D2: failing auth refused at present()
+[PASS] D3: tampered store state refused by router
+[PASS] D4: never-persisted candidate refused
+[PASS] D5: double-present refused
+[PASS] D6: re-present after ACCEPTED refused, verdict intact
+
+PLOOP-12 acceptance-seam proof: 20/20 PASS, 0 FAIL

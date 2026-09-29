@@ -285,6 +285,29 @@ class AcceptanceLoop:
             raise ValueError(
                 "present: authentication gate did not pass; a failed attempt "
                 "is not presentable as completed")
+        # PLOOP-12: a completed attempt is presented ONCE. The store is
+        # INSERT OR REPLACE, so without this guard a duplicate present
+        # silently clobbers the record -- including an ACCEPTED verdict,
+        # the user's word as ground truth. Duplicates are refused loudly;
+        # a retry after rejection goes through present_retry (which keeps
+        # the evidence chain intact).
+        prior = self.store.get(run_id)
+        if prior is not None:
+            state_name = getattr(prior.state, "name", prior.state)
+            if state_name == "CANDIDATE":
+                why = ("a CANDIDATE is already awaiting verdict; "
+                       "a duplicate present is refused")
+            elif state_name == "ACCEPTED":
+                why = ("the run is already ACCEPTED; the verdict stands, "
+                       "a re-present cannot clobber it")
+            elif state_name == "REJECTED":
+                why = ("the run was REJECTED; re-present via present_retry "
+                       "so the evidence chain stays intact")
+            else:
+                why = (f"the run is in terminal state {state_name}; "
+                       "it cannot be re-presented")
+            raise ValueError(
+                f"present: run {run_id!r} was already presented: {why}")
         system_status = self.system_status_of(run_id) or SYSTEM_COMPLETED
         rec = AcceptanceRecord(run_id=run_id, goal=goal,
                                system_status=system_status, auth=auth,

@@ -1,0 +1,25 @@
+PASS C1: produce without store -> handoff, no checkpoint -- checkpoint_id=None
+PASS C1: accept without store -> boundary (unchanged contract) -- acquisition_gap
+PASS C2: checkpoint_id attached at produce time -- ckpt_be239560af91
+PASS C2: checkpoint row durable (fresh connection)
+PASS C2: row mirrors the handoff -- {'gap_record': 'gap_3b8642779217'}
+PASS C2: from_state is deep run state (real rc_cycles row) -- extraction=deep cycle_n=0
+PASS C2: tamper-evidence hash verifies
+PASS C2: status saved -- saved
+PASS C3: process A produced a checkpointed handoff -- PROC-A OK handoff_0587f638b248 ckpt_6484d1a2ac5d
+
+PASS C3: process B resumed from the durable checkpoint -- PROC-B OK
+
+PASS C3: B dispatched the SAME gap the checkpoint names -- {'entered': True, 'dispatched_gap_id': 'gap_becdac1760fe', 'checkpoint_gap_id': 'gap_becdac1760fe', 'lineage_ok': True, 'final_status': 'consumed'}
+PASS C3: lineage unbroken across processes
+PASS C3: checkpoint consumed after entry (single-use)
+PASS C4: transition entered acquisition -- GapRegistry.dispatch(gap_a75e2e909751): routed=True route=substrate outcome=open
+PASS C4: transition dispatched the checkpoint's gap -- gap_a75e2e909751
+PASS C4: checkpoint consumed by the real transition path -- consumed
+PASS C4: gap still open after honest transition -- open
+PASS C5: replay of a consumed checkpoint is refused -- refused loudly: accept: checkpoint verification failed for handoff handoff_ea2b539acf70: checkpoint ckpt_e870d7b57d33 for handoff handoff_ea2b539acf70 is already consumed: checkpoints are single-use; replay is refused
+PASS C6: drifted checkpoint (gap closed) is refused, not resumed -- refused loudly: accept: checkpoint verification failed for handoff handoff_35cd37cba8f3: checkpoint ckpt_9e18f33c0076: gap gap_1760516b6c8a now has status 'closed': it is no longer an open boundary; refusing to resume a stale checkpoint
+PASS C7: checkpoint without a store at accept is refused -- refused loudly: accept: handoff handoff_ae8dbdfad3f9 carries checkpoint ckpt_159acb46b7d2 but context has no checkpoint store: durability claims that cannot be re-verified are not accepted
+PASS C8: tampered checkpoint row is refused -- refused loudly: accept: checkpoint verification failed for handoff handoff_825e00b2fff7: checkpoint ckpt_f0309c12c060: integrity hash mismatch: the row was tampered with after save: refusing to resume from a corrupted checkpoint
+
+PLOOP-8 PROOF COMPLETE: 21/21 checks green
