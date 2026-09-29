@@ -1,0 +1,44 @@
+[PASS] S0: proof source never constructs BoundaryPresentation
+[PASS] S1: detector constructed on the same live collaborators as the executive
+[PASS] S2: probe is genuine (package really missing here) :: nonexistent_pkg_ploop1
+[PASS] S2: gap really open in the registry :: gap_1106c48321bb
+[PASS] S3: capability really admitted :: cap_674fe522fad3c1f53b1d
+[PASS] S3: capability really quarantined (frozen record) :: {'reason': 'missing_dependency: package: nonexistent_pkg_ploop1', 'since': 1790643998.8292835, 'system': 'all', 'quarant
+[PASS] S4: io_examples evidence is a real file with 6 examples :: /tmp/ploop1_ayyf1pwo/io_examples.json
+[PASS] S4: charter delta written through the unified experience path
+[PASS] S5: checkpoint records zero ticks (first wake is genuine)
+[PASS] T0: scan names source-absent kinds (not fabricated) :: ['completion_candidate', 'novel_task']
+[PASS] T0: one scan detected four genuine boundaries :: ['run_wake', 'acquisition_gap', 'execution_failure', 'technique_delta']
+[PASS] run_wake: presentation came from the detector :: boundary_detector:wake_scan
+[PASS] acquisition_gap: presentation came from the detector :: boundary_detector:gap_scan
+[PASS] execution_failure: presentation came from the detector :: boundary_detector:quarantine_scan
+[PASS] technique_delta: presentation came from the detector :: boundary_detector:delta_scan
+[PASS] T1: technique_delta routes to distillation :: RoutingDecision(boundary_id='bnd_6c3470d67023', kind='technique_delta', status='routed', selected_loop='distillation', reason='technique_delta is owned by the distillation loop')
+[PASS] T1: distillation loop entered :: distill(ploop1-delta-13437d23): success=True reason=adaptation route: goal carries 0 distinct numbers; adaptation requires exactly one target constant (ambiguous or no target) -- no proposal was made
+[PASS] T1: result is a real DistillationResult :: <class 'swarm_engine.acquisition.distill.DistillationResult'>
+[PASS] T1: the real loop distilled it (success, held-out verified) :: success=True heldout=2/2
+[PASS] T1: promoted capability dispatches correctly :: cap_fdc1a68981e19bad7eab
+[PASS] T1: consumption recorded (delta no longer pending)
+[PASS] T2: presented gap is the real registered gap
+[PASS] T2: acquisition_gap routes to acquisition :: RoutingDecision(boundary_id='bnd_34e47c69fea0', kind='acquisition_gap', status='routed', selected_loop='acquisition', reason='acquisition_gap is owned by the acquisition loop')
+[PASS] T2: acquisition loop entered :: GapRegistry.dispatch(gap_1106c48321bb): routed=True route=substrate outcome=open
+[PASS] T2: result is a real DispatchResult for this gap :: DispatchResult
+[PASS] T2: honest outcome (missing package -> still open, nothing faked closed) :: substrate_unavailable: dependency 'nonexistent_pkg_ploop1' is kind 'package': the data-only channel cannot provide executable substrate. Missing piece: an insta
+[PASS] T2: gap still open in the registry
+[PASS] T3: presented capability is the real quarantined one
+[PASS] T3: execution_failure routes to execution :: RoutingDecision(boundary_id='bnd_a0b78630cdc8', kind='execution_failure', status='routed', selected_loop='execution', reason='execution_failure is owned by the execution loop')
+[PASS] T3: execution+repair loop entered :: diagnose_quarantine(cap_674fe522fad3c1f53b1d): quarantined=True verdict=indeterminate reason=missing_dependency: package: nonexistent_pkg_ploop1
+[PASS] T3: result is a real QuarantineDiagnosis naming the reason :: missing_dependency: package: nonexistent_pkg_ploop1
+[PASS] T3: diagnosis did not fake-restore the capability
+[PASS] T4: wake reason is the genuine first cadence tick
+[PASS] T4: run_wake routes to run :: RoutingDecision(boundary_id='bnd_987b3762fad2', kind='run_wake', status='routed', selected_loop='run', reason='run_wake is owned by the run loop')
+[PASS] T4: run loop entered :: RunController.tick: 1 gaps, errors=0
+[PASS] T4: result is the real RunController tick summary :: ['at', 'budget_exceeded', 'cycle', 'elapsed_s', 'errors', 'gaps', 'q7_attempts', 'quarantine']
+[PASS] T4: tick is clean (no errors, budget respected) :: []
+[PASS] T4: tick persisted its work (checkpoint records the gap's dispatch failure from this tick) :: 1
+[PASS] T4: retain/recover path wrote the run observation :: 1
+[PASS] D1: re-scan presents nothing already presented (no spin) :: []
+[PASS] D2: envelope observation present in scan detail :: {'last_tick_budget_exceeded': False}
+
+ALL 41 CHECKS PASSED in 9.1s
+detected+routed+entered: ['acquisition_gap', 'execution_failure', 'run_wake', 'technique_delta']
