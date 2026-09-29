@@ -140,6 +140,20 @@ def main():
         return (f"free call: kind={e.cost_kind} cost={e.monetary_cost}; "
                 f"rated call: kind={e2.cost_kind} cost={e2.monetary_cost:.6f}")
 
+    @check("S0e epoch-bounded lending: expired grant refused")
+    def _():
+        import time as _t
+        old = make_grant("g-old", budget_s=60.0)
+        old.issued_at = _t.time() - 3600.0   # issued an hour ago
+        old.epoch_s = 600                    # 10-minute epochs
+        assert old.expired()
+        try:
+            drvA.allocate(old, enforcement)
+        except AllocationRefused as e:
+            assert "epoch" in str(e), e
+            return f"refused as required: {e}"
+        raise AssertionError("expired grant was allocated")
+
     drvB.allocate(make_grant("g-B", budget_s=60.0), enforcement)
     drvC.allocate(make_grant("g-C", budget_s=60.0), enforcement)
 
