@@ -26,8 +26,9 @@ REAL consumer instead of letting it die silently.
       reason. (The real classifier reads outcome="open" first, so the
       router -- not the classifier -- splits refused-from-attempted on
       the dispatch's own routed flag.)
-  R3  run EXHAUSTED: a REAL RunController.tick() with a genuinely
-      exhausted budget is persisted through the same record_cycle path
+  R3  run EXHAUSTED: a REAL RunController.tick() in a provably-exhausted
+      budget state (zero authorized cycle budget -- exhaustion structural,
+      not timed) is persisted through the same record_cycle path
       run() uses, verified against the persisted cycle row, and routed
       to the controller's own accepted cycle record.
   R4  acquisition OPEN (attempted): a REAL dispatch that a real route
@@ -148,7 +149,17 @@ def main():
     epi = eng.intellect.epistemic
     rc = RunController(
         eng,
-        config=RunConfig(cadence_interval_s=60, cycle_budget_s=0.01,
+        # Structural budget-exhaustion (R3): the tick is authorized ZERO
+        # cycle budget, so budget_exceeded is provable by construction --
+        # (monotonic() - started) >= 0.0 at the first cooperative check,
+        # always. A wall-clock threshold (was: 0.01) is flaky here by
+        # mechanism, not luck: the budget check is cooperative (between
+        # steps only), so a tick can overrun *inside* its final step and
+        # still report False, while warm caches can run the whole tick in
+        # ~4ms and report False correctly. Zero budget makes exhaustion
+        # certain; the tick itself stays real (real arbitration round,
+        # real gap-queue pass, real summary through the real path).
+        config=RunConfig(cadence_interval_s=60, cycle_budget_s=0.0,
                          max_gaps_per_cycle=5),
         checkpoint_path=os.path.join(td, "rc.db"))
     registry = GapRegistry(eng, db_path=os.path.join(td, "gaps.db"))
@@ -301,11 +312,15 @@ def main():
               for r in rows))
 
     # ------------------------------------------------------------- R3
-    # run EXHAUSTED: a real tick with a genuinely exhausted budget.
+    # run EXHAUSTED: a real tick in a provably-exhausted budget state.
+    # The controller is authorized zero cycle budget (see construction
+    # above): exhaustion is structural -- elapsed >= 0.0 at the first
+    # cooperative check -- never a wall-clock race.
     summary = rc.tick()
-    check("R3: real tick exhausted its budget",
+    check("R3: zero-budget tick is provably exhausted",
           summary.get("budget_exceeded") is True,
-          f"elapsed={summary.get('elapsed_s')}")
+          f"budget=0.0 elapsed={summary.get('elapsed_s')} "
+          f"arbitration_mode={summary.get('arbitration', {}).get('mode')}")
     # what run() does after every tick (PLOOP-3): persist the cycle.
     rc._checkpoint.record_cycle(0, summary)  # proof wiring: run()'s step
     out_exh = LoopOutcome(loop=LOOP_RUN, entered=True, result=summary,
