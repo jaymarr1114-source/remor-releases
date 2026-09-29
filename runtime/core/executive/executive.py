@@ -59,6 +59,13 @@ from .loops import (
     LoopRegistration,
     RunLoopInlet,
 )
+from .relevance import (
+    Finding,
+    OperationalObjective,
+    RelevanceDecision,
+    RelevanceGate,
+    RelevanceRefused,
+)
 
 #: The declared ownership map: boundary class -> owning loop. This is a
 #: declared architectural fact (James's six-loop hierarchy: each loop
@@ -111,13 +118,15 @@ class ExecutiveController:
                  gap_registry: Any, acceptance_loop: Any,
                  epistemic: Any = None,
                  substrate: Optional[MicrocontrollerSubstrate] = None,
-                 absent_loops: tuple = ()) -> None:
+                 absent_loops: tuple = (),
+                 relevance_gate: Optional[RelevanceGate] = None) -> None:
         self._engine = engine
         self._run_controller = run_controller
         self._gap_registry = gap_registry
         self._acceptance_loop = acceptance_loop
         self._epistemic = (epistemic if epistemic is not None
                          else engine.intellect.epistemic)
+        self._relevance_gate = relevance_gate
         self._substrate = substrate or MicrocontrollerSubstrate()
         for loop in LOOPS:
             self._substrate.register_loop(
@@ -208,6 +217,27 @@ class ExecutiveController:
         reg = self._registrations[decision.selected_loop]
         assert reg.inlet is not None  # routed => real => inlet built
         return reg.inlet.enter(boundary)
+
+    # -- findings inlet: relevance ownership (charter C-3, PLOOP-7) --------
+    def set_operational_objective(
+            self, objective: OperationalObjective) -> None:
+        """Set the objective relevance is judged against. Fail closed:
+        without a relevance gate there is no relevance owner."""
+        if self._relevance_gate is None:
+            raise RelevanceRefused(
+                "no relevance gate installed: the executive cannot own "
+                "relevance decisions without one")
+        self._relevance_gate.set_objective(objective)
+
+    def submit_finding(self, finding: Finding) -> RelevanceDecision:
+        """Submit a finding at the Primary inlet. The relevance gate --
+        the Primary side's relevance owner -- decides: admitted, retained,
+        or rejected. Every decision is persisted and re-checkable."""
+        if self._relevance_gate is None:
+            raise RelevanceRefused(
+                "no relevance gate installed: findings cannot be accepted "
+                "without a relevance decision")
+        return self._relevance_gate.decide(finding)
 
     # -- executive-facing state: LoopView only, O(6) --------------------
     def loop_view(self, loop: str):
