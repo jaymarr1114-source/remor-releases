@@ -92,8 +92,10 @@ contention with the concurrent GEN-SYNTH-5 regression).
 
 ## Commit
 
-`b495e47` — "PLOOP-9: route declared-terminal loop outcomes to real
-consumers" (neutral message; no verification claim in the commit).
+Work commit `b495e47` — "PLOOP-9: route declared-terminal loop outcomes
+to real consumers" (neutral message; no verification claim in the commit)
+on branch `ploop-9-terminal-routing`. The report itself was finalized in a
+follow-up commit on the same branch.
 
 ## Exact next boundary
 
