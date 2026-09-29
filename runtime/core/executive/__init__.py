@@ -104,6 +104,13 @@ from .loops import (
     LoopRegistration,
     RunLoopInlet,
 )
+from .terminal_routing import (
+    FINDING_STATE_REFUSAL,
+    TERMINAL_ROUTING_VERSION,
+    TerminalLedger,
+    TerminalRoute,
+    TerminalRouter,
+)
 
 __all__ = [
     "BOUNDARY_ACQUISITION_GAP",
@@ -147,4 +154,9 @@ __all__ = [
     "LoopOutcome",
     "LoopRegistration",
     "RunLoopInlet",
+    "TERMINAL_ROUTING_VERSION",
+    "TerminalLedger",
+    "TerminalRoute",
+    "TerminalRouter",
+    "FINDING_STATE_REFUSAL",
 ]
