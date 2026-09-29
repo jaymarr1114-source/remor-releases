@@ -132,6 +132,16 @@ class ExecutiveController:
             self._substrate.register_loop(
                 loop, budget_s=_LOOP_BUDGET_S,
                 max_concurrent=_LOOP_MAX_CONCURRENT)
+        # PLOOP-10: hand the substrate to the Run Controller's arbitration
+        # path. The static registrations above are the INITIAL pools; each
+        # tick the controller re-measures demands and overwrites them with
+        # arbitrated grants (capacity is measured from these very pools).
+        # A controller without the bind inlet keeps the static pools as the
+        # live path -- named by its arbitration_status(), never silent.
+        bind = getattr(self._run_controller, "bind_arbitration_substrate",
+                       None)
+        if callable(bind):
+            bind(self._substrate)
         self._registrations: Dict[str, LoopRegistration] = {}
         for loop in LOOPS:
             if loop in absent_loops:
