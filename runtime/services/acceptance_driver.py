@@ -48,12 +48,14 @@ Honesty rules (load-bearing, not decorative):
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from swarm_engine.services.acceptance import (
-    AcceptanceLoop, AcceptanceState, AcceptanceStore, Attempt, AuthReport,
-    PoolVerdict)
+    AcceptanceLoop, AcceptanceRecord, AcceptanceState, AcceptanceStore,
+    Attempt, AuthReport, PoolVerdict, SYSTEM_COMPLETED)
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +366,142 @@ class AcceptanceDriver:
                         "transcript": transcript,
                         "last": out,
                         "chain": self.evidence_chain(rec.run_id)}
+
+    # -- per-cycle acceptance (PLOOP-3): the run controller's own cycles --
+
+    @staticmethod
+    def evaluate_cycle(cycle_n: int, presented: Dict[str, Any],
+                       persisted: Optional[Dict[str, Any]]
+                       ) -> Tuple[bool, Dict[str, Dict[str, Any]]]:
+        """Deterministic, evidence-derived verdict criteria for one
+        controller cycle, evaluated against the PERSISTED checkpoint
+        summary (never trusting the in-memory dict alone).
+
+        Single source of truth: the driver and any independent re-check
+        import this; nobody copies it. A cycle passes only when every
+        named check passes; a failed cycle is a failed cycle, never a
+        skipped or auto-passed one."""
+        checks: Dict[str, Dict[str, Any]] = {}
+
+        def _check(name: str, passed: bool,
+                   expected: Any, observed: Any) -> None:
+            checks[name] = {"expected": expected, "observed": observed,
+                            "passed": bool(passed)}
+
+        _check("row_exists", persisted is not None,
+               "rc_cycles row present", "present" if persisted else "missing")
+        if persisted is None:
+            return False, checks
+        _check("cycle_number_matches", persisted.get("cycle") == cycle_n,
+               cycle_n, persisted.get("cycle"))
+        _check("claims_match_persisted",
+               (persisted.get("errors", []) == presented.get("errors", [])
+                and bool(persisted.get("budget_exceeded"))
+                == bool(presented.get("budget_exceeded"))),
+               "presented claims == persisted row",
+               {"errors": persisted.get("errors", []),
+                "budget_exceeded": bool(persisted.get("budget_exceeded",
+                                                     False))})
+        _check("no_tick_error", "tick_error" not in persisted,
+               "no tick_error", persisted.get("tick_error", "absent"))
+        errs = persisted.get("errors") or []
+        _check("no_step_errors", len(errs) == 0, "errors == []", errs)
+        _check("budget_honored", not persisted.get("budget_exceeded", False),
+               "budget_exceeded falsy",
+               persisted.get("budget_exceeded", False))
+        return all(c["passed"] for c in checks.values()), checks
+
+    def accept_cycle(self, controller: Any, cycle_n: int,
+                     summary: Dict[str, Any]) -> Dict[str, Any]:
+        """Per-cycle acceptance evidence for the run controller's own
+        cadence -- the ACCEPT stage of the unified loop, driven every
+        tick, not only when an operator presents a result.
+
+        This is deliberately NOT present_result(): that inlet's auth gate
+        re-executes synthesis plans, and a cycle summary is not a plan --
+        forcing it through that gate would be gaming the mechanism. The
+        operational authentication here re-reads the PERSISTED rc_cycles
+        row for this cycle and verifies the cycle's claims against what's
+        on disk; the verdict is deterministic and evidence-derived (there
+        is no user inside the autonomous loop).
+
+        A failed cycle is recorded REJECTED with the failed checks named
+        and a near-miss persisted -- never skipped, never auto-passed.
+        loop.present() rightly refuses unauthenticated attempts, which is
+        why the failed path records directly through the store instead of
+        through present()."""
+        con = sqlite3.connect(controller.checkpoint_path)
+        try:
+            row = con.execute(
+                "SELECT summary_json FROM rc_cycles WHERE n=?",
+                (cycle_n,)).fetchone()
+        finally:
+            con.close()
+        persisted = json.loads(row[0]) if row else None
+        passed, checks = self.evaluate_cycle(cycle_n, summary, persisted)
+        failed = [k for k, c in checks.items() if not c["passed"]]
+        goal = (f"run-controller cycle {cycle_n}: execute the authorized "
+                f"cadence honestly")
+        run_id = f"{controller._run_id}:cycle:{cycle_n}"
+        attempt = Attempt(
+            approach_signature=["gap_queue", "distill_sweep",
+                                "quarantine_sweep"],
+            plan={"cycle": cycle_n,
+                  "steps": ["gap_queue", "distill_sweep",
+                            "quarantine_sweep"]},
+            args={},
+            result_summary={
+                "errors": (persisted or {}).get("errors", []),
+                "budget_exceeded": bool(
+                    (persisted or {}).get("budget_exceeded", False)),
+                "gaps_processed": len((persisted or {}).get("gaps", []))},
+            exec_ok=passed)
+        auth = AuthReport(
+            held_out={k: {"expected": v["expected"],
+                          "observed": v["observed"],
+                          "passed": v["passed"]}
+                      for k, v in checks.items()},
+            passed=passed)
+        if passed:
+            rec = self.loop.present(run_id, goal, attempt, auth)
+            # Evidence-derived accept, not a user verdict: set the terminal
+            # fields directly with an honest reason instead of routing
+            # through record_verdict(satisfied=True), which would
+            # mislabel the closer as "user_satisfied".
+            rec.state = AcceptanceState.ACCEPTED
+            rec.decided_at = time.time()
+            rec.close_reason = (
+                "cycle_accepted: autonomous evidence-derived verdict; "
+                "no user in the loop, checks re-verified from the "
+                "persisted checkpoint row")
+            self.loop.store.save(rec)
+            state = "accepted"
+        else:
+            rec = AcceptanceRecord(
+                run_id=run_id, goal=goal,
+                system_status=SYSTEM_COMPLETED, auth=auth,
+                state=AcceptanceState.REJECTED, attempt=attempt,
+                decided_at=time.time(),
+                close_reason="cycle_failed: " + ",".join(failed))
+            self.loop.store.save(rec)
+            nm = self.loop.characterize_near_miss(
+                rec,
+                feedback_text=("autonomous cycle verdict FAILED: "
+                               + ", ".join(failed)),
+                unmet_criteria=failed)
+            self.loop.persist_near_miss(nm)
+            rec.near_miss_ids.append(nm.near_miss_id)
+            self.loop.store.save(rec)
+            state = "rejected"
+        self._observe(
+            "cycle_acceptance",
+            f"AcceptanceDriver: cycle {cycle_n} {state} "
+            f"({len(checks)} checks, failed: {failed or 'none'}).",
+            {"kind": "cycle_acceptance", "cycle": cycle_n, "state": state,
+             "run_id": run_id, "failed_checks": failed})
+        return {"cycle": cycle_n, "state": state, "run_id": run_id,
+                "checks": {k: v["passed"] for k, v in checks.items()},
+                "failed_checks": failed}
 
     # -- evidence ------------------------------------------------------------
 

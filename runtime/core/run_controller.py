@@ -55,7 +55,10 @@ What this file builds (only the missing ownership layer):
   - RunController: cadence/wake, mission dispatch (drives the loops),
     pause/resume/stop, checkpoint/recovery, resource + concurrency
     admission (budgets + backoff), acceptance-loop invocation hook
-    (the inlet Q8's present() will call -- owned here, not by present()),
+    (the inlet Q8's present() will call -- owned here, not by present())
+    plus per-cycle acceptance evidence (PLOOP-3): every tick's summary is
+    accepted against its persisted checkpoint row, so the ACCEPT stage
+    turns every cycle instead of waiting for an operator,
     developmental-stage transition hooks (dormant until V10-P7).
 
 What it reuses (called, never edited, never rebuilt):
@@ -585,6 +588,27 @@ class RunController:
                 # healthy run while losing state.
                 ckpt.record_cycle(cycle_n, summary)
                 ckpt.save_meta("status", "running")
+                # PLOOP-3: the ACCEPT stage of the loop, every cycle. The
+                # checkpoint row above is what the operational auth
+                # re-reads; the acceptance record lands in acceptance.db
+                # next to it. Acceptance never kills the run and never
+                # goes silent: its own failure is recorded on the summary.
+                try:
+                    summary["acceptance"] = self._accept_cycle(
+                        cycle_n, summary)
+                except Exception as exc:
+                    summary["acceptance"] = {
+                        "cycle": cycle_n, "state": "acceptance_error",
+                        "detail": f"{type(exc).__name__}: {exc}"}
+                    self._observe(
+                        "acceptance_error",
+                        f"Run Controller {self._run_id}: per-cycle "
+                        f"acceptance failed for cycle {cycle_n} "
+                        f"({type(exc).__name__}: {exc}); recorded, not "
+                        f"swallowed.",
+                        {"cycle": cycle_n,
+                         "error": f"{type(exc).__name__}: {exc}"})
+                ckpt.record_cycle(cycle_n, summary)
                 if wait_fn is not None:
                     if not wait_fn():
                         report["stopped"] = True
@@ -898,6 +922,14 @@ class RunController:
             drv = AcceptanceDriver.from_controller(self, store_path)
             self._driver = drv
         return drv
+
+    def _accept_cycle(self, cycle_n: int,
+                      summary: Dict[str, Any]) -> Dict[str, Any]:
+        """Per-cycle acceptance, owned here; the driver owns the
+        mechanics (PLOOP-3). Every tick's summary is accepted against
+        its persisted checkpoint row -- the ACCEPT stage of the loop."""
+        return self._acceptance_driver().accept_cycle(
+            self, cycle_n, summary)
 
     def acceptance_driver(self):
         """Access to the production driver (verdict submission, chains)."""
