@@ -20,6 +20,14 @@ What this module builds (only the missing selection/ownership layer):
   - Loop inlets (loops.py): one per loop, each invoking the REAL
     machinery that converges that loop's boundary class. A loop with no
     real machinery registers ABSENT and is named, never stubbed.
+  - Loop handoffs (handoff.py): the contractual loop-to-loop
+    transition. A loop's terminal outcome is classified from its real
+    result type, looked up in the declared HANDOFF_ROUTES table, and --
+    where the table declares a follow-on -- packaged as a validated
+    LoopHandoff (terminal state, real evidence, measured resource
+    accounting, chain-depth guard) whose acceptance rebuilds a validated
+    BoundaryPresentation. Transitions are contractual, never ad-hoc;
+    violations raise HandoffRefused, loudly.
 
 What it reuses (called, never edited, never rebuilt):
   - MicrocontrollerSubstrate / LoopView (RUN-MICRO-1, frozen
@@ -62,6 +70,27 @@ from .boundary import (
     BoundaryRefused,
 )
 from .executive import ExecutiveController, RoutingDecision
+from .handoff import (
+    HANDOFF_CONTRACT_VERSION,
+    HANDOFF_ROUTES,
+    MAX_HANDOFF_DEPTH,
+    TERMINAL_STATES,
+    TERMINAL_ABSENT,
+    TERMINAL_CANDIDATE,
+    TERMINAL_CONVERGED,
+    TERMINAL_EXHAUSTED,
+    TERMINAL_FAILED,
+    TERMINAL_OPEN,
+    TERMINAL_REFUSED,
+    FollowOn,
+    HandoffRefused,
+    LoopHandoff,
+    accept_handoff,
+    classify_terminal,
+    produce_handoff,
+    route_owner,
+    transition,
+)
 from .loops import (
     LOOP_STATE_ABSENT,
     LOOP_STATE_REAL,
@@ -88,6 +117,25 @@ __all__ = [
     "BoundaryRefused",
     "ExecutiveController",
     "RoutingDecision",
+    "HANDOFF_CONTRACT_VERSION",
+    "HANDOFF_ROUTES",
+    "MAX_HANDOFF_DEPTH",
+    "TERMINAL_STATES",
+    "TERMINAL_ABSENT",
+    "TERMINAL_CANDIDATE",
+    "TERMINAL_CONVERGED",
+    "TERMINAL_EXHAUSTED",
+    "TERMINAL_FAILED",
+    "TERMINAL_OPEN",
+    "TERMINAL_REFUSED",
+    "FollowOn",
+    "HandoffRefused",
+    "LoopHandoff",
+    "accept_handoff",
+    "classify_terminal",
+    "produce_handoff",
+    "route_owner",
+    "transition",
     "LOOP_STATE_ABSENT",
     "LOOP_STATE_REAL",
     "AcquisitionLoopInlet",
