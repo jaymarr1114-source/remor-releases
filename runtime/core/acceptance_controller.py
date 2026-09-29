@@ -40,29 +40,37 @@ from typing import Any, Dict, List, Optional
 
 from swarm_engine.core.acceptance_panels import (
     PanelContext, PanelVerdict, VerificationPanel, build_panels)
+from swarm_engine.core.microcontroller import (
+    INTERFACE_VERSION, LOOP_ACCEPTANCE, MicrocontrollerSubstrate, Refusal)
 from swarm_engine.services.acceptance import Attempt
 
 
 # ---------------------------------------------------------------------------
-# the RUN-MICRO-1 seam (NAMED GATE)
+# the RUN-MICRO-1 seam -- BOUND (ACC-BIND-1)
 # ---------------------------------------------------------------------------
 
-RUN_MICRO_1_INTERFACE = "PENDING"
-# Named gate: RUN-MICRO-1 (Run chat) freezes the shared microcontroller
-# spawn/retire/budget interface for all six tracks. This harness implements
-# loop-local spawn/retire/depth/budget semantics behind that seam and binds
-# to the frozen interface on landing. The panels' verification logic does
-# not depend on the interface. NEVER invent the interface here.
+RUN_MICRO_1_INTERFACE = INTERFACE_VERSION  # "microcontroller-interface/v1"
+# Bound 2026-09-28 (ACC-BIND-1): the harness below delegates spawn/retire/
+# budget/depth/admission/charge to the frozen shared substrate
+# (runtime/core/microcontroller/substrate.py, 8d4cb2d). The substrate module
+# is FROZEN -- this controller calls it, never edits it. The panels'
+# verification logic does not depend on the interface.
 
 
 class PanelHandle:
-    """A live microcontroller inside this loop."""
+    """A live microcontroller inside this loop.
+
+    `id` is this controller's local label (acc-mc-N); `mc_id` is the
+    authoritative lifecycle identity on the shared substrate. `parent_id`
+    is the LOCAL parent handle id (the controller's own tree); the
+    substrate tracks parentage by mc_id."""
     _ids = itertools.count(1)
 
-    def __init__(self, panel: VerificationPanel,
+    def __init__(self, panel: VerificationPanel, mc_id: str,
                  parent_id: Optional[str] = None,
                  depth: int = 0, budget_s: float = 60.0):
         self.id = f"acc-mc-{next(PanelHandle._ids)}"
+        self.mc_id = mc_id
         self.panel = panel
         self.parent_id = parent_id
         self.depth = depth
@@ -71,58 +79,147 @@ class PanelHandle:
         self.retired_at: Optional[float] = None
 
     def as_dict(self) -> Dict[str, Any]:
-        return {"id": self.id, "panel": self.panel.kind,
+        return {"id": self.id, "mc_id": self.mc_id,
+                "panel": self.panel.kind,
                 "parent_id": self.parent_id, "depth": self.depth,
                 "budget_s": self.budget_s,
                 "spawned_at": self.spawned_at,
                 "retired_at": self.retired_at}
 
 
-class MicrocontrollerHarness:
-    """Loop-local spawn/retire for this controller's microcontrollers.
+class SpawnOutcome:
+    """What harness.spawn returned. Refusals are values, never
+    exceptions -- the frozen interface's discipline."""
+    def __init__(self, ok: bool,
+                 handle: Optional[PanelHandle] = None,
+                 refusal: Optional[Refusal] = None):
+        self.ok = ok
+        self.handle = handle
+        self.refusal = refusal
 
-    Local recursion: a panel may spawn smaller ones (parent=handle); depth
-    is bounded and retirement unwinds children-first back to the
-    controller. Budgets are enforced fail-closed: a panel that exceeds its
-    budget cannot pass (its verdict is refused). Hard preemption
-    mid-execution is a RUN-MICRO-1-interface concern, documented at the
-    seam, not invented here.
+
+class MicrocontrollerHarness:
+    """Spawn/retire for this controller's microcontrollers, DELEGATED to
+    the frozen shared substrate (ACC-BIND-1). Every lifecycle operation
+    goes through MicrocontrollerSubstrate; this harness keeps only the
+    controller's own bookkeeping (panel callbacks, local tree, refusal
+    log). No parallel loop-local lifecycle semantics remain.
+
+    Local recursion: a panel may spawn smaller ones (parent=handle); the
+    substrate caps depth and unwinds children-first back to the
+    controller. Budgets are enforced fail-closed via cooperative charge():
+    a panel that exceeds its budget cannot pass.
     """
 
-    MAX_DEPTH = 4     # loop-local recursion bound
-    MAX_LIVE = 16     # loop-local population bound
+    # The acceptance loop's bounds, expressed THROUGH the substrate:
+    #   depth 4  -> substrate max_depth=4 on the controller-owned instance
+    #                (stricter than the interface default 8; the tighter
+    #                bound governs here)
+    #   16 live  -> the loop's admission pool max_concurrent=16
+    #   60s each -> per-spawn budget_s=60.0, enforced by charge()
+    #   pool     -> 16 * 60s = 960s loop budget
+    MAX_DEPTH = 4
+    MAX_LIVE = 16
+    PANEL_BUDGET_S = 60.0
+    LOOP_BUDGET_S = MAX_LIVE * PANEL_BUDGET_S  # 960.0
 
-    def __init__(self):
+    def __init__(self,
+                 substrate: Optional[MicrocontrollerSubstrate] = None):
+        # Controller-owned instance until the Executive (RUN-EXEC-1)
+        # provides a shared one. max_depth=4 here is the acceptance
+        # loop's own tighter bound, expressed through the substrate's
+        # own parameter -- not a parallel check.
+        self.substrate = substrate or MicrocontrollerSubstrate(
+            max_depth=self.MAX_DEPTH)
+        self.substrate.register_loop(
+            LOOP_ACCEPTANCE, budget_s=self.LOOP_BUDGET_S,
+            max_concurrent=self.MAX_LIVE)
+        self.default_panel_budget_s = self.PANEL_BUDGET_S
         self._live: Dict[str, PanelHandle] = {}
         self._children: Dict[str, List[str]] = {}
+        self._refusals: List[Refusal] = []
 
     def spawn(self, panel: VerificationPanel,
               parent: Optional[PanelHandle] = None,
-              budget_s: float = 60.0) -> PanelHandle:
-        depth = (parent.depth + 1) if parent else 0
-        if depth > self.MAX_DEPTH:
-            raise RuntimeError(
-                f"microcontroller spawn refused: depth {depth} exceeds "
-                f"loop-local bound {self.MAX_DEPTH} (runaway-spawn guard)")
-        if len(self._live) >= self.MAX_LIVE:
-            raise RuntimeError(
-                f"microcontroller spawn refused: {len(self._live)} live "
-                f"exceeds loop-local bound {self.MAX_LIVE}")
-        handle = PanelHandle(panel,
-                             parent_id=parent.id if parent else None,
-                             depth=depth, budget_s=budget_s)
+              budget_s: Optional[float] = None) -> SpawnOutcome:
+        """Spawn through the shared substrate. Returns SpawnOutcome --
+        a refusal is a value carrying the interface's reason code, never
+        an exception."""
+        result = self.substrate.spawn(
+            LOOP_ACCEPTANCE, f"panel:{panel.kind}",
+            parent_id=parent.mc_id if parent is not None else None,
+            budget_s=(self.default_panel_budget_s
+                      if budget_s is None else budget_s),
+            max_children=8)  # interface default; the harness never
+                             # capped per-parent children
+        if not result.ok:
+            assert result.refusal is not None
+            self._refusals.append(result.refusal)
+            return SpawnOutcome(ok=False, refusal=result.refusal)
+        mc = result.mc
+        assert mc is not None
+        handle = PanelHandle(
+            panel, mc_id=mc.mc_id,
+            parent_id=parent.id if parent is not None else None,
+            depth=mc.depth,
+            budget_s=(self.default_panel_budget_s
+                      if budget_s is None else budget_s))
         self._live[handle.id] = handle
         if parent is not None:
             self._children.setdefault(parent.id, []).append(handle.id)
         panel.on_spawn()
-        return handle
+        return SpawnOutcome(ok=True, handle=handle)
 
-    def retire(self, handle: PanelHandle) -> None:
-        """Retire children first (unwind), then the handle itself."""
+    def charge(self, handle: PanelHandle,
+               seconds: float) -> tuple:
+        """Cooperative budget charge through the substrate. Returns
+        (exhausted, state)."""
+        return self.substrate.charge(handle.mc_id, seconds)
+
+    def apply_budget_gate(self, handle: PanelHandle,
+                          verdict: PanelVerdict) -> PanelVerdict:
+        """Charge the panel's measured work against its substrate budget.
+        On exhaustion the verdict is refused -- fail-closed, named.
+        Must be called BEFORE retire (the substrate only charges active
+        microcontrollers)."""
+        exhausted, state = self.charge(
+            handle, max(0.0, verdict.elapsed_s))
+        if exhausted:
+            verdict.budget_exceeded = True
+            verdict.passed = False
+            verdict.reason += (
+                f" [panel budget exhausted via the shared substrate: "
+                f"{verdict.elapsed_s:.1f}s > {handle.budget_s:.1f}s "
+                f"(mc {handle.mc_id} is {state})]")
+        return verdict
+
+    def retire(self, handle: PanelHandle) -> Optional[Refusal]:
+        """Retire through the substrate (which cascade-retires children),
+        then walk the local tree for panel callbacks and bookkeeping.
+        Idempotent: retiring an already-retired handle is a no-op.
+        A substrate Refusal is returned, never swallowed."""
+        if handle.id not in self._live:
+            return None
+        # Honest outcome: never claim "resolved" on an exhausted mc --
+        # the substrate would (correctly) flag it as fabricated.
+        rec = self.substrate.get(handle.mc_id)
+        outcome = ("exhausted" if rec is not None
+                   and rec.state == "exhausted" else "resolved")
+        result = self.substrate.retire(
+            handle.mc_id, outcome=outcome, loop=LOOP_ACCEPTANCE)
+        self._retire_local_tree(handle)
+        if isinstance(result, Refusal):
+            self._refusals.append(result)
+            return result
+        return None
+
+    def _retire_local_tree(self, handle: PanelHandle) -> None:
+        """Panel callbacks + bookkeeping for the handle and its local
+        subtree (the substrate already cascade-retired their records)."""
         for child_id in list(self._children.get(handle.id, [])):
             child = self._live.get(child_id)
             if child is not None:
-                self.retire(child)
+                self._retire_local_tree(child)
         self._children.pop(handle.id, None)
         if handle.parent_id is not None:
             sibs = self._children.get(handle.parent_id, [])
@@ -134,6 +231,10 @@ class MicrocontrollerHarness:
 
     def live(self) -> List[PanelHandle]:
         return list(self._live.values())
+
+    def refusals(self) -> List[Refusal]:
+        """Every spawn/retire refusal this harness has seen, in order."""
+        return list(self._refusals)
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +320,22 @@ class AcceptanceController:
                            run_started_at=time.time())
         verdicts: List[PanelVerdict] = []
         for panel in build_panels():
-            handle = self.harness.spawn(panel)
+            outcome = self.harness.spawn(panel)
+            if not outcome.ok:
+                # Fail-closed: a microcontroller that cannot be admitted
+                # cannot verify. The refusal names the interface reason.
+                assert outcome.refusal is not None
+                verdicts.append(PanelVerdict(
+                    panel=panel.kind, passed=False,
+                    reason=f"{panel.kind}: spawn refused "
+                           f"({outcome.refusal.reason}): "
+                           f"{outcome.refusal.message}; a microcontroller "
+                           f"that cannot be admitted cannot verify",
+                    evidence={"refusal": outcome.refusal.as_dict()}))
+                break
+            handle = outcome.handle
+            assert handle is not None
+            t0 = time.time()
             try:
                 v = panel.verify(ctx)
             except Exception as e:
@@ -228,14 +344,13 @@ class AcceptanceController:
                     reason=f"{panel.kind}: panel raised "
                            f"{type(e).__name__}: {e}; a panel that "
                            f"cannot verify refuses",
-                    evidence={"error": str(e)})
-            finally:
-                self.harness.retire(handle)
-            if v.elapsed_s > handle.budget_s:
-                v.budget_exceeded = True
-                v.passed = False
-                v.reason += (f" [panel budget exhausted: "
-                             f"{v.elapsed_s:.1f}s > {handle.budget_s:.1f}s]")
+                    evidence={"error": str(e)},
+                    elapsed_s=time.time() - t0)
+            # Cooperative budget gate BEFORE retire: the panel's measured
+            # work is charged against its substrate budget; exhaustion
+            # refuses the verdict (fail-closed, named).
+            v = self.harness.apply_budget_gate(handle, v)
+            self.harness.retire(handle)
             verdicts.append(v)
             if not v.passed:
                 break  # fail fast; the refusal names the first failing panel
@@ -314,6 +429,14 @@ class AcceptanceController:
         """Loop-internal visibility (NOT the executive view): live
         microcontrollers, for this controller's own operation."""
         return [h.as_dict() for h in self.harness.live()]
+
+    def substrate_loop_view(self) -> Dict[str, Any]:
+        """Loop-internal visibility through the shared substrate: the
+        LoopView aggregates (no microcontroller ids or purposes -- the
+        interface enforces that by construction). NOT the executive
+        view; the executive gets loop_status() only."""
+        return self.harness.substrate.loop_view(
+            LOOP_ACCEPTANCE).as_dict()
 
     def resolve_to_executive(self) -> Dict[str, Any]:
         """Where this controller resolves on loop completion. The
