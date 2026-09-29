@@ -223,6 +223,27 @@ class MicrocontrollerSubstrate:
                                           max_concurrent=int(max_concurrent))
         self._loop_state.setdefault(loop, "idle")
 
+    def set_grant(self, loop: str, *, budget_s: float,
+                  max_concurrent: int) -> None:
+        """Write a resource-arbitration grant into the loop's pool.
+
+        Owned by the ResourceArbitrator (runtime/core/resource_arbitrator.py):
+        the grant is a ceiling on what the loop may start, never a floor.
+        Shrinking a grant below already-reserved spend does NOT kill running
+        work -- available_s clamps at zero and new spawns are refused
+        (fail-closed), matching the substrate's cooperative philosophy.
+        Raises KeyError for an unregistered loop: a grant for a loop the
+        substrate does not know is a loud configuration error, never a
+        silent skip.
+        """
+        adm = self._loops[loop]  # KeyError if unregistered: intentional
+        if budget_s < 0:
+            raise ValueError("grant budget_s must be >= 0")
+        if max_concurrent < 0:
+            raise ValueError("grant max_concurrent must be >= 0")
+        adm.budget_s = float(budget_s)
+        adm.max_concurrent = int(max_concurrent)
+
     def set_cognition_provider(self, provider: CognitionProvider) -> None:
         self._provider = provider
 
