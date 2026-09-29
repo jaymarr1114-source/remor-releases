@@ -817,14 +817,21 @@ class DistillationLoop:
         if self.epistemic is None:
             return
         try:
-            from swarm_engine.intellect.epistemic import Observation
+            # Experience records go through the unified-memory facade (not
+            # the store's raw save_observation): the facade stamps the
+            # canonical provenance block. The deterministic id keeps the
+            # write idempotent across retries.
+            from swarm_engine.intellect.unified_memory import record_experience
             import hashlib as _hl
             oid = ("exp_" + _hl.sha256(
                 f"{content}{time.time()}".encode()).hexdigest()[:16])
-            obs = Observation(observation_id=oid, content=content,
-                              source="distillation-loop", raw=dict(raw))
-            save = getattr(self.epistemic, "save_observation", None)
-            if callable(save):
-                save(obs)
+            record_experience(
+                self.epistemic,
+                origin_loop="acquisition",
+                kind="distillation_experience",
+                content=content,
+                raw=dict(raw),
+                source="distillation-loop",
+                observation_id=oid)
         except Exception:
             pass  # experience logging never breaks the loop

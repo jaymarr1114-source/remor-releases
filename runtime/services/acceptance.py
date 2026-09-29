@@ -148,7 +148,9 @@ class NearMiss:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "NearMiss":
-        d = {k: v for k, v in d.items() if k != "type"}  # storage envelope
+        # storage envelope: drop the facade's canonical provenance block
+        d = {k: v for k, v in d.items()
+             if k not in ("type", "_provenance")}
         return NearMiss(**d)
 
 
@@ -409,19 +411,25 @@ class AcceptanceLoop:
             steers_toward=list(unmet_criteria))
 
     def persist_near_miss(self, near_miss: NearMiss):
-        """Persist through the epistemic store as a first-class observation
-        (retrievable as evidence). Uses the frozen epistemic API
-        (record_observation) owned by M1 — no direct Observation
-        construction, no save_observation call."""
+        """Persist as a first-class experience record (retrievable as
+        evidence) through the unified-memory facade -- not the store's
+        raw observation API. The facade stamps the canonical provenance
+        block; the near-miss fields stay in the raw payload unchanged, so
+        near_misses_for_goal (which reads source + raw) is unaffected."""
+        from swarm_engine.intellect.unified_memory import record_experience
         content = (f"near-miss on goal '{near_miss.goal}': attempt via "
                    f"{near_miss.attempt.get('approach_signature')} was "
                    f"close but wrong ({near_miss.feedback_text!r}); "
                    f"unmet: {near_miss.unmet_criteria}")
-        return self.epistemic.record_observation(
+        return record_experience(
+            self.epistemic,
+            origin_loop="verification",
+            kind="near_miss",
             content=content,
-            source="acceptance_loop",
-            raw={"type": "near_miss", "near_miss_id": near_miss.near_miss_id,
-                 **near_miss.as_dict()})
+            raw={"type": "near_miss",
+                 "near_miss_id": near_miss.near_miss_id,
+                 **near_miss.as_dict()},
+            source="acceptance_loop")
 
     def near_misses_for_goal(self, goal: str) -> List[NearMiss]:
         """Retrieve near-miss records for a goal from the epistemic store —

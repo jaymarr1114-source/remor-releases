@@ -300,12 +300,16 @@ class CognitionLoop:
     def _record_outcome(self, outcome: Dict[str, Any], m1: Dict[str, Any],
                         result: Any = None) -> None:
         """Persist the distillation outcome: the processed marker AND the
-        observe step for this delta. The next scan sees the marker."""
-        self.epistemic.record_observation(
+        observe step for this delta. The next scan sees the marker.
+        Written through the unified-memory facade."""
+        from swarm_engine.intellect.unified_memory import record_experience
+        record_experience(
+            self.epistemic,
+            origin_loop="acquisition",
+            kind="distillation_outcome",
             content=(f"loop_driver distillation outcome: "
                      f"{outcome['delta_id']} success={outcome['success']} "
                      f"reason={outcome['reason'][:200]}"),
-            source=SRC_OUTCOME,
             raw={"delta_id": outcome["delta_id"],
                  "success": outcome["success"],
                  "reason": outcome["reason"],
@@ -317,6 +321,8 @@ class CognitionLoop:
                  "heldout": (f"{getattr(result, 'heldout_passed', '?')}/"
                              f"{getattr(result, 'heldout_examples', '?')}")
                             if result else "?"},
+            causal_chain=[outcome["delta_id"]],
+            source=SRC_OUTCOME,
         )
 
     def _record_experience(self, m1: Dict[str, Any], m2: Any,
@@ -365,15 +371,19 @@ class CognitionLoop:
             if isinstance(r, dict) and r.get("action") not in
             ("noop", "no-op", None))
         if actions or result.get("count"):
-            self.epistemic.record_observation(
+            from swarm_engine.intellect.unified_memory import record_experience
+            record_experience(
+                self.epistemic,
+                origin_loop="acquisition",
+                kind="quarantine_sweep",
                 content=(f"loop_driver quarantine sweep: "
                          f"{result.get('count', 0)} quarantined seen, "
                          f"{actions} actions taken"),
-                source=SRC_CYCLE,
                 raw={"kind": "quarantine_sweep",
                      "count": result.get("count", 0),
                      "actions": actions,
                      "results": result.get("results", {})},
+                source=SRC_CYCLE,
             )
         return result
 
@@ -393,12 +403,15 @@ class CognitionLoop:
                     or report["sweep_error"] or bool(report["errors"]))
         if not did_work:
             return
-        self.epistemic.record_observation(
+        from swarm_engine.intellect.unified_memory import record_experience
+        record_experience(
+            self.epistemic,
+            origin_loop="acquisition",
+            kind="cycle_summary",
             content=(f"loop_driver cycle: {len(report['distilled'])} distilled, "
                      f"{len(report['distill_errors'])} distill errors, "
                      f"sweep_count={(report['sweep'] or {}).get('count')}, "
                      f"budget_exceeded={report['budget_exceeded']}"),
-            source=SRC_CYCLE,
             raw={"kind": "cycle_summary",
                  "distilled": report["distilled"],
                  "distill_errors": report["distill_errors"],
@@ -407,29 +420,42 @@ class CognitionLoop:
                  "errors": report["errors"],
                  "budget_exceeded": report["budget_exceeded"],
                  "elapsed_s": round(report["elapsed_s"], 2)},
+            source=SRC_CYCLE,
         )
 
     # ------------------------------------------------------------------
     # Gap-touching call sites — M7 switchover points
     # ------------------------------------------------------------------
     def _note_gap(self, kind: str, detail: Dict[str, Any]) -> str:
-        """Record an open gap. CURRENTLY an epistemic observation; when M7's
-        gap-registry API is up, this method registers through it instead.
-        This method is the switchover point — callers do not change."""
+        """Record an open gap. Written through the unified-memory facade
+        (as an experience record); when M7's gap-registry API is up, this
+        method registers through it instead. This method is the switchover
+        point — callers do not change."""
         import uuid
+        from swarm_engine.intellect.unified_memory import record_experience
         gap_id = f"gap_{uuid.uuid4().hex[:12]}"
-        self.epistemic.record_observation(
+        record_experience(
+            self.epistemic,
+            origin_loop="acquisition",
+            kind="gap_open",
             content=f"loop_driver gap [{kind}]: {gap_id}",
-            source=SRC_GAP,
             raw={"gap_id": gap_id, "kind": kind, "open": True,
                  "detail": detail},
+            source=SRC_GAP,
         )
         return gap_id
 
     def _close_gap(self, gap_id: str, evidence: Dict[str, Any]) -> None:
-        """Close a gap previously opened by _note_gap. Same switchover."""
-        self.epistemic.record_observation(
+        """Close a gap previously opened by _note_gap. Same switchover.
+
+        Written through the unified-memory facade."""
+        from swarm_engine.intellect.unified_memory import record_experience
+        record_experience(
+            self.epistemic,
+            origin_loop="acquisition",
+            kind="gap_close",
             content=f"loop_driver gap closed: {gap_id}",
+            raw={"gap_id": gap_id, "open": False,
+                 "closing_evidence": evidence},
             source=SRC_GAP,
-            raw={"gap_id": gap_id, "open": False, "closing_evidence": evidence},
         )

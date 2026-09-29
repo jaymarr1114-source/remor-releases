@@ -111,14 +111,18 @@ class Experiment:
     executed: bool = False
     result: Optional[Dict[str, Any]] = None
     at: float = field(default_factory=time.time)
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {"experiment_id": self.experiment_id, "question_id": self.question_id,
                 "hypothesis_ids": self.hypothesis_ids, "design": self.design,
-                "executed": self.executed, "result": self.result, "at": self.at}
+                "executed": self.executed, "result": self.result, "at": self.at,
+                "provenance": self.provenance}
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Experiment":
+        # provenance has a default: rows written before the unified-memory
+        # cutover (no provenance key) still load.
         return Experiment(**d)
 
 

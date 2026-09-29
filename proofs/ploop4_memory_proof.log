@@ -1,0 +1,15 @@
+PASS A1 zero direct EpistemicStore write calls outside store+facade
+PASS A2 exclusion set is exactly the two justified files
+PASS A3 facade is the only caller: unified_memory references each write API
+PASS B1 observation: facade write -> persist -> read-back
+PASS B2 evidence: facade write -> evidence_for -> canonical block
+PASS C1 arbiter is inert to the additive provenance block
+PASS B3 hypothesis: write -> get -> re-save after mutation (arbiter pattern)
+PASS B4 experiment: write -> experiments_for -> provenance round-trips JSON
+PASS D1 pre-cutover experiment rows (no provenance key) still load
+PASS B5 UnifiedMemory method attachments route through the facade
+PASS E1 census bridges a real intent.db: present, no tables outside schema
+PASS E2 negative control: a rogue table in intent.db is flagged
+PASS E3 absent intent.db is not a defect (service boots it lazily)
+
+13/13 checks passed
