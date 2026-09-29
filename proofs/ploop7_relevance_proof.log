@@ -1,0 +1,26 @@
+store: /tmp/ploop7_f3b7wixw/relevance.db
+threshold: 0.25
+objective terms (20): ['autonomous', 'boundaries', 'boundary', 'conditions', 'detect', 'detection', 'establish', 'executive', 'fires', 'genuine', 'loop', 'observe', 'present', 'primary', 'route', 'runtime', 'state', 'turns', 'unified', 'validated']
+[PASS] C1 provenance-link admission -- admitted by provenance link: finding's bounded objective 'obj-boundary-detection' is the current operational objective (requested_by_primary=True)
+[PASS] C2 content-score admission -- score=0.300 reason=admitted by content score 0.300 >= 0.25 on overlap terms ['boundary', 'executive', 'fires', 'loop', 'route', 'validated']
+[PASS] C3 true-but-irrelevant retained -- retained as true-but-irrelevant: content score 0.000 < 0.25, no provenance link to 'obj-boundary-detection'; kept with terminal_state=DISCOVERY_VERIFIED, never promoted
+[PASS] C4 refuted finding rejected -- rejected: claim refuted (terminal_state=HYPOTHESIS_REFUTED); retained in store as knowledge, not admitted
+[PASS] C5 relevant-elsewhere retained at this inlet -- score=0.000 reason=retained as true-but-irrelevant: content score 0.000 < 0.25, no provenance link to 'obj-boundary-detection'; kept with terminal_state=MODEL_REVISED, never promoted
+[PASS] C6 bad terminal state rejected -- rejected as inadmissible evidence (charter C-2.2): finding 'f6': terminal_state 'BOGUS_STATE' is not in the enumerated set
+[PASS] C7 missing provenance rejected -- rejected as inadmissible evidence (charter C-2.2): finding 'f7': source_loop is required (a finding with no producing loop is ungrounded)
+[PASS] C8 triage is not admission -- retained as true-but-irrelevant: content score 0.000 < 0.25, no provenance link to 'obj-boundary-detection'; kept with terminal_state=NOVELTY_CLASSIFIED, never promoted; curiosity triage was 'propose' -- triage is advisory only (charter C-3.3)
+edge pair: above score=0.250 -> admitted; below score=0.200 -> retained
+[PASS] C9 threshold discriminates -- one overlapping term ('boundary') flips admitted/retained
+[PASS] C10a all decisions persisted -- 10 decision rows
+[PASS] C10b verdicts re-checkable -- every finding's persisted verdict matches
+[PASS] C10c retained keep terminal state -- retained: [('f3', 'DISCOVERY_VERIFIED'), ('f5', 'MODEL_REVISED'), ('f8', 'NOVELTY_CLASSIFIED'), ('f_edge_below', 'DISCOVERY_VERIFIED')]
+[PASS] C10d refuted finding kept as knowledge -- f4 row: ('f4', 'HYPOTHESIS_REFUTED')
+[PASS] C10e retained never promoted -- irrelevant findings present but flagged retained, not admitted
+[PASS] C11 deterministic decisions -- gate A: admitted/content-score/0.300; gate B: admitted/content-score/0.300
+[PASS] C12 executive inlet f1 -- f1 -> admitted via executive
+[PASS] C12 executive inlet f3 -- f3 -> retained via executive
+[PASS] C12 executive inlet f4 -- f4 -> rejected via executive
+[PASS] C12b gateless executive fail-closed -- no relevance gate installed: findings cannot be accepted without a relevance dec
+[PASS] C12c gateless set_objective fail-closed
+
+ALL CHECKS PASSED
