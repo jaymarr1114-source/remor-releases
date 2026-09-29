@@ -273,6 +273,52 @@ class ControllerCheckpoint:
             con.close()
         return float(row[0]) if row else 0.0
 
+    def gap_failure_count(self, gap_id: str) -> int:
+        """Consecutive dispatch failures recorded for a gap (read-only).
+
+        PLOOP-1: the boundary detector's stagnation signal. Zero when the
+        gap has no backoff record."""
+        con = self._conn()
+        try:
+            row = con.execute(
+                "SELECT failures FROM rc_gap_backoff WHERE gap_id=?",
+                (gap_id,)).fetchone()
+        finally:
+            con.close()
+        return int(row[0]) if row else 0
+
+    def last_cycle_at(self) -> Optional[float]:
+        """Wall-clock of the most recent recorded tick (read-only).
+
+        PLOOP-1: the boundary detector's cadence signal. None when no
+        tick has ever been recorded."""
+        con = self._conn()
+        try:
+            row = con.execute(
+                "SELECT MAX(at) FROM rc_cycles").fetchone()
+        finally:
+            con.close()
+        return float(row[0]) if row and row[0] else None
+
+    def last_cycle_summary(self) -> Optional[Dict[str, Any]]:
+        """The most recent tick's summary dict (read-only).
+
+        PLOOP-1: the boundary detector's envelope signal
+        (budget_exceeded). None when no tick has been recorded."""
+        con = self._conn()
+        try:
+            row = con.execute(
+                "SELECT summary_json FROM rc_cycles "
+                "ORDER BY at DESC LIMIT 1").fetchone()
+        finally:
+            con.close()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return None
+
     def clear_gap_backoff(self, gap_id: str) -> None:
         con = self._conn()
         try:
@@ -353,6 +399,14 @@ class RunController:
         return self._registry
 
     # -- control ---------------------------------------------------------
+    @property
+    def run_id(self) -> str:
+        """The controller's run id (read-only).
+
+        PLOOP-1: the boundary detector needs the run id for run_wake
+        evidence; the id was previously private-only."""
+        return self._run_id
+
     def request_stop(self) -> None:
         self._stop.set()
 
