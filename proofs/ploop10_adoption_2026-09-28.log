@@ -1,0 +1,54 @@
+--- T1: bind measures capacity from the real initial pools ---
+ok [1]: T1: unbound controller reports static-fallback (explicit, not silent)
+ok [2]: T1: fallback reason names the missing bind
+ok [3]: T1: bind reports bound
+ok [4]: T1: capacity measured from real pools = 3600.0s (got 3600.0)
+ok [5]: T1: slot capacity measured from real pools = 96 (got 96)
+ok [6]: T1: epoch length follows the real cadence interval
+ok [7]: T1: bound controller reports the arbitrated live path
+ok [8]: T1: live path names the arbitrator grants
+--- T2: contention on real state ---
+ok [9]: T2: 10 genuinely registered open gaps (got 10)
+ok [10]: T2: 2 real generalization MCs spawned (600s really reserved)
+ok [11]: T2: 600s really reserved on the generalization pool
+ok [12]: T2: round ran arbitrated
+ok [13]: T2: first epoch is 1
+ok [14]: T2: capacity is the measured 3600s
+ok [15]: T2: acquisition demand MEASURED as 10 open gaps x 600s = 6000s (got 6000.0)
+ok [16]: T2: demand method names the real signal
+ok [17]: T2: generalization demand MEASURED as the real 600s reserved
+ok [18]: T2: run loop honestly states reserved-only demand (no MC work path)
+ok [19]: T2: total stated grants 2400.0s within the 3600s capacity
+ok [20]: T2: zero-demand loop gets no stated grant (pool keeps its prior grant -- no thrash, honestly reported)
+ok [21]: T2: acquisition grant is 1800.0s under contention (got 1800.0)
+ok [22]: T2: arbitrated grant differs from the static 600s default
+ok [23]: T2: active work keeps its ceiling (generalization granted its full reserved 600s)
+ok [24]: T2: acquisition pool really rewritten to the 1800s grant
+ok [25]: T2: generalization pool really rewritten to the 600s grant
+ok [26]: T2: spawn of 2000s against the 1800s grant really refused (admission_exhausted)
+ok [27]: T2: the refusal is really counted in total_refused
+ok [28]: T2: real tick() runs the arbitration round in-cadence
+ok [29]: T2: tick advanced the arbitration epoch to 2
+ok [30]: T2: status tracks the live epoch
+--- T4: refused demand is visible, never vanished ---
+ok [31]: T2/T4: refused acquisition demand recorded exactly: 6000 - 1800 = 4200.0s (got 4200.0)
+ok [32]: T4: fully granted loop records zero refused
+ok [33]: T4: headroom recorded: 3600 - 2400 = 1200.0s (got 1200.0)
+--- T3: static fallback is explicit ---
+ok [34]: T3: unbound tick names static-fallback in the cycle summary
+ok [35]: T3: the summary carries the reason, not a silent default
+ok [36]: T3: the tick still completes its real work under fallback
+ok [37]: T3: arbitration_status() agrees on the live path
+--- T5: loud bind failure; fail-closed tick ---
+ok [38]: T5: bind fails LOUDLY naming the missing loop pool ("bind_arbitration_substrate: substrate has no pools for ['distillation']; register the loops before binding")
+ok [39]: T5: corrupted gap db -> arbitration round records mode=error
+ok [40]: T5: the error names the real sqlite failure (DatabaseError: file is not a database)
+ok [41]: T5: the tick still completes (fail-closed: pools keep prior grants, nothing crashes)
+--- T6: executive/run-controller cadence wiring ---
+ok [42]: T6: pre-executive controller is unbound (baseline)
+ok [43]: T6: constructing the executive auto-binds the shared substrate to the controller's arbitration path
+ok [44]: T6: the controller's arbitration path holds the executive's shared substrate (same object, not a copy)
+ok [45]: T6: executive-bound arbitration measures the same 3600s/96 capacity from the executive's real initial pools
+ok [46]: T6: demand unit constant matches the inlet's real cycle budget
+
+PLOOP-10 PROOF COMPLETE: 46 checks green

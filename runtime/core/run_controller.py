@@ -91,6 +91,18 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .microcontroller.substrate import LOOPS, LOOP_ACQUISITION
+from .resource_arbitrator import ResourceArbitrator
+
+
+#: Hosted cognition-cycle budget used for acquisition demand measurement.
+#: Mirrors AcquisitionLoopInlet._cognition_cycle_budget_s
+#: (runtime/core/executive/loops.py): the real per-cycle budget the
+#: acquisition loop's microcontroller-spawning path consumes. One hosted
+#: cycle per open gap is the honest upper bound the loop states; the
+#: arbitrator decides what it actually gets.
+_ACQUISITION_HOSTED_CYCLE_BUDGET_S = 600.0
+
 ORIGIN_LOOP = "run_controller"
 
 _CHECKPOINT_SCHEMA = """
@@ -389,6 +401,16 @@ class RunController:
         self._checkpoint = ControllerCheckpoint(checkpoint_path)
         self.checkpoint_path = checkpoint_path
         self._run_id = f"run_{uuid.uuid4().hex[:12]}"
+        # PLOOP-10: the Run Controller owns resource+concurrency admission
+        # (James's architecture decision, standing). The arbitrator is the
+        # mechanism; it is constructed at bind time, when the substrate's
+        # initial pools are measurable -- capacity is the sum of those real
+        # pools, never a hard-coded constant. Until a substrate is bound,
+        # arbitration is dormant and the static pools are the live path
+        # (named by arbitration_status(), never silent).
+        self._arbitrator: Optional[ResourceArbitrator] = None
+        self._arbitration_substrate: Any = None
+        self._arbitration_last: Optional[Dict[str, Any]] = None
         if not self.config.staging_dir:
             self.config.staging_dir = os.path.join(
                 os.path.dirname(os.path.abspath(checkpoint_path)),
@@ -400,6 +422,200 @@ class RunController:
             from swarm_engine.acquisition.gaps import GapRegistry
             self._registry = GapRegistry(self.engine)
         return self._registry
+
+    # -- resource arbitration (PLOOP-10) -----------------------------------
+    # The Run Controller owns resource+concurrency admission. Each tick it
+    # measures each loop's real demand, arbitrates, and applies the grants
+    # to the shared substrate's per-loop pools -- replacing the static
+    # initial registrations with arbitrated grants on the live path.
+
+    def bind_arbitration_substrate(self, substrate: Any) -> Dict[str, Any]:
+        """Bind the shared microcontroller substrate to the arbitration path.
+
+        Capacity is MEASURED: the sum of the substrate's initial per-loop
+        pools (the regime the static defaults established), so adoption is
+        never more permissive than the static path it replaces. All six
+        loops register with equal weight (no loop privileged -- the charter
+        peer relationship) and zero minimums: demand rules, and starvation
+        shows up as recorded refusals instead of hiding inside minimums.
+        Reserved spend is always part of measured demand, so shrinking a
+        grant never silently starves already-running work -- the decision
+        record shows it.
+
+        Raises loudly (KeyError/ValueError) when the substrate does not
+        carry all six loop pools: a misconfigured bind is a construction
+        error, never a silent partial adoption.
+        """
+        pools = substrate.export_state()["loops"]  # public snapshot
+        missing = [loop for loop in LOOPS if loop not in pools]
+        if missing:
+            raise KeyError(
+                "bind_arbitration_substrate: substrate has no pools for "
+                f"{missing}; register the loops before binding")
+        total_b = round(
+            sum(float(p["budget_s"]) for p in pools.values()), 6)
+        total_c = int(sum(int(p["max_concurrent"]) for p in pools.values()))
+        if not (total_b > 0 and total_c > 0):
+            raise ValueError(
+                "bind_arbitration_substrate: measured capacity must be "
+                f"> 0 (got {total_b}s / {total_c} slots)")
+        arb = ResourceArbitrator(
+            total_budget_s=total_b, total_max_concurrent=total_c,
+            epoch_length_s=self.config.cadence_interval_s)
+        for loop in LOOPS:
+            arb.register_loop(loop, weight=1.0,
+                              minimum_budget_s=0.0, minimum_concurrent=0)
+        self._arbitrator = arb
+        self._arbitration_substrate = substrate
+        return {"bound": True, "capacity_budget_s": total_b,
+                "capacity_concurrent": total_c,
+                "epoch_length_s": self.config.cadence_interval_s}
+
+    def _measure_demands(self) -> Dict[str, Dict[str, Any]]:
+        """Measure each loop's substrate demand from real state.
+
+        budget_s = currently-reserved spend (from the substrate's public
+        snapshot: the grant must keep covering active work) + pending new
+        work x that work's real per-unit cost. concurrent = active MCs +
+        pending units. A loop with no microcontroller-spawning work path
+        and no measurable backlog honestly states its reserved spend only;
+        new demand appears as reserved/active the moment it spawns.
+        """
+        substrate = self._arbitration_substrate
+        pools = substrate.export_state()["loops"]
+        n_open = len(self._gap_registry().list_gaps(status="open"))
+        demands: Dict[str, Dict[str, Any]] = {}
+        for loop in LOOPS:
+            view = substrate.loop_view(loop)
+            reserved = float(pools[loop]["reserved_s"])
+            if loop == LOOP_ACQUISITION:
+                # The acquisition loop's real MC-spawning path is the hosted
+                # cognition cycle (AcquisitionLoopInlet.drive_cognition);
+                # each open gap is a candidate for one hosted cycle.
+                pending_units = n_open
+                budget = (reserved + pending_units
+                          * _ACQUISITION_HOSTED_CYCLE_BUDGET_S)
+                concurrent = view.active_count + pending_units
+                method = (
+                    f"reserved {reserved:.1f}s + {pending_units} open gaps x "
+                    f"{_ACQUISITION_HOSTED_CYCLE_BUDGET_S:.0f}s hosted-cycle "
+                    "budget (upper bound: the loop states what it could "
+                    "host; the arbitrator decides what it gets)")
+            else:
+                # No MC-spawning work path with a measurable backlog signal:
+                # the run loop dispatches gaps inline in tick(); execution
+                # repair runs inline; acceptance verification is
+                # driver-driven; distillation's spawn_microcontroller has no
+                # callers yet; generalization's run_cycle is mission-driven
+                # with no steady backlog queue.
+                budget = reserved
+                concurrent = view.active_count
+                method = (
+                    f"reserved {reserved:.1f}s + {view.active_count} active "
+                    "(no measurable pending microcontroller work)")
+            demands[loop] = {"budget_s": budget, "concurrent": concurrent,
+                             "method": method}
+        return demands
+
+    def _arbitrate_resources(self) -> Dict[str, Any]:
+        """One arbitration round: measure -> set_demand -> arbitrate ->
+        apply. Returns a JSON-serializable summary for the cycle record.
+
+        Grants are written into the substrate's per-loop pools, where the
+        substrate's own admission refuses spawns beyond them
+        (R_ADMISSION_EXHAUSTED / R_CONCURRENCY_CAP, recorded in
+        total_refused) -- the grant is enforced, not advisory. The refused
+        portion of each loop's demand is computed here and carried in the
+        summary: refused demand is visible, never vanished.
+        """
+        if self._arbitrator is None or self._arbitration_substrate is None:
+            return {
+                "mode": "static-fallback",
+                "reason": ("no substrate bound via "
+                           "bind_arbitration_substrate: arbitration dormant; "
+                           "the pools as registered (static initial grants) "
+                           "remain the live path"),
+            }
+        measured = self._measure_demands()
+        for loop, m in measured.items():
+            self._arbitrator.set_demand(loop, budget_s=m["budget_s"],
+                                       concurrent=int(m["concurrent"]))
+        decision = self._arbitrator.apply(self._arbitration_substrate)
+        pools_now = self._arbitration_substrate.export_state()["loops"]
+        grants: Dict[str, Any] = {}
+        for loop, m in measured.items():
+            g = decision.grants.get(loop)
+            pool = pools_now[loop]
+            if g is None:
+                # Zero demand: the arbitrator states no grant and the pool
+                # keeps its previous grant (no thrash). Nothing is refused:
+                # refused demand is demand minus grant, and both are zero.
+                grants[loop] = {
+                    "demand_budget_s": round(float(m["budget_s"]), 3),
+                    "demand_concurrent": int(m["concurrent"]),
+                    "grant_stated": False,
+                    "grant_budget_s": None,
+                    "grant_concurrent": None,
+                    "pool_budget_s": pool["budget_s"],
+                    "pool_concurrent": pool["max_concurrent"],
+                    "refused_budget_s": 0.0,
+                    "refused_concurrent": 0,
+                    "method": m["method"],
+                    "rationale": ("zero demand: no grant stated; the pool "
+                                  "keeps its previous grant"),
+                }
+                continue
+            grants[loop] = {
+                "demand_budget_s": round(float(m["budget_s"]), 3),
+                "demand_concurrent": int(m["concurrent"]),
+                "grant_stated": True,
+                "grant_budget_s": g.budget_s,
+                "grant_concurrent": g.max_concurrent,
+                "pool_budget_s": pool["budget_s"],
+                "pool_concurrent": pool["max_concurrent"],
+                "refused_budget_s": round(
+                    max(0.0, float(m["budget_s"]) - g.budget_s), 3),
+                "refused_concurrent": max(
+                    0, int(m["concurrent"]) - g.max_concurrent),
+                "method": m["method"],
+                "rationale": g.rationale,
+            }
+        total_stated = round(sum(
+            g["grant_budget_s"] for g in grants.values()
+            if g["grant_stated"]), 6)
+        summary = {
+            "mode": "arbitrated",
+            "epoch_id": decision.epoch_id,
+            "capacity_budget_s": decision.total_budget_s,
+            "capacity_concurrent": decision.total_max_concurrent,
+            "total_stated_budget_s": total_stated,
+            "headroom_budget_s": decision.headroom_budget_s,
+            "headroom_concurrent": decision.headroom_concurrent,
+            "minimums_scaled": decision.minimums_scaled,
+            "notes": list(decision.notes),
+            "grants": grants,
+        }
+        self._arbitration_last = summary
+        return summary
+
+    def arbitration_status(self) -> Dict[str, Any]:
+        """Explicit live-path report: 'arbitrated' or 'static-fallback'.
+
+        The static path is never the silent live path: when arbitration is
+        dormant this method names the reason, and the tick's cycle summary
+        carries the same mode on every round.
+        """
+        if self._arbitrator is None or self._arbitration_substrate is None:
+            return {"mode": "static-fallback",
+                    "reason": ("no substrate bound via "
+                               "bind_arbitration_substrate"),
+                    "live_path": "static initial pools"}
+        return {"mode": "arbitrated",
+                "live_path": "arbitrator grants",
+                "epoch_id": self._arbitrator.epoch_id,
+                "capacity_budget_s": self._arbitrator.last_decision.total_budget_s
+                if self._arbitrator.last_decision else None,
+                "last_round": self._arbitration_last}
 
     # -- control ---------------------------------------------------------
     @property
@@ -667,6 +883,28 @@ class RunController:
 
         def _over_budget() -> bool:
             return (time.monotonic() - started) >= cfg.cycle_budget_s
+
+        # 0. resource arbitration (PLOOP-10) --------------------------------
+        # Measured demands -> arbitrate -> apply, every tick, before the
+        # tick's own work: the loops that spawn microcontrollers do so
+        # under fresh grants. A failed round never breaks the tick -- the
+        # pools keep their previous grants (fail-closed) and the failure is
+        # observed in the cycle summary.
+        try:
+            summary["arbitration"] = self._arbitrate_resources()
+        except Exception as exc:
+            summary["arbitration"] = {
+                "mode": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            self._observe(
+                "arbitration_error",
+                f"Run Controller tick {cycle_n}: arbitration round failed "
+                f"({type(exc).__name__}: {exc}); pools keep their previous "
+                "grants, fail-closed.",
+                {"kind": "arbitration_error",
+                 "error": f"{type(exc).__name__}: {exc}"},
+                causal_chain=[self._run_id])
 
         # 1. gap queue -- user-gaps first --------------------------------
         try:
