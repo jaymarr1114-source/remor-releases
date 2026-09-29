@@ -234,6 +234,10 @@ class NLToolDispatcher:
         # Bound explicitly by the operator/driver; never derived from the
         # free-form producer string (fail-closed attribution).
         self._learning_agent: Optional[tuple] = None
+        # Device-path acceptance inlet (ACC-P6-1): lazy-built
+        # DeviceAcceptanceAdapter; every successful dispatch enters the
+        # Acceptance Controller through it. None until first success.
+        self._device_acceptance = None
         # Server-chosen governed output dir for synthesized media args.
         # Set by the HTTP adapter's media wiring (the dir the WRITE_FS
         # grant covers); None means arg synthesis cannot choose a path
@@ -1015,6 +1019,12 @@ class NLToolDispatcher:
                              reasons=[f"dispatched via {route_via}",
                                       f"dispatch_id={dispatch_id}"])
         self._native_capture(res, dispatch_id, dict(coerced), value)
+        # ACC-P6-1 acceptance inlet: the successful device dispatch
+        # enters the Acceptance Controller here. Guarded: acceptance
+        # never breaks the dispatch; the outcome is announced on the
+        # result's reasons.
+        res = self._wire_device_acceptance(
+            res, dispatch_id, text, rec, dict(coerced), value, route_via)
         return res
 
     # -- dispatch-path gap wiring (V9-WIRE) --------------------------------
@@ -1038,6 +1048,57 @@ class NLToolDispatcher:
     # contained in dispatch_gaps.maybe_register_dispatch_gap (which never
     # raises) and double-contained here. A registered gap is announced on
     # the result's reasons so the turn stays observable.
+
+    # -- device-path acceptance inlet (ACC-P6-1) ---------------------------
+    # The dispatch path IS the device path: every successful dispatch --
+    # routed, direct-by-id, composed leg, scheduler-driven -- funnels
+    # through _execute_and_record's success edge. Presenting here puts
+    # every device completion through the Acceptance Controller's
+    # present_completion (four standing panels -> driver's auth gate ->
+    # CANDIDATE; completed != accepted). Double-contained like the gap
+    # wiring: any acceptance failure degrades to an announced note on
+    # the result's reasons; the DispatchResult is always returned and
+    # the dispatch itself never breaks.
+
+    def _device_acceptance_adapter(self):
+        adapter = self._device_acceptance
+        if adapter is None:
+            from swarm_engine.core.acceptance_device import (
+                DeviceAcceptanceAdapter)
+            adapter = DeviceAcceptanceAdapter.from_engine(self.engine)
+            self._device_acceptance = adapter
+        return adapter
+
+    def _wire_device_acceptance(self, res: DispatchResult,
+                                dispatch_id: str, text: str, rec: Any,
+                                coerced: Dict[str, Any], value: Any,
+                                route_via: Optional[str]) -> DispatchResult:
+        try:
+            adapter = self._device_acceptance_adapter()
+            outcome = adapter.present_device_dispatch(
+                dispatch_id, text, rec, coerced, value, route_via)
+        except Exception as exc:
+            res.reasons.append(
+                "acceptance inlet unavailable: %s %s; the dispatch "
+                "stands but is NOT accepted (no acceptance record)"
+                % (type(exc).__name__, str(exc)[:160]))
+            return res
+        status = outcome.get("status")
+        if status == "presented":
+            res.reasons.append(
+                "acceptance: presented as candidate "
+                "(run %s, state %s); completed != accepted"
+                % (outcome.get("run_id"), outcome.get("state")))
+        elif status == "refused":
+            res.reasons.append(
+                "acceptance: REFUSED by the %s panel: %s; no acceptance "
+                "record exists; the result is NOT accepted"
+                % (outcome.get("panel"), outcome.get("reason")))
+        else:
+            res.reasons.append(
+                "acceptance: inlet returned %r; the result is NOT accepted"
+                % (status,))
+        return res
 
     def _wire_failure_gap(self, result: DispatchResult) -> DispatchResult:
         try:
