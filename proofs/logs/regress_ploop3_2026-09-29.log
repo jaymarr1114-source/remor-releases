@@ -1,0 +1,119 @@
+ok: RUN A: 10 consecutive cycles in one run() call (got 10)
+ok: RUN A: cycles numbered 1..10 back-to-back, no manual reset
+ok: RUN A: fresh run, not a resume
+ok: RUN A cycle 1: acceptance record accepted (state='accepted')
+ok: RUN A cycle 1: no tick_error
+ok: RUN A cycle 2: acceptance record accepted (state='accepted')
+ok: RUN A cycle 2: no tick_error
+ok: RUN A cycle 3: acceptance record accepted (state='accepted')
+ok: RUN A cycle 3: no tick_error
+ok: RUN A cycle 4: acceptance record accepted (state='accepted')
+ok: RUN A cycle 4: no tick_error
+ok: RUN A cycle 5: acceptance record accepted (state='accepted')
+ok: RUN A cycle 5: no tick_error
+ok: RUN A cycle 6: acceptance record accepted (state='accepted')
+ok: RUN A cycle 6: no tick_error
+ok: RUN A cycle 7: acceptance record accepted (state='accepted')
+ok: RUN A cycle 7: no tick_error
+ok: RUN A cycle 8: acceptance record accepted (state='accepted')
+ok: RUN A cycle 8: no tick_error
+ok: RUN A cycle 9: acceptance record accepted (state='accepted')
+ok: RUN A cycle 9: no tick_error
+ok: RUN A cycle 10: acceptance record accepted (state='accepted')
+ok: RUN A cycle 10: no tick_error
+ok: RUN A: 10/10 cycles carry accepted acceptance records
+ok: RUN B: 2 cycles ran
+ok: RUN B cycle 1: failed cycle recorded REJECTED (state='rejected')
+ok: RUN B cycle 1: failed check names budget_honored (['budget_honored'])
+ok: RUN B cycle 1: budget_exceeded genuinely True through the real tick() path
+ok: RUN B cycle 2: failed cycle recorded REJECTED (state='rejected')
+ok: RUN B cycle 2: failed check names budget_honored (['budget_honored'])
+ok: RUN B cycle 2: budget_exceeded genuinely True through the real tick() path
+ok: RECHECK run_4e7f69365d12:cycle:1: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:1: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:1: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:1: all 6 named checks persisted
+ok: RECHECK cycle 1: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:1: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:1: check-level agreement
+ok: RECHECK run_4e7f69365d12:cycle:2: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:2: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:2: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:2: all 6 named checks persisted
+ok: RECHECK cycle 2: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:2: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:2: check-level agreement
+ok: RECHECK run_4e7f69365d12:cycle:3: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:3: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:3: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:3: all 6 named checks persisted
+ok: RECHECK cycle 3: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:3: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:3: check-level agreement
+ok: RECHECK run_4e7f69365d12:cycle:4: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:4: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:4: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:4: all 6 named checks persisted
+ok: RECHECK cycle 4: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:4: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:4: check-level agreement
+ok: RECHECK run_4e7f69365d12:cycle:5: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:5: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:5: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:5: all 6 named checks persisted
+ok: RECHECK cycle 5: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:5: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:5: check-level agreement
+ok: RECHECK run_4e7f69365d12:cycle:6: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:6: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:6: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:6: all 6 named checks persisted
+ok: RECHECK cycle 6: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:6: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:6: check-level agreement
+ok: RECHECK run_4e7f69365d12:cycle:7: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:7: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:7: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:7: all 6 named checks persisted
+ok: RECHECK cycle 7: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:7: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:7: check-level agreement
+ok: RECHECK run_4e7f69365d12:cycle:8: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:8: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:8: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:8: all 6 named checks persisted
+ok: RECHECK cycle 8: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:8: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:8: check-level agreement
+ok: RECHECK run_4e7f69365d12:cycle:9: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:9: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:9: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:9: all 6 named checks persisted
+ok: RECHECK cycle 9: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:9: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:9: check-level agreement
+ok: RECHECK run_4e7f69365d12:cycle:10: acceptance record exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:10: persisted state == accepted
+ok: RECHECK run_4e7f69365d12:cycle:10: auth.passed consistent with state
+ok: RECHECK run_4e7f69365d12:cycle:10: all 6 named checks persisted
+ok: RECHECK cycle 10: checkpoint row exists on disk
+ok: RECHECK run_4e7f69365d12:cycle:10: independently re-derived verdict matches persisted state
+ok: RECHECK run_4e7f69365d12:cycle:10: check-level agreement
+ok: RECHECK run_3213cc1defd7:cycle:1: acceptance record exists on disk
+ok: RECHECK run_3213cc1defd7:cycle:1: persisted state == rejected
+ok: RECHECK run_3213cc1defd7:cycle:1: auth.passed consistent with state
+ok: RECHECK run_3213cc1defd7:cycle:1: all 6 named checks persisted
+ok: RECHECK cycle 1: checkpoint row exists on disk
+ok: RECHECK run_3213cc1defd7:cycle:1: independently re-derived verdict matches persisted state
+ok: RECHECK run_3213cc1defd7:cycle:1: check-level agreement
+ok: RECHECK run_3213cc1defd7:cycle:2: acceptance record exists on disk
+ok: RECHECK run_3213cc1defd7:cycle:2: persisted state == rejected
+ok: RECHECK run_3213cc1defd7:cycle:2: auth.passed consistent with state
+ok: RECHECK run_3213cc1defd7:cycle:2: all 6 named checks persisted
+ok: RECHECK cycle 2: checkpoint row exists on disk
+ok: RECHECK run_3213cc1defd7:cycle:2: independently re-derived verdict matches persisted state
+ok: RECHECK run_3213cc1defd7:cycle:2: check-level agreement
+ok: RECHECK: 12/12 acceptance records verified from disk (10 accepted, 2 rejected)
+ok: RUN B: near-miss observations persisted for failed cycles (2 found)
+
+PLOOP-3 PROOF GREEN: 10/10 accepted, 2/2 rejected, 12/12 re-verified from disk.

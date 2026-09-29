@@ -1,0 +1,9 @@
+[PASS] KR1: proc A presented and died mid-handoff (exit 0)
+[PASS] KR2: durable handoff identity written
+[PASS] KR3: proc B resumed from disk (exit 0)
+[PASS] KR4: lineage unbroken (presented_at + goal match across procs)
+[PASS] KR5: proc A rerun presents a new candidate (no clobber)
+[PASS] KR6: store holds both candidates (nothing clobbered)
+[PASS] KR7: ledger holds the verdict-awaiting route
+
+PLOOP-12 kill-resume: 7/7 PASS, 0 FAIL

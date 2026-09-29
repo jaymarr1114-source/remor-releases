@@ -1,0 +1,153 @@
+PASS S1: (acceptance, absent) reachable via classify_terminal -- got 'absent'
+PASS S1: (acceptance, candidate) reachable via classify_terminal -- got 'candidate'
+PASS S1: (acquisition, absent) reachable via classify_terminal -- got 'absent'
+PASS S1: (acquisition, converged) reachable via classify_terminal -- got 'converged'
+PASS S1: (acquisition, open) reachable via classify_terminal -- got 'open'
+PASS S1: (acquisition, refused) reachable via classify_terminal -- got 'refused'
+PASS S1: (distillation, absent) reachable via classify_terminal -- got 'absent'
+PASS S1: (distillation, converged) reachable via classify_terminal -- got 'converged'
+PASS S1: (distillation, open) reachable via classify_terminal -- got 'open'
+PASS S1: (execution, absent) reachable via classify_terminal -- got 'absent'
+PASS S1: (execution, converged) reachable via classify_terminal -- got 'converged'
+PASS S1: (execution, open) reachable via classify_terminal -- got 'open'
+PASS S1: (generalization, absent) reachable via classify_terminal -- got 'absent'
+PASS S1: (generalization, converged) reachable via classify_terminal -- got 'converged'
+PASS S1: (generalization, open) reachable via classify_terminal -- got 'open'
+PASS S1: (run, absent) reachable via classify_terminal -- got 'absent'
+PASS S1: (run, converged) reachable via classify_terminal -- got 'converged'
+PASS S1: (run, exhausted) reachable via classify_terminal -- got 'exhausted'
+PASS S1: (run, open) reachable via classify_terminal -- got 'open'
+PASS S1: 19 reachable pairs -- got 19
+PASS S1: ('acceptance', 'absent') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('acceptance', 'candidate') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('acquisition', 'absent') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('acquisition', 'converged') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('acquisition', 'open') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('acquisition', 'refused') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('distillation', 'absent') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('distillation', 'converged') routed-or-follow-on -- follow_ons=True terminal_route=True
+PASS S1: ('distillation', 'open') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('execution', 'absent') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('execution', 'converged') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('execution', 'open') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('generalization', 'absent') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('generalization', 'converged') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('generalization', 'open') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('run', 'absent') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('run', 'converged') routed-or-follow-on -- follow_ons=True terminal_route=True
+PASS S1: ('run', 'exhausted') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('run', 'open') routed-or-follow-on -- follow_ons=False terminal_route=True
+PASS S1: ('acceptance', 'converged') unreachable-by-construction (not routed)
+PASS S1: ('acceptance', 'exhausted') unreachable-by-construction (not routed)
+PASS S1: ('acceptance', 'failed') unreachable-by-construction (not routed)
+PASS S1: ('acceptance', 'open') unreachable-by-construction (not routed)
+PASS S1: ('acceptance', 'refused') unreachable-by-construction (not routed)
+PASS S1: ('acquisition', 'candidate') unreachable-by-construction (not routed)
+PASS S1: ('acquisition', 'exhausted') unreachable-by-construction (not routed)
+PASS S1: ('acquisition', 'failed') unreachable-by-construction (not routed)
+PASS S1: ('distillation', 'candidate') unreachable-by-construction (not routed)
+PASS S1: ('distillation', 'exhausted') unreachable-by-construction (not routed)
+PASS S1: ('distillation', 'failed') unreachable-by-construction (not routed)
+PASS S1: ('distillation', 'refused') unreachable-by-construction (not routed)
+PASS S1: ('execution', 'candidate') unreachable-by-construction (not routed)
+PASS S1: ('execution', 'exhausted') unreachable-by-construction (not routed)
+PASS S1: ('execution', 'failed') unreachable-by-construction (not routed)
+PASS S1: ('execution', 'refused') unreachable-by-construction (not routed)
+PASS S1: ('generalization', 'candidate') unreachable-by-construction (not routed)
+PASS S1: ('generalization', 'exhausted') unreachable-by-construction (not routed)
+PASS S1: ('generalization', 'failed') unreachable-by-construction (not routed)
+PASS S1: ('generalization', 'refused') unreachable-by-construction (not routed)
+PASS S1: ('run', 'candidate') unreachable-by-construction (not routed)
+PASS S1: ('run', 'failed') unreachable-by-construction (not routed)
+PASS S1: ('run', 'refused') unreachable-by-construction (not routed)
+PASS S1: handler ('run', 'exhausted') names a reachable pair
+PASS S1: handler ('run', 'open') names a reachable pair
+PASS S1: handler ('run', 'converged') names a reachable pair
+PASS S1: handler ('run', 'absent') names a reachable pair
+PASS S1: handler ('acquisition', 'converged') names a reachable pair
+PASS S1: handler ('acquisition', 'open') names a reachable pair
+PASS S1: handler ('acquisition', 'refused') names a reachable pair
+PASS S1: handler ('acquisition', 'absent') names a reachable pair
+PASS S1: handler ('execution', 'converged') names a reachable pair
+PASS S1: handler ('execution', 'open') names a reachable pair
+PASS S1: handler ('execution', 'absent') names a reachable pair
+PASS S1: handler ('acceptance', 'candidate') names a reachable pair
+PASS S1: handler ('acceptance', 'absent') names a reachable pair
+PASS S1: handler ('distillation', 'converged') names a reachable pair
+PASS S1: handler ('distillation', 'open') names a reachable pair
+PASS S1: handler ('distillation', 'absent') names a reachable pair
+PASS S1: handler ('generalization', 'converged') names a reachable pair
+PASS S1: handler ('generalization', 'open') names a reachable pair
+PASS S1: handler ('generalization', 'absent') names a reachable pair
+PASS S1: six loops covered -- ['acceptance', 'acquisition', 'distillation', 'execution', 'generalization', 'run']
+PASS R1: real present() -> CANDIDATE record -- state=<AcceptanceState.CANDIDATE: 'candidate'>
+PASS R1: candidate classifies candidate
+PASS R1: candidate routed -- acceptance_loop.verdict_awaiting
+PASS R1: candidate evidence intact -- {'run_id': 'run_ploop9_candidate', 'goal': 'prove candidate routing', 'state': 'CANDIDATE'}
+PASS R1: candidate NOT auto-advanced (still CANDIDATE in store) -- state='CANDIDATE'
+PASS R1: ledger row for the candidate
+PASS R2: real dispatch genuinely refused (routed=False) -- routed=False outcome='open'
+PASS R2: refusal classifies open under the real contract (outcome read first)
+PASS R2: the refusal is routed to the executive (routed=False split) -- executive.submit_finding
+PASS R2: the EXACT refusal reason is carried -- no route satisfied by this record's shape (populated blocks: [])
+PASS R2: finding id is a real receipt
+PASS R2: the gate's persisted decision is re-checkable (the receipt) -- verdict='retained'
+PASS R2: ledger row for the refusal
+PASS R3: zero-budget tick is provably exhausted -- budget=0.0 elapsed=0.0 arbitration_mode=arbitrated
+PASS R3: exhausted classifies exhausted
+PASS R3: exhausted tick routed to the controller's own record -- run_controller.persisted_cycle_record
+PASS R3: evidence names the terminal condition -- {'cycle': '0', 'budget_exceeded': 'True', 'errors': '0'}
+PASS R3: the persisted cycle IS this outcome's record
+PASS R4: real dispatch failed open (substrate unavailable) -- substrate_unavailable: dependency 'nonexistent_pkg_xyz' is kind 'package': the d
+PASS R4: the dispatch was attempted (routed=True)
+PASS R4: open classifies open
+PASS R4: attempted-but-open gap routed to backoff -- run_controller.rc_gap_backoff
+PASS R4: failures incremented in the REAL rc_gap_backoff table -- 0 -> 1
+PASS R4: backoff_until is in the future
+PASS R4: evidence names the gap
+PASS R5: real dispatch closed the gap through the real _close path -- proof route: stdlib json verified importable with a callable dumps
+PASS R5: closed classifies converged
+PASS R5: converged gap routed to its own record -- gap_registry.closed_record
+PASS R5: closing evidence verified present -- check,utilization_verified
+PASS R6: real diagnosis -> not_quarantined
+PASS R6: not_quarantined classifies converged
+PASS R6: converged execution routed to the diagnosis record -- execution_loop.quarantine_diagnosis_record
+PASS R6: evidence names the verdict
+PASS R6: quarantined diagnosis classifies open
+PASS R6: open execution routed to the diagnosis record
+PASS R6: the named reason is carried
+PASS R7: failed distill classifies open
+PASS R7: open distillation routed to the loop's own record -- distillation_loop.own_record
+PASS R7: the named failure reason is carried
+PASS R7: converged-without-promotion routed to the own record
+PASS R8: generalized classifies converged
+PASS R8: converged generalization names the external trust path -- trust_path.external (declared, outside the six loops)
+PASS R8: the technique refs are carried
+PASS R8: open generalization routed to the loop's own record
+PASS R8: the honest refusal reason is carried
+PASS R9: not-entered run classifies absent
+PASS R9: absent run -> explicit sink -- terminal_ledger.explicit_sink
+PASS R9: not-entered acquisition classifies absent
+PASS R9: absent acquisition -> explicit sink -- terminal_ledger.explicit_sink
+PASS R9: not-entered execution classifies absent
+PASS R9: absent execution -> explicit sink -- terminal_ledger.explicit_sink
+PASS R9: not-entered acceptance classifies absent
+PASS R9: absent acceptance -> explicit sink -- terminal_ledger.explicit_sink
+PASS R9: not-entered distillation classifies absent
+PASS R9: absent distillation -> explicit sink -- terminal_ledger.explicit_sink
+PASS R9: not-entered generalization classifies absent
+PASS R9: absent generalization -> explicit sink -- terminal_ledger.explicit_sink
+PASS R9: six sink rows in the ledger
+PASS R10: promoted technique without novel spec propagates loudly -- refused loudly: distillation->generalization: the route applies (technique 'technique_x' promoted) but context has no novel_goal: novelty is never auto-generated; the follow-on boundary cannot honestly be built
+PASS R10: the refusal names the missing novel spec -- distillation->generalization: the route applies (technique 'technique_x' promoted) but context has n
+PASS R10: converged tick with a live gap follow-on is refused -- refused loudly: route_terminal: (run, converged) has a live follow-on (acquisition_gap): drive it via produce_handoff/transition, not the terminal router
+PASS R10: the refusal names produce_handoff/transition -- route_terminal: (run, converged) has a live follow-on (acquisition_gap): drive it via produce_handoff/transition, not th
+PASS R11: refusal routed to the executive -- executive.submit_finding
+PASS R11: the EXACT violation is carried
+PASS R11: finding id is a real receipt
+PASS R12: no run controller -> backoff refused loudly -- refused loudly: terminal routing needs the run controller: backoff and cycle verification go through its checkpoint
+PASS R12: no acceptance loop -> candidate refused loudly -- refused loudly: terminal routing needs the acceptance loop: a candidate with nowhere to await verdict is not routed
+PASS R12: no executive -> refusal refused loudly -- refused loudly: terminal routing needs the executive: a refusal with nowhere to go is not routed
+PASS R13: every ledger row carries evidence refs and a consumer -- 17 rows
+PASS R13: ledger row count matches routed outcomes -- got 17
+PLOOP-9 PROOF COMPLETE: 152 checks green (terminal-routing/v1)
