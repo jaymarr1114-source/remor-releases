@@ -1,0 +1,9 @@
+[PASS] KR1: process A produced and died mid-handoff (exit 0)
+[PASS] KR2: durable handoff identity written
+[PASS] KR3: checkpoint id is durable
+[PASS] KR4: process B resumed from disk (exit 0)
+[PASS] KR5: verdict written with unbroken lineage
+[PASS] KR6: replay of the consumed handoff refused (exit nonzero)
+[PASS] KR7: replay refusal names the cause
+
+PLOOP-11 kill-resume: 7/7 PASS, 0 FAIL
