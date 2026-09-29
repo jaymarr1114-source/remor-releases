@@ -61,6 +61,13 @@ from .boundary import (
     BOUNDARY_TECHNIQUE_DELTA,
     BoundaryPresentation,
 )
+from .checkpoint import (
+    CheckpointError,
+    TransitionCheckpointStore,
+    extract_from_state,
+    verify_against_live,
+    verify_checkpoint_integrity,
+)
 from .executive import BOUNDARY_OWNERSHIP
 from .loops import (
     LOOP_ACCEPTANCE,
@@ -256,6 +263,16 @@ class LoopHandoff:
     chain_depth: int = 1
     produced_at: float = field(default_factory=time.time)
     produced_by: str = HANDOFF_CONTRACT_VERSION
+    #: The durable transition checkpoint for this handoff, set by
+    #: produce_handoff when a checkpoint store is in context (PLOOP-8).
+    #: None when checkpointing is not engaged: the contract works
+    #: without it, exactly as before.
+    checkpoint_id: Optional[str] = None
+    #: The verified checkpoint row, attached by accept_handoff after
+    #: the checkpoint is re-read and verified against the live world.
+    #: In-memory only: durability lives in the store, never here.
+    verified_checkpoint: Optional[Dict[str, Any]] = field(
+        default=None, repr=False)
 
     def validate(self) -> "LoopHandoff":
         """Validate every field. Raises HandoffRefused naming the exact
@@ -318,6 +335,11 @@ class LoopHandoff:
                 f"{self.produced_by!r} is not this contract "
                 f"({HANDOFF_CONTRACT_VERSION}): version-skewed handoffs "
                 "are not accepted")
+        if self.checkpoint_id is not None and \
+                not str(self.checkpoint_id).strip():
+            raise HandoffRefused(
+                f"handoff {self.handoff_id}: checkpoint_id is set but "
+                "empty: a checkpoint reference must name a real row")
         return self
 
 
@@ -578,6 +600,145 @@ def route_owner(boundary_kind: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Transition checkpoints (PLOOP-8): durable from-loop state
+# ---------------------------------------------------------------------------
+# Checkpointing is engaged by context: pass a TransitionCheckpointStore
+# as context["checkpoint_store"], or a path as
+# context["checkpoint_db_path"]. Without either, produce/accept behave
+# exactly as before (the contract never required durability). With a
+# store, produce_handoff checkpoints the from-loop's resumable state at
+# produce time; accept_handoff re-reads the checkpoint on a fresh
+# connection and verifies it against the live world before the
+# transition proceeds; transition() marks it consumed once the
+# receiving loop is entered. A missing, tampered, drifted, or
+# already-consumed checkpoint is a loud HandoffRefused -- never a
+# silent cold start.
+
+def _resolve_checkpoint_store(
+        context: Mapping[str, Any]) -> Optional[TransitionCheckpointStore]:
+    """The checkpoint store for this transition, or None when
+    checkpointing is not engaged."""
+    store = (context or {}).get("checkpoint_store")
+    if store is not None:
+        if not isinstance(store, TransitionCheckpointStore):
+            raise HandoffRefused(
+                "context['checkpoint_store'] must be a "
+                "TransitionCheckpointStore, got "
+                f"{type(store).__name__}: the checkpoint store is a "
+                "real durable store, never a stand-in")
+        return store
+    path = (context or {}).get("checkpoint_db_path")
+    if path:
+        return TransitionCheckpointStore(str(path))
+    return None
+
+
+def _checkpointed_produce(handoff: LoopHandoff,
+                          outcome: LoopOutcome,
+                          context: Mapping[str, Any]) -> LoopHandoff:
+    """Checkpoint the from-loop's resumable state for a validated
+    handoff. Returns the handoff with checkpoint_id attached."""
+    store = _resolve_checkpoint_store(context)
+    if store is None:
+        return handoff
+    try:
+        from_state = extract_from_state(handoff.from_loop, outcome,
+                                        context)
+        checkpoint_id = store.save(handoff, from_state)
+    except CheckpointError as exc:
+        raise HandoffRefused(
+            f"produce: checkpointing failed for handoff "
+            f"{handoff.handoff_id}: {exc}")
+    handoff.checkpoint_id = checkpoint_id
+    return handoff.validate()
+
+
+def _checkpointed_accept(handoff: LoopHandoff,
+                         context: Mapping[str, Any]) -> LoopHandoff:
+    """Re-read the handoff's checkpoint on a fresh connection and
+    verify it against the live world. Attaches the verified row as
+    handoff.verified_checkpoint. Handoffs without a checkpoint pass
+    through untouched."""
+    if handoff.checkpoint_id is None:
+        return handoff
+    store = _resolve_checkpoint_store(context)
+    if store is None:
+        raise HandoffRefused(
+            f"accept: handoff {handoff.handoff_id} carries checkpoint "
+            f"{handoff.checkpoint_id} but context has no checkpoint "
+            "store: durability claims that cannot be re-verified are "
+            "not accepted")
+    try:
+        row = store.load(handoff.handoff_id)
+        if row is None:
+            raise CheckpointError(
+                f"checkpoint {handoff.checkpoint_id}: no row for "
+                f"handoff {handoff.handoff_id}: the checkpoint is "
+                "missing; refusing to resume from nothing")
+        if row["checkpoint_id"] != handoff.checkpoint_id:
+            raise CheckpointError(
+                f"checkpoint mismatch: handoff names "
+                f"{handoff.checkpoint_id} but the store holds "
+                f"{row['checkpoint_id']} for handoff "
+                f"{handoff.handoff_id}: refusing")
+        for field in ("from_loop", "to_loop", "terminal_state",
+                      "boundary_kind", "triggering_boundary_id",
+                      "chain_depth"):
+            if row[field] != getattr(handoff, field):
+                raise CheckpointError(
+                    f"checkpoint {row['checkpoint_id']}: field "
+                    f"{field!r} is {row[field]!r} but the handoff "
+                    f"says {getattr(handoff, field)!r}: the checkpoint "
+                    "does not describe this handoff; refusing")
+        if row["evidence_refs"] != dict(handoff.evidence_refs or {}):
+            raise CheckpointError(
+                f"checkpoint {row['checkpoint_id']}: evidence_refs "
+                "drifted from the handoff's: refusing")
+        verify_checkpoint_integrity(row)
+        verify_against_live(row, context)
+        row = store.mark_verified(row["checkpoint_id"])
+    except CheckpointError as exc:
+        raise HandoffRefused(
+            f"accept: checkpoint verification failed for handoff "
+            f"{handoff.handoff_id}: {exc}")
+    handoff.verified_checkpoint = row
+    return handoff
+
+
+def rehydrate_handoff(checkpoint_row: Mapping[str, Any],
+                      evidence: Dict[str, Any]) -> LoopHandoff:
+    """Rebuild a LoopHandoff from a durable checkpoint row plus
+    honestly re-fetched evidence.
+
+    Cross-process resume: the checkpoint row is the durable source of
+    truth; the caller re-fetches the REAL records the row's
+    evidence_refs name (e.g. the GapRecord by gap_id) and passes them
+    as evidence. The rebuilt handoff is validated like any other --
+    a fabricated evidence dict dies in validate(), loudly.
+    """
+    row = dict(checkpoint_row)
+    handoff = LoopHandoff(
+        handoff_id=str(row["handoff_id"]),
+        from_loop=str(row["from_loop"]),
+        to_loop=str(row["to_loop"]),
+        terminal_state=str(row["terminal_state"]),
+        boundary_kind=str(row["boundary_kind"]),
+        triggering_boundary_id=str(row["triggering_boundary_id"]),
+        outcome_detail="",
+        evidence=dict(evidence),
+        evidence_refs={str(k): str(v)
+                       for k, v in (row.get("evidence_refs") or {}).items()},
+        resource_delta={str(k): int(v)
+                        for k, v in (row.get("resource_delta") or {}).items()},
+        chain_depth=int(row.get("chain_depth", 1)),
+        produced_at=float(row.get("produced_at", 0.0) or 0.0),
+        produced_by=HANDOFF_CONTRACT_VERSION,
+        checkpoint_id=str(row["checkpoint_id"]),
+    )
+    return handoff.validate()
+
+
+# ---------------------------------------------------------------------------
 # Produce: outcome -> validated LoopHandoff (or None: declared terminal)
 # ---------------------------------------------------------------------------
 
@@ -651,7 +812,11 @@ def produce_handoff(*, outcome: LoopOutcome,
             resource_delta=resource_delta,
             chain_depth=chain_depth,
         )
-        return handoff.validate()
+        handoff.validate()
+        # PLOOP-8: checkpoint the from-loop's resumable state at produce
+        # time (engaged by context; without a store this is a no-op and
+        # the contract behaves exactly as before).
+        return _checkpointed_produce(handoff, outcome, context)
     # No route applied: the table's declared answer is terminal.
     return None
 
@@ -722,6 +887,11 @@ def accept_handoff(executive: Any, handoff: LoopHandoff,
     # The receiving gate: the existing anti-fabrication validation.
     # A handoff carrying fabricated evidence dies here, loudly.
     boundary.validate()
+    # PLOOP-8: when the handoff carries a checkpoint, re-read it on a
+    # fresh connection and verify it against the live world before the
+    # transition proceeds. A missing, tampered, drifted, or consumed
+    # checkpoint refuses loudly -- never a silent cold start.
+    _checkpointed_accept(handoff, context or {})
     return boundary
 
 
@@ -748,4 +918,22 @@ def transition(*, executive: Any, outcome: LoopOutcome,
     if handoff is None:
         return None
     boundary = accept_handoff(executive, handoff, context)
-    return executive.enter(boundary)
+    received = executive.enter(boundary)
+    # PLOOP-8: the checkpoint is single-use. Once the receiving loop
+    # has been entered, the checkpoint is consumed; a second
+    # transition on the same handoff is replay and is refused.
+    if handoff.checkpoint_id is not None and received is not None \
+            and received.entered:
+        store = _resolve_checkpoint_store(context)
+        if store is None:  # pragma: no cover - cannot happen: produce
+            # engaged the store from this same context
+            raise HandoffRefused(
+                f"transition: handoff {handoff.handoff_id} carries "
+                "checkpoint but the store vanished from context")
+        try:
+            store.mark_consumed(handoff.checkpoint_id)
+        except CheckpointError as exc:
+            raise HandoffRefused(
+                f"transition: checkpoint consume failed for handoff "
+                f"{handoff.handoff_id}: {exc}")
+    return received
