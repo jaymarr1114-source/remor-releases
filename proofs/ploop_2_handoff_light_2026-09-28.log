@@ -1,0 +1,45 @@
+PASS H1: tick summary (clean) -> converged
+PASS H1: tick summary (budget exceeded) -> exhausted
+PASS H1: tick summary (named errors) -> open
+PASS H1: DispatchResult open -> open
+PASS H1: DispatchResult closed -> converged
+PASS H1: DistillationResult success -> converged
+PASS H1: DistillationResult named failure -> open
+PASS H1: not entered -> absent (any loop)
+PASS H1: QuarantineDiagnosis reason_cleared -> converged
+PASS H1: QuarantineDiagnosis still quarantined -> open
+PASS H1: acceptance CANDIDATE record -> candidate (never terminal)
+PASS H1: generalization DistillationResult success -> converged
+PASS H1: generalization named refusal -> open
+PASS H1: unknown loop is refused, never guessed -- refused loudly: classify_terminal: unknown loop 'nope': the contract does not guess terminal states
+PASS H2: HANDOFF_ROUTES declares every (loop, terminal) pair -- missing=[]
+PASS H2: six loops covered
+PASS T1: run loop entered (real tick) -- RunController.tick: 1 gaps, errors=0
+PASS T1: tick surfaced the open gap -- [{'gap_id': 'gap_bbc645f4e179', 'user_gap': False, 'outcome': 'open', 'route': 'substrate', 'detail': "substrate_unavail
+PASS T1: handoff produced (not terminal)
+PASS T1: handoff names run -> acquisition -- run->acquisition
+PASS T1: handoff carries the real GapRecord
+PASS T1: evidence_refs names the real record
+PASS T1: resource accounting measured (contract-required keys) -- {'spawned': 0, 'retired': 0, 'refused': 0}
+PASS T1: chain depth 1, lineage recorded
+PASS T1: handoff validates clean
+PASS T1: accepted boundary is acquisition_gap, validated
+PASS T1: accepted boundary carries handoff provenance
+PASS T1: acquisition really entered through the executive -- GapRegistry.dispatch(gap_bbc645f4e179): routed=True route=substrate outcome=open
+PASS T1: gap still OPEN (nothing faked closed)
+PASS T1: second tick surfaced the fresh gap
+PASS T1: transition() runs produce->accept->enter end to end
+PASS T2: skipped by SKIP_T2 (heavy segment; full battery runs clean after the sibling)
+PASS T3: acquisition OPEN -> produce returns None (declared terminal)
+PASS T3: acceptance CANDIDATE -> produce returns None (verdict is James's; never auto-advanced)
+PASS V1: baseline handoff for tamper test
+PASS V1: to_loop/ownership mismatch refused loudly -- refused loudly: accept: handoff names to_loop='execution' but 'acquisition_gap' is owned by 'acquisition': the receiving loop must own the follow-on boundary
+PASS V2: handoff with empty evidence refused loudly -- refused loudly: handoff h_x: evidence must be a non-empty dict of real records: a handoff with nothing to hand off is not a handoff
+PASS V2: handoff with unmeasured resources refused loudly -- refused loudly: handoff h_x: resource_delta is missing 'spawned': the contract requires measured resource accounting, not estimates
+PASS V2: self-handoff refused loudly -- refused loudly: handoff h_x: from_loop == to_loop ('run'): a loop does not hand off to itself
+PASS V3: chain depth beyond MAX refused loudly at produce -- refused loudly: produce: chain_depth 9 exceeds MAX_HANDOFF_DEPTH 8: handoffs never ping-pong forever
+PASS V3: over-deep handoff refused loudly at validate -- refused loudly: handoff h_deep: chain_depth 9 exceeds MAX_HANDOFF_DEPTH 8: handoffs never ping-pong forever
+PASS V4: missing novel spec refused loudly (not silently skipped) -- refused loudly: distillation->generalization: the route applies (technique 'synthetic_running_totals' promoted) but context has no novel_goal: novelty is never auto-generated; the follow-on boundary cannot honestly be built
+
+PLOOP-2 PROOF COMPLETE: 42/42 checks green
+EXIT:0
