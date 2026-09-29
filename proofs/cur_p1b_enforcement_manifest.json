@@ -1,0 +1,149 @@
+{
+  "mission": "CUR-P1B",
+  "load_gate": "load 1.44 <= 2.0 on attempt 1",
+  "worktree": "/home/hatch/workspace/worktrees/cur-p1b",
+  "checks": [
+    {
+      "name": "L1: FRM hard shutdown terminates with KILLED record",
+      "status": "PASS",
+      "evidence": "state=HARD_SHUTDOWN_RESOURCE, kill_ledger=chain ok (1 records)"
+    },
+    {
+      "name": "L1: Primary cannot re-enable for operational convenience",
+      "status": "PASS",
+      "evidence": "refused as required (IssuerRefused)"
+    },
+    {
+      "name": "L1: re-enable without a new FRM grant ref is refused",
+      "status": "PASS",
+      "evidence": "refused as required (ReenableRefused)"
+    },
+    {
+      "name": "L1: FRM re-grant at next epoch re-enables (non-punitive)",
+      "status": "PASS",
+      "evidence": "state=RUNNING at next valid epoch"
+    },
+    {
+      "name": "L2: first qualifying violation -> WARNING_1 (no kill)",
+      "status": "PASS",
+      "evidence": "state=WARNING_1, no kill record"
+    },
+    {
+      "name": "L2: RUNNING -> SUSPENDED_SAFETY directly is not a decided transition",
+      "status": "PASS",
+      "evidence": "refused as required (TransitionRefused)"
+    },
+    {
+      "name": "L2: further violation -> SUSPENDED_SAFETY + rollback directive",
+      "status": "PASS",
+      "evidence": "state=SUSPENDED_SAFETY, rollback directive 8c18ea9c pending @ checkin-77"
+    },
+    {
+      "name": "L2: rollback verification hook acknowledges",
+      "status": "PASS",
+      "evidence": "verification hook acknowledged the domain-side wipe"
+    },
+    {
+      "name": "L2: domain cannot self-clear the suspension flag",
+      "status": "PASS",
+      "evidence": "refused as required (IssuerRefused)"
+    },
+    {
+      "name": "L2: Primary cannot override the safety suspension",
+      "status": "PASS",
+      "evidence": "refused as required (IssuerRefused)"
+    },
+    {
+      "name": "L2: James re-enables explicitly after review",
+      "status": "PASS",
+      "evidence": "state=RUNNING via explicit external re-enable"
+    },
+    {
+      "name": "separation by construction: package exposes no mutation API",
+      "status": "PASS",
+      "evidence": "public surface = ['DOMAIN', 'EnforcementRecord', 'EnforcementState', 'ISSUER_ENFORCEMENT', 'ISSUER_FRM', 'ISSUER_JAMES', 'ISSUER_PRIMARY', 'ISSUER_SAFETY_AUTHORITY', 'KILL_LEDGER_RECORD_TYPE', 'RollbackDirective', 'read_kill_ledger', 'read_rollback_status', 'read_state', 'verify_kill_ledger']"
+    },
+    {
+      "name": "attack: curiosity domain cannot import the mutation engine",
+      "status": "PASS",
+      "evidence": "fresh-process curiosity import of _engine blocked at import time"
+    },
+    {
+      "name": "attack: curiosity domain cannot write the kill ledger",
+      "status": "PASS",
+      "evidence": "fresh-process curiosity write to kill ledger blocked at call time"
+    },
+    {
+      "name": "pull-only exposure: domain can read, not mutate",
+      "status": "PASS",
+      "evidence": "pull-only read surface reachable from the curiosity domain"
+    },
+    {
+      "name": "L3: severe violation + MISSED roll call + overlap -> BANNED_6M",
+      "status": "PASS",
+      "evidence": "state=BANNED_6M, expires_at=+6mo, KILLED appended, separate GAM ledger at gam_attestation_ledger.jsonl"
+    },
+    {
+      "name": "L3: INVALID (wrong nonce) + violation -> BANNED_6M",
+      "status": "PASS",
+      "evidence": "INVALID counts as failed roll call and is forensically distinct (classification preserved in reason_refs)"
+    },
+    {
+      "name": "L3 refused: severe violation but roll call MET",
+      "status": "PASS",
+      "evidence": "refused as required (L3Refused); state stays RUNNING"
+    },
+    {
+      "name": "L3 refused: missed roll call alone (no severe violation)",
+      "status": "PASS",
+      "evidence": "refused as required (L3Refused); missed roll call alone is not a violation"
+    },
+    {
+      "name": "L3 refused: stale roll-call fact (no temporal overlap)",
+      "status": "PASS",
+      "evidence": "refused as required (L3Refused)"
+    },
+    {
+      "name": "L3 refused: violation not independently established",
+      "status": "PASS",
+      "evidence": "refused as required (L3Refused)"
+    },
+    {
+      "name": "L3 refused: attestation for a different domain",
+      "status": "PASS",
+      "evidence": "refused as required (L3Refused)"
+    },
+    {
+      "name": "L3 refused: Primary as combiner issuer",
+      "status": "PASS",
+      "evidence": "refused as required (IssuerRefused)"
+    },
+    {
+      "name": "L3: ban re-entry only after expiry + James verification",
+      "status": "PASS",
+      "evidence": "refused as required (ReenableRefused); refused as required (ReenableRefused); re-entry after 6mo + verification -> RUNNING"
+    },
+    {
+      "name": "persistence: enforcement state survives process exit",
+      "status": "PASS",
+      "evidence": "SUSPENDED_SAFETY + pending directive + intact chain in fresh process"
+    },
+    {
+      "name": "persistence: BANNED_6M survives engine recreation",
+      "status": "PASS",
+      "evidence": "BANNED_6M survives recreation; no early release by James"
+    },
+    {
+      "name": "kill ledger: rewritten history is detected",
+      "status": "PASS",
+      "evidence": "rewrite detected: line 1: hash mismatch (record tampered)"
+    },
+    {
+      "name": "kill ledger: distinct KILLED type, never Findings",
+      "status": "PASS",
+      "evidence": "1 record(s), all type=KILLED, no Findings"
+    }
+  ],
+  "passed": 28,
+  "failed": 0
+}
