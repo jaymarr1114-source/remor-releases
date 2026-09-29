@@ -1,0 +1,32 @@
+[PASS] grants within budget capacity
+[PASS] grants within concurrency capacity
+[PASS] acquisition minimum honored
+[PASS] execution minimum honored
+[PASS] distillation minimum honored
+[PASS] no grant exceeds demand
+[PASS] higher weight wins the remainder under contention
+[PASS] grants applied to substrate pools
+[PASS] isolated budget grant equals demand (no contention)
+[PASS] spawns stop at the grant (budget axis)
+[PASS] refusal names the exhausted pool
+[PASS] refusals counted on the admission record
+[PASS] reserved spend never exceeds the grant
+[PASS] first concurrent spawn admitted
+[PASS] second concurrent spawn refused: loser fails closed
+[PASS] active count never exceeds granted slots
+[PASS] per-activation cap violation refused independently of grants
+[PASS] single activation larger than the grant refused against the pool
+[PASS] epoch advanced
+[PASS] re-arbitration follows the new demand
+[PASS] loops with no demand get no grant
+[PASS] decision ledger keeps history
+[PASS] no expiry before the deadline
+[PASS] expired loops observable after the deadline
+[PASS] demand for unregistered loop raises
+[PASS] negative demand raises
+[PASS] empty loop name raises
+[PASS] apply for substrate-unknown loop raises
+[PASS] over-minimum capacity flagged, not silent
+[PASS] scaled grants stay within capacity
+
+30/30 checks passed
