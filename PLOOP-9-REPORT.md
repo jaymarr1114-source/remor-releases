@@ -92,7 +92,7 @@ contention with the concurrent GEN-SYNTH-5 regression).
 
 ## Commit
 
-`7f9de90` — "PLOOP-9: route declared-terminal loop outcomes to real
+`b495e47` — "PLOOP-9: route declared-terminal loop outcomes to real
 consumers" (neutral message; no verification claim in the commit).
 
 ## Exact next boundary
