@@ -48,6 +48,9 @@ from swarm_engine.intellect.epistemic import (
     Hypothesis,
     HypothesisState,
 )
+from swarm_engine.intellect.unified_memory import (
+    record_evidence, record_experiment, record_hypothesis,
+)
 from swarm_engine.synthesis.admission import SmokeTest
 
 
@@ -237,12 +240,14 @@ def run_competition(engine, goal: str,
             provenance={"goal": goal, "n_examples": len(examples),
                         "synthesis_solved": bool(result.solved)},
             state=HypothesisState.PROPOSED)
-        store.save_hypothesis(hyp)
+        record_hypothesis(store, origin_loop="intellect",
+                          kind="competition_hypothesis", hypothesis=hyp)
         hyps.append(hyp)
     for h in hyps:
         h.competing_with = [o.hypothesis_id for o in hyps
                             if o.hypothesis_id != h.hypothesis_id]
-        store.save_hypothesis(h)
+        record_hypothesis(store, origin_loop="intellect",
+                          kind="competition_hypothesis", hypothesis=h)
 
     # ---- 3. predictions on the probe pool ----
     probes = _candidate_probes(examples, param_names, record_probes)
@@ -259,7 +264,8 @@ def run_competition(engine, goal: str,
     for h in hyps:  # refresh rival lists after any drop
         h.competing_with = [o.hypothesis_id for o in hyps
                             if o.hypothesis_id != h.hypothesis_id]
-        store.save_hypothesis(h)
+        record_hypothesis(store, origin_loop="intellect",
+                          kind="competition_hypothesis", hypothesis=h)
     if not competitors:
         report["outcome"] = "no_valid_competitors"
         return report
@@ -330,7 +336,8 @@ def run_competition(engine, goal: str,
             executed=True,
             result={"observed": observed,
                     "world": getattr(world_fn, "__name__", "world_fn")})
-        store.save_experiment(exp)
+        record_experiment(store, origin_loop="intellect",
+                          kind="competition_experiment", experiment=exp)
         experiments.append(exp)
 
         # ---- 6. real Evidence per (hypothesis, experiment) ----
@@ -348,7 +355,9 @@ def run_competition(engine, goal: str,
                          "observed": observed,
                          "provenance": p["provenance"]},
                 source="behavioral_experiment")
-            store.save_evidence(ev)
+            record_evidence(store, origin_loop="intellect",
+                            kind="behavioral_experiment", evidence=ev,
+                            causal_chain=[exp_id])
             (hyp.supporting_evidence if supports
              else hyp.contradicting_evidence).append(ev.evidence_id)
     report["n_experiments"] = len(experiments)
@@ -365,7 +374,8 @@ def run_competition(engine, goal: str,
         hyp.provenance = dict(hyp.provenance,
                               arbiter_reasoning=v.reasoning,
                               n_evidence=len(evs))
-        store.save_hypothesis(hyp)
+        record_hypothesis(store, origin_loop="intellect",
+                          kind="arbitrated_hypothesis", hypothesis=hyp)
         verdict_report[hyp.hypothesis_id] = {
             "label": hyp.specification.get("label"),
             "state": v.new_state.value, "confidence": v.new_confidence,

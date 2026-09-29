@@ -604,16 +604,23 @@ class GapRegistry:
         record.closing_evidence = closing_evidence
         record.residual = closing_evidence.get("residual", "")
         self._save(record)
-        # the loop observing itself: the closure is an experience record
+        # the loop observing itself: the closure is an experience record,
+        # written through the unified-memory facade (not the store's raw
+        # observation API), with the facade's canonical provenance block.
         try:
             epi = getattr(self._engine, "epistemic_store", None)
-            if epi is not None and hasattr(epi, "record_observation"):
-                epi.record_observation(
-                    f"gap closed: {record.summary} "
-                    f"(route {route_name})",
-                    source="gap-registry",
+            if epi is not None:
+                from swarm_engine.intellect.unified_memory import (
+                    record_experience)
+                record_experience(
+                    epi,
+                    origin_loop="acquisition",
+                    kind="gap_close",
+                    content=(f"gap closed: {record.summary} "
+                             f"(route {route_name})"),
                     raw={"gap_id": record.gap_id,
-                         "closing_evidence": closing_evidence})
+                         "closing_evidence": closing_evidence},
+                    source="gap-registry")
         except Exception:
             pass
 

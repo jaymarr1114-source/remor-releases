@@ -296,8 +296,14 @@ def ingest_external_demonstration(demo: ExternalDemonstration,
             return IngestResult(recorded=False, reason="no_observable_gap",
                                 y_id=None, delta_id=None, detail=detail)
 
-    # Persist via the frozen API (lazy import keeps this module light).
+    # Persist via the unified-memory facade (lazy import keeps this module
+    # light). The y record, the delta record, and the demonstration
+    # evidence all go through the facade's canonical write path: the
+    # original demonstration provenance is preserved inside the raw
+    # payload, and the facade adds its canonical _provenance block.
     from swarm_engine.intellect.epistemic import Evidence
+    from swarm_engine.intellect.unified_memory import (
+        record_experience, record_evidence)
 
     y = YRecord(
         y_id=f"y_{uuid4().hex[:12]}",
@@ -325,25 +331,38 @@ def ingest_external_demonstration(demo: ExternalDemonstration,
         V={"status": "unverified", "method": None},
         C=None,
     )
-    epistemic.record_observation(
+    record_experience(
+        epistemic,
+        origin_loop="acquisition",
+        kind="technique_y",
         content=f"external technique demonstration: {demo.objective}",
-        source="technique_y",
         raw={"y_record": y.as_dict(), "provenance": dict(demo.provenance)},
+        source="technique_y",
     )
-    epistemic.record_observation(
+    record_experience(
+        epistemic,
+        origin_loop="acquisition",
+        kind="technique_delta",
         content=f"technique delta (Y-Z): {delta_id} for {demo.objective}",
-        source="technique_delta",
         raw={"delta": delta.as_dict()},
+        causal_chain=[y.y_id],
+        source="technique_delta",
     )
-    epistemic.save_evidence(Evidence(
-        evidence_id=evidence_id,
-        target_id=delta_id,
-        supports=True,
-        content={"kind": "demonstration_evidence",
-                 "actions": y.actions,
-                 "outcome": demo.outcome},
-        source=demo.source,
-    ))
+    record_evidence(
+        epistemic,
+        origin_loop="acquisition",
+        kind="demonstration_evidence",
+        evidence=Evidence(
+            evidence_id=evidence_id,
+            target_id=delta_id,
+            supports=True,
+            content={"kind": "demonstration_evidence",
+                     "actions": y.actions,
+                     "outcome": demo.outcome},
+            source=demo.source,
+        ),
+        causal_chain=[delta_id],
+    )
 
     if evidence_store is not None:
         # EvidenceStore.add_entry kind is restricted to a whitelist that does

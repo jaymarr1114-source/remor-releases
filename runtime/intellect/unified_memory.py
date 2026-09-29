@@ -746,6 +746,50 @@ ORIGIN_INTELLECT = "intellect"
 PROVENANCE_KEY = "_provenance"
 
 
+def _canonical_provenance(origin_loop: str,
+                          kind: str,
+                          write_path: str,
+                          causal_chain: Optional[Sequence[str]] = None
+                          ) -> Dict[str, Any]:
+    """The one provenance block every unified write path stamps.
+
+    Additive and uniform across record types (observations, evidence,
+    hypotheses, experiments): schema version, origin loop, record kind,
+    causal chain, timestamp, and which facade function performed the write.
+    On merge collisions with pre-existing caller provenance, the canonical
+    keys win -- the block must stay machine-checkable.
+    """
+    return {
+        "schema": EXPERIENCE_SCHEMA,
+        "origin_loop": origin_loop,
+        "kind": kind,
+        "causal_chain": list(causal_chain or []),
+        "recorded_at": time.time(),
+        "write_path": write_path,
+    }
+
+
+def _stamp_provenance(existing: Optional[Dict[str, Any]],
+                      origin_loop: str,
+                      kind: str,
+                      write_path: str,
+                      causal_chain: Optional[Sequence[str]] = None
+                      ) -> Dict[str, Any]:
+    """Merge the canonical block over caller-supplied provenance.
+
+    Caller provenance (e.g. a hypothesis's "generated_by" or an experiment's
+    arbiter reasoning) is preserved; canonical keys take precedence so the
+    block remains machine-checkable. For records whose payload already IS
+    a provenance dict (hypotheses, experiments) the block is merged at the
+    top level; for generic payloads (observation raw, evidence content)
+    callers nest the result under PROVENANCE_KEY ("_provenance").
+    """
+    merged = dict(existing or {})
+    merged.update(_canonical_provenance(origin_loop, kind, write_path,
+                                        causal_chain))
+    return merged
+
+
 def record_experience(epistemic: Any,
                       origin_loop: str,
                       kind: str,
@@ -769,16 +813,9 @@ def record_experience(epistemic: Any,
     """
     from uuid import uuid4
     obs_id = observation_id or f"exp_{uuid4().hex[:12]}"
-    provenance = {
-        "schema": EXPERIENCE_SCHEMA,
-        "origin_loop": origin_loop,
-        "kind": kind,
-        "causal_chain": list(causal_chain or []),
-        "recorded_at": time.time(),
-        "write_path": "unified_memory.record_experience",
-    }
     merged = dict(raw or {})
-    merged[PROVENANCE_KEY] = provenance
+    merged[PROVENANCE_KEY] = _canonical_provenance(
+        origin_loop, kind, "unified_memory.record_experience", causal_chain)
     src = source or f"{origin_loop}/{kind}"
     save = getattr(epistemic, "save_observation", None)
     if callable(save):
@@ -788,6 +825,65 @@ def record_experience(epistemic: Any,
     else:
         epistemic.record_observation(content=content, source=src, raw=merged)
     return obs_id
+
+
+def record_evidence(epistemic: Any,
+                    origin_loop: str,
+                    kind: str,
+                    evidence: Any,
+                    causal_chain: Optional[Sequence[str]] = None) -> str:
+    """Write one evidence record through the unified write path.
+
+    Takes the caller-constructed Evidence object (callers own the
+    domain fields: target, supports, content), stamps the canonical
+    provenance block additively into its content dict, and persists via
+    the frozen EpistemicStore.save_evidence API. Returns the evidence id.
+    The arbiter reads only `supports`; the additive block is inert to it.
+    """
+    evidence.content = dict(evidence.content or {})
+    evidence.content[PROVENANCE_KEY] = _stamp_provenance(
+        evidence.content.get(PROVENANCE_KEY), origin_loop, kind,
+        "unified_memory.record_evidence", causal_chain)
+    epistemic.save_evidence(evidence)
+    return evidence.evidence_id
+
+
+def record_hypothesis(epistemic: Any,
+                      origin_loop: str,
+                      kind: str,
+                      hypothesis: Any,
+                      causal_chain: Optional[Sequence[str]] = None) -> str:
+    """Write one hypothesis record through the unified write path.
+
+    Takes the caller-constructed Hypothesis object (callers own the domain
+    fields and may re-save after mutation, e.g. arbiter verdict updates),
+    stamps the canonical provenance block into its provenance field
+    (caller keys preserved), and persists via the frozen
+    EpistemicStore.save_hypothesis API. Returns the hypothesis id.
+    """
+    hypothesis.provenance = _stamp_provenance(
+        hypothesis.provenance, origin_loop, kind,
+        "unified_memory.record_hypothesis", causal_chain)
+    epistemic.save_hypothesis(hypothesis)
+    return hypothesis.hypothesis_id
+
+
+def record_experiment(epistemic: Any,
+                      origin_loop: str,
+                      kind: str,
+                      experiment: Any,
+                      causal_chain: Optional[Sequence[str]] = None) -> str:
+    """Write one experiment record through the unified write path.
+
+    Takes the caller-constructed Experiment object, stamps the canonical
+    provenance block into its provenance field, and persists via the frozen
+    EpistemicStore.save_experiment API. Returns the experiment id.
+    """
+    experiment.provenance = _stamp_provenance(
+        experiment.provenance, origin_loop, kind,
+        "unified_memory.record_experiment", causal_chain)
+    epistemic.save_experiment(experiment)
+    return experiment.experiment_id
 
 
 def read_experiences(epistemic: Any,
@@ -1065,11 +1161,15 @@ STORE_CATALOG: Tuple[Dict[str, Any], ...] = (
              "Service-private DB; created at service boot."),
     _adapter("intent-db",
              (),
-             "runtime/agent_org/intent_dispatch_service.py", "service",
+             "runtime/services/intent_dispatch_api.py", "service",
              ("dispatch",),
-             "IntentDispatchService boots a separate full engine DB "
-             "(intent.db). FLAGGED: a private engine-schema copy unless "
-             "bridged or retired -- the census surfaces it when present."),
+             "IntentDispatchService boots a separate full engine-schema DB "
+             "(intent.db) under the service base dir. BRIDGED (PLOOP-4): the "
+             "census verifies it when a path is supplied -- every table in "
+             "intent.db must fall within the engine schema (union of "
+             "engine-claimed tables), i.e. a schema copy with no private "
+             "tables. Tables are intentionally not enumerated here: the "
+             "bridge asserts schema-conformance, not a fixed list."),
     _adapter("project-db",
              (),
              "runtime/project/", "project",
@@ -1108,7 +1208,8 @@ class _CensusResult(dict):
         return self.ok
 
 
-def run_census(engine_db_path: str) -> _CensusResult:
+def run_census(engine_db_path: str,
+               intent_db_path: Optional[str] = None) -> _CensusResult:
     """Enumerate every table in the engine DB and prove each is reachable.
 
     Every table must be claimed by exactly one STORE_CATALOG adapter with
@@ -1117,6 +1218,13 @@ def run_census(engine_db_path: str) -> _CensusResult:
     (defect). Known sidecar files next to the engine DB (gaps.db,
     acceptance.db, the oracle trust DB) are checked for presence and, when
     present, their tables must be claimed by the matching adapter.
+
+    intent_db_path (optional): the IntentDispatchService's intent.db. When
+    supplied and present, its tables must all fall within the engine schema
+    (the union of engine-claimed tables) -- the bridge proof that it is a
+    schema copy with no private tables. A table outside the engine schema
+    is a defect (a private store hiding inside the service DB). Absence is
+    not a defect: the service boots intent.db lazily at service start.
 
     This is the adversarial half of the V10-P1 proof: a loop that keeps a
     store outside this catalog fails the census.
@@ -1182,6 +1290,30 @@ def run_census(engine_db_path: str) -> _CensusResult:
     result["sidecars"] = sidecars
     result["missing_sidecars"] = missing
     result["unclaimed_tables"] = unclaimed
+
+    # intent.db bridge: the IntentDispatchService's separate full
+    # engine-schema DB. When a path is supplied and the file exists, every
+    # table in it must fall within the engine schema (union of
+    # engine-claimed tables) -- proving it is a schema copy, not a private
+    # store with extra tables. Absence is expected on a fresh checkout
+    # (the service boots it lazily); absence is not a defect.
+    engine_schema_tables = set(by_table)
+    intent_entry: Dict[str, Any] = {"path": intent_db_path,
+                                    "store_id": "intent-db",
+                                    "present": bool(intent_db_path)
+                                    and os.path.exists(intent_db_path)}
+    if intent_entry["present"]:
+        actual = _sqlite_tables(intent_db_path)
+        intent_entry["tables"] = actual
+        outside = [t for t in actual if t not in engine_schema_tables]
+        intent_entry["tables_outside_engine_schema"] = outside
+        if outside:
+            unclaimed.extend(f"intent:{t}" for t in outside)
+            result["unclaimed_tables"] = unclaimed
+    else:
+        intent_entry["note"] = ("not supplied or not yet created "
+                                "(service boots it lazily)")
+    result["intent_db"] = intent_entry
     return result
 
 
@@ -1212,18 +1344,58 @@ def _um_read_experiences(self: "UnifiedMemory",
                             kind=kind, limit=limit)
 
 
+def _um_record_evidence(self: "UnifiedMemory",
+                        origin_loop: str,
+                        kind: str,
+                        evidence: Any,
+                        causal_chain: Optional[Sequence[str]] = None) -> str:
+    """Write an evidence record through the unified write path."""
+    return record_evidence(self.epistemic, origin_loop, kind, evidence,
+                           causal_chain=causal_chain)
+
+
+def _um_record_hypothesis(self: "UnifiedMemory",
+                          origin_loop: str,
+                          kind: str,
+                          hypothesis: Any,
+                          causal_chain: Optional[Sequence[str]] = None) -> str:
+    """Write a hypothesis record through the unified write path."""
+    return record_hypothesis(self.epistemic, origin_loop, kind, hypothesis,
+                             causal_chain=causal_chain)
+
+
+def _um_record_experiment(self: "UnifiedMemory",
+                          origin_loop: str,
+                          kind: str,
+                          experiment: Any,
+                          causal_chain: Optional[Sequence[str]] = None) -> str:
+    """Write an experiment record through the unified write path."""
+    return record_experiment(self.epistemic, origin_loop, kind, experiment,
+                             causal_chain=causal_chain)
+
+
 def _um_census(self: "UnifiedMemory",
-               engine_db_path: Optional[str] = None) -> _CensusResult:
-    """Run the store census against the engine DB behind this layer."""
+               engine_db_path: Optional[str] = None,
+               intent_db_path: Optional[str] = None) -> _CensusResult:
+    """Run the store census against the engine DB behind this layer.
+
+    Pass intent_db_path (the IntentDispatchService's intent.db) to also
+    verify the intent service's engine-schema copy is bridged: every table
+    in it must fall within the engine schema, i.e. no private tables.
+    """
     path = engine_db_path or getattr(self.epistemic, "db_path", None)
     if not path:
         raise ValueError("census needs an engine DB path: pass "
                          "engine_db_path or bind an epistemic store with a "
                          "db_path")
-    return run_census(path)
+    return run_census(path, intent_db_path=intent_db_path)
 
 
 UnifiedMemory.record_experience = _um_record_experience
 UnifiedMemory.read_experiences = _um_read_experiences
+UnifiedMemory.record_evidence = _um_record_evidence
+UnifiedMemory.record_hypothesis = _um_record_hypothesis
+UnifiedMemory.record_experiment = _um_record_experiment
 UnifiedMemory.census = _um_census
-del _um_record_experience, _um_read_experiences, _um_census
+del (_um_record_experience, _um_read_experiences, _um_record_evidence,
+     _um_record_hypothesis, _um_record_experiment, _um_census)
