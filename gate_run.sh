@@ -1,5 +1,5 @@
 #!/bin/bash
-# RD-TARGET-REMOTE-1 gate: reproduces the mission's full evidence
+# CREATIVITY-SLICE-1 gate: reproduces the mission's full evidence
 # battery in fresh sequential processes. Felix's independent re-run
 # is this one command from the worktree root:
 #
@@ -9,6 +9,12 @@
 # concurrent proofs contend and produce spurious failures that look
 # like regressions. Order matters: rd1_fresh_process re-opens the
 # DBs rd1_adversarial leaves behind, so it runs immediately after it.
+#
+# The mission battery is proofs/creativity_slice_proof.py (the D-5
+# stages + D-4 intent register). The six rd1_* batteries are carried
+# regressions from RD-TARGET-REMOTE-1 (base 08fad24): the new
+# runtime/creativity/ package is additive, but the tree must stay
+# green as one integrated system.
 #
 # Exit 0 only if every battery passes. Per-battery logs are kept
 # under /tmp/rd1_gate_logs/.
@@ -50,6 +56,7 @@ else
 fi
 
 declare -a BATTERIES=(
+    "proofs/creativity_slice_proof.py"
     "proofs/rd1_endpoint_proof.py"
     "proofs/rd1_proof.py"
     "proofs/rd1_adversarial.py"
