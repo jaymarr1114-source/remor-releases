@@ -1,0 +1,262 @@
+{
+  "evidence_id": "ev_03a42dff6c0644c2",
+  "inquiry_id": "inq_cd1c24b00b13",
+  "trigger_id": "trg_f4f2485d03ec",
+  "loop": "questioning",
+  "bounded_objective": "cur-p2 proof",
+  "origin": "PRIMARY_REQUESTED",
+  "terminal_state": "INSUFFICIENT_EVIDENCE",
+  "precise_question": "What would count as observable evidence for 'detected signals reveal lunar'?",
+  "precision_score": 2,
+  "passes": [
+    {
+      "pass": 0,
+      "score": 2,
+      "checks": [
+        "names the unknown ('detected signals reveal lunar'): True",
+        "names an observable evidence path: True",
+        "names a falsifier/decision criterion: False"
+      ],
+      "precise_question": "What would count as observable evidence for 'detected signals reveal lunar'?",
+      "probes": [
+        {
+          "terms": [
+            "detected",
+            "signals",
+            "reveal",
+            "lunar",
+            "botany"
+          ],
+          "hits": [
+            {
+              "line": "a fabricated retire: detected, flagged, and downgraded.\"\"\"",
+              "overlap": 1
+            },
+            {
+              "line": "detected, flagged on the record, and the outcome is downgraded.\"\"\"",
+              "overlap": 1
+            },
+            {
+              "line": "\"\"\"The loop controller signals convergence: any remaining active",
+              "overlap": 1
+            }
+          ]
+        }
+      ],
+      "qualifying_hits": 0,
+      "node_summaries": {
+        "extract_unknown": "unknown='detected signals reveal lunar' terms=['detected', 'signals', 'reveal', 'lunar', 'botany'] [cognize:mc-127097f45ffe]",
+        "probe_observable": "3 passage(s), 0 qualifying, for ['detected', 'signals', 'reveal', 'lunar', 'botany']",
+        "probe_scope": "scopes=[]",
+        "compose": "What would count as observable evidence for 'detected signals reveal lunar'? [cognize:mc-127097f45ffe]",
+        "score": "precision 2/3 [cognize:mc-127097f45ffe]"
+      },
+      "blocked": null,
+      "region_summary": {
+        "region_id": "gr-000001",
+        "graph_id": "curiosity/questioning/refinement/v1",
+        "objective": "refine the imprecise question into a precise checkable question (pass 0)",
+        "nodes_total": 5,
+        "operated": 5,
+        "succeeded": 5,
+        "failed": 0,
+        "unreachable": 0,
+        "bound_hit": false,
+        "values": {
+          "extract_unknown": {
+            "node": "extract_unknown",
+            "summary": "unknown='detected signals reveal lunar' terms=['detected', 'signals', 'reveal', 'lunar', 'botany'] [cognize:mc-127097f45ffe]"
+          },
+          "probe_observable": {
+            "node": "probe_observable",
+            "summary": "3 passage(s), 0 qualifying, for ['detected', 'signals', 'reveal', 'lunar', 'botany']"
+          },
+          "probe_scope": {
+            "node": "probe_scope",
+            "summary": "scopes=[]"
+          },
+          "compose": {
+            "node": "compose",
+            "summary": "What would count as observable evidence for 'detected signals reveal lunar'? [cognize:mc-127097f45ffe]"
+          },
+          "score": {
+            "node": "score",
+            "summary": "precision 2/3 [cognize:mc-127097f45ffe]"
+          }
+        }
+      }
+    },
+    {
+      "pass": 1,
+      "score": 2,
+      "checks": [
+        "names the unknown ('detected signals reveal lunar'): True",
+        "names an observable evidence path: True",
+        "names a falsifier/decision criterion: False"
+      ],
+      "precise_question": "What would count as observable evidence for 'detected signals reveal lunar'?",
+      "probes": [
+        {
+          "terms": [
+            "detected",
+            "signals",
+            "reveal",
+            "lunar",
+            "botany",
+            "count",
+            "observable",
+            "evidence"
+          ],
+          "hits": [
+            {
+              "line": "return (f\"What would count as observable evidence for \"",
+              "overlap": 3
+            },
+            {
+              "line": "# question's words (\"observable evidence\"), which must not let",
+              "overlap": 2
+            },
+            {
+              "line": "observable the question names the evidence path and a falsifier",
+              "overlap": 2
+            }
+          ]
+        }
+      ],
+      "qualifying_hits": 0,
+      "node_summaries": {
+        "extract_unknown": "unknown='detected signals reveal lunar' terms=['detected', 'signals', 'reveal', 'lunar', 'botany'] [cognize:mc-6bf81305e088]",
+        "probe_observable": "3 passage(s), 0 qualifying, for ['detected', 'signals', 'reveal', 'lunar', 'botany', 'count']",
+        "probe_scope": "scopes=[]",
+        "compose": "What would count as observable evidence for 'detected signals reveal lunar'? [cognize:mc-6bf81305e088]",
+        "score": "precision 2/3 [cognize:mc-6bf81305e088]"
+      },
+      "blocked": null,
+      "region_summary": {
+        "region_id": "gr-000002",
+        "graph_id": "curiosity/questioning/refinement/v1",
+        "objective": "refine the imprecise question into a precise checkable question (pass 1)",
+        "nodes_total": 5,
+        "operated": 5,
+        "succeeded": 5,
+        "failed": 0,
+        "unreachable": 0,
+        "bound_hit": false,
+        "values": {
+          "extract_unknown": {
+            "node": "extract_unknown",
+            "summary": "unknown='detected signals reveal lunar' terms=['detected', 'signals', 'reveal', 'lunar', 'botany'] [cognize:mc-6bf81305e088]"
+          },
+          "probe_observable": {
+            "node": "probe_observable",
+            "summary": "3 passage(s), 0 qualifying, for ['detected', 'signals', 'reveal', 'lunar', 'botany', 'count']"
+          },
+          "probe_scope": {
+            "node": "probe_scope",
+            "summary": "scopes=[]"
+          },
+          "compose": {
+            "node": "compose",
+            "summary": "What would count as observable evidence for 'detected signals reveal lunar'? [cognize:mc-6bf81305e088]"
+          },
+          "score": {
+            "node": "score",
+            "summary": "precision 2/3 [cognize:mc-6bf81305e088]"
+          }
+        }
+      }
+    },
+    {
+      "pass": 2,
+      "score": 2,
+      "checks": [
+        "names the unknown ('detected signals reveal lunar'): True",
+        "names an observable evidence path: True",
+        "names a falsifier/decision criterion: False"
+      ],
+      "precise_question": "What would count as observable evidence for 'detected signals reveal lunar'?",
+      "probes": [
+        {
+          "terms": [
+            "detected",
+            "signals",
+            "reveal",
+            "lunar",
+            "botany",
+            "count",
+            "observable",
+            "evidence"
+          ],
+          "hits": [
+            {
+              "line": "return (f\"What would count as observable evidence for \"",
+              "overlap": 3
+            },
+            {
+              "line": "# question's words (\"observable evidence\"), which must not let",
+              "overlap": 2
+            },
+            {
+              "line": "observable the question names the evidence path and a falsifier",
+              "overlap": 2
+            }
+          ]
+        }
+      ],
+      "qualifying_hits": 0,
+      "node_summaries": {
+        "extract_unknown": "unknown='detected signals reveal lunar' terms=['detected', 'signals', 'reveal', 'lunar', 'botany'] [cognize:mc-56fff0408577]",
+        "probe_observable": "3 passage(s), 0 qualifying, for ['detected', 'signals', 'reveal', 'lunar', 'botany', 'count']",
+        "probe_scope": "scopes=[]",
+        "compose": "What would count as observable evidence for 'detected signals reveal lunar'? [cognize:mc-56fff0408577]",
+        "score": "precision 2/3 [cognize:mc-56fff0408577]"
+      },
+      "blocked": null,
+      "region_summary": {
+        "region_id": "gr-000003",
+        "graph_id": "curiosity/questioning/refinement/v1",
+        "objective": "refine the imprecise question into a precise checkable question (pass 2)",
+        "nodes_total": 5,
+        "operated": 5,
+        "succeeded": 5,
+        "failed": 0,
+        "unreachable": 0,
+        "bound_hit": false,
+        "values": {
+          "extract_unknown": {
+            "node": "extract_unknown",
+            "summary": "unknown='detected signals reveal lunar' terms=['detected', 'signals', 'reveal', 'lunar', 'botany'] [cognize:mc-56fff0408577]"
+          },
+          "probe_observable": {
+            "node": "probe_observable",
+            "summary": "3 passage(s), 0 qualifying, for ['detected', 'signals', 'reveal', 'lunar', 'botany', 'count']"
+          },
+          "probe_scope": {
+            "node": "probe_scope",
+            "summary": "scopes=[]"
+          },
+          "compose": {
+            "node": "compose",
+            "summary": "What would count as observable evidence for 'detected signals reveal lunar'? [cognize:mc-56fff0408577]"
+          },
+          "score": {
+            "node": "score",
+            "summary": "precision 2/3 [cognize:mc-56fff0408577]"
+          }
+        }
+      }
+    }
+  ],
+  "relevance": {
+    "score": 0.6667,
+    "d4_note": "relevance threshold 0.25 is provisional per D-4, never a universal constant; this score is ADVISORY ONLY. Primary Acceptance is final (C-3.4); curiosity never accepts its own findings and true-but-imprecise results stay fenced."
+  },
+  "triage": "retain",
+  "triage_note": "fenced; true-but-imprecise per C-3.4; never promoted by curiosity",
+  "resource": {
+    "spent_s": 0.001323,
+    "slice_s": 30.0,
+    "grant_epoch": 1
+  },
+  "produced_at": 1790772590.8496547
+}

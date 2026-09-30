@@ -1,0 +1,19 @@
+{
+  "evidence_id": "ev_9e51bf878d304463",
+  "inquiry_id": "inq_ca1d4bbd7e60",
+  "trigger_id": "trg_54ab5470bdea",
+  "loop": "questioning",
+  "bounded_objective": "cur-p2 proof",
+  "origin": "PRIMARY_REQUESTED",
+  "terminal_state": "BLOCKED",
+  "resource_boundary": {
+    "spent_s": 0.000279,
+    "budget_s": 30.0,
+    "cause": "substrate refused: cognition_failed: extract_unknown via cognize on mc-14a3b11031a1: simulated provider outage",
+    "unresolved_boundary": "imprecise_question"
+  },
+  "partial_refinement": [],
+  "checkpoint_id": "ckpt_bcb42f648c25",
+  "detail": "inquiry suspended at the resource boundary: the imprecise-question boundary is unresolved and externalized here, not dropped",
+  "produced_at": 1790772592.5688055
+}

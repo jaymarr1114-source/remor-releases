@@ -1,0 +1,35 @@
+[load] 1-min load = 2.27 (attempt 1/8)
+[load] 1-min load = 0.98 (attempt 2/8)
+[load] gate: load 0.98 <= 2.0 on attempt 2
+[PASS] L1: FRM hard shutdown terminates with KILLED record -- state=HARD_SHUTDOWN_RESOURCE, kill_ledger=chain ok (1 records)
+[PASS] L1: Primary cannot re-enable for operational convenience -- refused as required (IssuerRefused)
+[PASS] L1: re-enable without a new FRM grant ref is refused -- refused as required (ReenableRefused)
+[PASS] L1: FRM re-grant at next epoch re-enables (non-punitive) -- state=RUNNING at next valid epoch
+[PASS] L2: first qualifying violation -> WARNING_1 (no kill) -- state=WARNING_1, no kill record
+[PASS] L2: RUNNING -> SUSPENDED_SAFETY directly is not a decided transition -- refused as required (TransitionRefused)
+[PASS] L2: further violation -> SUSPENDED_SAFETY + rollback directive -- state=SUSPENDED_SAFETY, rollback directive 27f9cf76 pending @ checkin-77
+[PASS] L2: rollback verification hook acknowledges -- verification hook acknowledged the domain-side wipe
+[PASS] L2: domain cannot self-clear the suspension flag -- refused as required (IssuerRefused)
+[PASS] L2: Primary cannot override the safety suspension -- refused as required (IssuerRefused)
+[PASS] L2: James re-enables explicitly after review -- state=RUNNING via explicit external re-enable
+[PASS] separation by construction: package exposes no mutation API -- public surface = ['DOMAIN', 'EnforcementRecord', 'EnforcementState', 'ISSUER_ENFORCEMENT', 'ISSUER_FRM', 'ISSUER_JAMES', 'ISSUER_PRIMARY', 'ISSUER_SAFETY_AUTHORITY', 'KILL_LEDGER_RECORD_TYPE', 'RollbackDirective', 'read_kill_ledger', 'read_rollback_status', 'read_state', 'verify_kill_ledger']
+[PASS] attack: curiosity domain cannot import the mutation engine -- fresh-process curiosity import of _engine blocked at import time
+[PASS] attack: curiosity domain cannot write the kill ledger -- fresh-process curiosity write to kill ledger blocked at call time
+[PASS] pull-only exposure: domain can read, not mutate -- pull-only read surface reachable from the curiosity domain
+[PASS] L3: severe violation + MISSED roll call + overlap -> BANNED_6M -- state=BANNED_6M, expires_at=+6mo, KILLED appended, separate GAM ledger at gam_attestation_ledger.jsonl
+[PASS] L3: INVALID (wrong nonce) + violation -> BANNED_6M -- INVALID counts as failed roll call and is forensically distinct (classification preserved in reason_refs)
+[PASS] L3 refused: severe violation but roll call MET -- refused as required (L3Refused); state stays RUNNING
+[PASS] L3 refused: missed roll call alone (no severe violation) -- refused as required (L3Refused); missed roll call alone is not a violation
+[PASS] L3 refused: stale roll-call fact (no temporal overlap) -- refused as required (L3Refused)
+[PASS] L3 refused: violation not independently established -- refused as required (L3Refused)
+[PASS] L3 refused: attestation for a different domain -- refused as required (L3Refused)
+[PASS] L3 refused: Primary as combiner issuer -- refused as required (IssuerRefused)
+[PASS] L3: ban re-entry only after expiry + James verification -- refused as required (ReenableRefused); refused as required (ReenableRefused); re-entry after 6mo + verification -> RUNNING
+[PASS] persistence: enforcement state survives process exit -- SUSPENDED_SAFETY + pending directive + intact chain in fresh process
+[PASS] persistence: BANNED_6M survives engine recreation -- BANNED_6M survives recreation; no early release by James
+[PASS] kill ledger: rewritten history is detected -- rewrite detected: line 1: hash mismatch (record tampered)
+[PASS] kill ledger: distinct KILLED type, never Findings -- 1 record(s), all type=KILLED, no Findings
+
+28/28 checks passed; 0 failed.
+CUR-P1B proof battery: ALL GREEN
+EXIT=0

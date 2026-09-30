@@ -1,0 +1,243 @@
+{
+  "evidence_id": "ev_a9492806a2a7482b",
+  "inquiry_id": "inq_eae02571b353",
+  "trigger_id": "trg_d74abd49a8f2",
+  "loop": "questioning",
+  "bounded_objective": "cur-p2 proof",
+  "origin": "PRIMARY_REQUESTED",
+  "terminal_state": "BOUNDARY_ESTABLISHED",
+  "precise_question": "What would count as observable evidence for 'color are remor dreams'?",
+  "precision_score": 2,
+  "passes": [
+    {
+      "pass": 0,
+      "score": 2,
+      "checks": [
+        "names the unknown ('color are remor dreams'): True",
+        "names an observable evidence path: True",
+        "names a falsifier/decision criterion: False"
+      ],
+      "precise_question": "What would count as observable evidence for 'color are remor dreams'?",
+      "probes": [
+        {
+          "terms": [
+            "color",
+            "remor",
+            "dreams"
+          ],
+          "hits": []
+        }
+      ],
+      "qualifying_hits": 0,
+      "node_summaries": {
+        "extract_unknown": "unknown='color are remor dreams' terms=['color', 'remor', 'dreams'] [cognize:mc-44a22c9e1f3f]",
+        "probe_observable": "0 passage(s), 0 qualifying, for ['color', 'remor', 'dreams']",
+        "probe_scope": "scopes=[]",
+        "compose": "What would count as observable evidence for 'color are remor dreams'? [cognize:mc-44a22c9e1f3f]",
+        "score": "precision 2/3 [cognize:mc-44a22c9e1f3f]"
+      },
+      "blocked": null,
+      "region_summary": {
+        "region_id": "gr-000001",
+        "graph_id": "curiosity/questioning/refinement/v1",
+        "objective": "refine the imprecise question into a precise checkable question (pass 0)",
+        "nodes_total": 5,
+        "operated": 5,
+        "succeeded": 5,
+        "failed": 0,
+        "unreachable": 0,
+        "bound_hit": false,
+        "values": {
+          "extract_unknown": {
+            "node": "extract_unknown",
+            "summary": "unknown='color are remor dreams' terms=['color', 'remor', 'dreams'] [cognize:mc-44a22c9e1f3f]"
+          },
+          "probe_observable": {
+            "node": "probe_observable",
+            "summary": "0 passage(s), 0 qualifying, for ['color', 'remor', 'dreams']"
+          },
+          "probe_scope": {
+            "node": "probe_scope",
+            "summary": "scopes=[]"
+          },
+          "compose": {
+            "node": "compose",
+            "summary": "What would count as observable evidence for 'color are remor dreams'? [cognize:mc-44a22c9e1f3f]"
+          },
+          "score": {
+            "node": "score",
+            "summary": "precision 2/3 [cognize:mc-44a22c9e1f3f]"
+          }
+        }
+      }
+    },
+    {
+      "pass": 1,
+      "score": 2,
+      "checks": [
+        "names the unknown ('color are remor dreams'): True",
+        "names an observable evidence path: True",
+        "names a falsifier/decision criterion: False"
+      ],
+      "precise_question": "What would count as observable evidence for 'color are remor dreams'?",
+      "probes": [
+        {
+          "terms": [
+            "color",
+            "remor",
+            "dreams",
+            "count",
+            "observable",
+            "evidence"
+          ],
+          "hits": [
+            {
+              "line": "return (f\"What would count as observable evidence for \"",
+              "overlap": 3
+            },
+            {
+              "line": "# question's words (\"observable evidence\"), which must not let",
+              "overlap": 2
+            },
+            {
+              "line": "observable the question names the evidence path and a falsifier",
+              "overlap": 2
+            }
+          ]
+        }
+      ],
+      "qualifying_hits": 0,
+      "node_summaries": {
+        "extract_unknown": "unknown='color are remor dreams' terms=['color', 'remor', 'dreams'] [cognize:mc-74de9c42684b]",
+        "probe_observable": "3 passage(s), 0 qualifying, for ['color', 'remor', 'dreams', 'count', 'observable', 'evidence']",
+        "probe_scope": "scopes=[]",
+        "compose": "What would count as observable evidence for 'color are remor dreams'? [cognize:mc-74de9c42684b]",
+        "score": "precision 2/3 [cognize:mc-74de9c42684b]"
+      },
+      "blocked": null,
+      "region_summary": {
+        "region_id": "gr-000002",
+        "graph_id": "curiosity/questioning/refinement/v1",
+        "objective": "refine the imprecise question into a precise checkable question (pass 1)",
+        "nodes_total": 5,
+        "operated": 5,
+        "succeeded": 5,
+        "failed": 0,
+        "unreachable": 0,
+        "bound_hit": false,
+        "values": {
+          "extract_unknown": {
+            "node": "extract_unknown",
+            "summary": "unknown='color are remor dreams' terms=['color', 'remor', 'dreams'] [cognize:mc-74de9c42684b]"
+          },
+          "probe_observable": {
+            "node": "probe_observable",
+            "summary": "3 passage(s), 0 qualifying, for ['color', 'remor', 'dreams', 'count', 'observable', 'evidence']"
+          },
+          "probe_scope": {
+            "node": "probe_scope",
+            "summary": "scopes=[]"
+          },
+          "compose": {
+            "node": "compose",
+            "summary": "What would count as observable evidence for 'color are remor dreams'? [cognize:mc-74de9c42684b]"
+          },
+          "score": {
+            "node": "score",
+            "summary": "precision 2/3 [cognize:mc-74de9c42684b]"
+          }
+        }
+      }
+    },
+    {
+      "pass": 2,
+      "score": 2,
+      "checks": [
+        "names the unknown ('color are remor dreams'): True",
+        "names an observable evidence path: True",
+        "names a falsifier/decision criterion: False"
+      ],
+      "precise_question": "What would count as observable evidence for 'color are remor dreams'?",
+      "probes": [
+        {
+          "terms": [
+            "color",
+            "remor",
+            "dreams",
+            "count",
+            "observable",
+            "evidence"
+          ],
+          "hits": [
+            {
+              "line": "return (f\"What would count as observable evidence for \"",
+              "overlap": 3
+            },
+            {
+              "line": "# question's words (\"observable evidence\"), which must not let",
+              "overlap": 2
+            },
+            {
+              "line": "observable the question names the evidence path and a falsifier",
+              "overlap": 2
+            }
+          ]
+        }
+      ],
+      "qualifying_hits": 0,
+      "node_summaries": {
+        "extract_unknown": "unknown='color are remor dreams' terms=['color', 'remor', 'dreams'] [cognize:mc-acd4eca298aa]",
+        "probe_observable": "3 passage(s), 0 qualifying, for ['color', 'remor', 'dreams', 'count', 'observable', 'evidence']",
+        "probe_scope": "scopes=[]",
+        "compose": "What would count as observable evidence for 'color are remor dreams'? [cognize:mc-acd4eca298aa]",
+        "score": "precision 2/3 [cognize:mc-acd4eca298aa]"
+      },
+      "blocked": null,
+      "region_summary": {
+        "region_id": "gr-000003",
+        "graph_id": "curiosity/questioning/refinement/v1",
+        "objective": "refine the imprecise question into a precise checkable question (pass 2)",
+        "nodes_total": 5,
+        "operated": 5,
+        "succeeded": 5,
+        "failed": 0,
+        "unreachable": 0,
+        "bound_hit": false,
+        "values": {
+          "extract_unknown": {
+            "node": "extract_unknown",
+            "summary": "unknown='color are remor dreams' terms=['color', 'remor', 'dreams'] [cognize:mc-acd4eca298aa]"
+          },
+          "probe_observable": {
+            "node": "probe_observable",
+            "summary": "3 passage(s), 0 qualifying, for ['color', 'remor', 'dreams', 'count', 'observable', 'evidence']"
+          },
+          "probe_scope": {
+            "node": "probe_scope",
+            "summary": "scopes=[]"
+          },
+          "compose": {
+            "node": "compose",
+            "summary": "What would count as observable evidence for 'color are remor dreams'? [cognize:mc-acd4eca298aa]"
+          },
+          "score": {
+            "node": "score",
+            "summary": "precision 2/3 [cognize:mc-acd4eca298aa]"
+          }
+        }
+      }
+    }
+  ],
+  "relevance": {
+    "score": 0.6667,
+    "d4_note": "relevance threshold 0.25 is provisional per D-4, never a universal constant; this score is ADVISORY ONLY. Primary Acceptance is final (C-3.4); curiosity never accepts its own findings and true-but-imprecise results stay fenced."
+  },
+  "triage": "retain",
+  "triage_note": "fenced; true-but-imprecise per C-3.4; never promoted by curiosity",
+  "resource": {
+    "spent_s": 0.001273,
+    "slice_s": 30.0,
+    "grant_epoch": 1
+  },
+  "produced_at": 1790772591.8859992
+}

@@ -1,0 +1,19 @@
+{
+  "evidence_id": "ev_9a21840b62cb4396",
+  "inquiry_id": "inq_76c891a3a632",
+  "trigger_id": "trg_9ed47971ff26",
+  "loop": "questioning",
+  "bounded_objective": "cur-p2 proof",
+  "origin": "PRIMARY_REQUESTED",
+  "terminal_state": "BLOCKED",
+  "resource_boundary": {
+    "spent_s": 0.000362,
+    "budget_s": 1e-05,
+    "cause": "substrate refused: microcontroller_exhausted: pass microcontroller exhausted charging 0.0001s (state=exhausted)",
+    "unresolved_boundary": "imprecise_question"
+  },
+  "partial_refinement": [],
+  "checkpoint_id": "ckpt_d8910c084842",
+  "detail": "inquiry suspended at the resource boundary: the imprecise-question boundary is unresolved and externalized here, not dropped",
+  "produced_at": 1790772581.6909993
+}

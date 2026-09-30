@@ -1,0 +1,573 @@
+{
+  "passed": 113,
+  "failed": 0,
+  "total": 113,
+  "elapsed_s": 21.43,
+  "results": [
+    {
+      "name": "t01 activation approved",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t01 real FRM grant",
+      "status": "PASS",
+      "detail": "budget_s=60.0 max_concurrent=2 epoch=1"
+    },
+    {
+      "name": "t01 grant enforcement RUNNING",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t01 roll-call MET on the decision",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t01 loop entered",
+      "status": "PASS",
+      "detail": "inquiry inq_cdcca1a53520: QUESTION_RESOLVED -> evidence ev_aa422058eabf420f"
+    },
+    {
+      "name": "t01 terminal QUESTION_RESOLVED",
+      "status": "PASS",
+      "detail": "score=3 spent=0.000804s"
+    },
+    {
+      "name": "t01 precise question composed",
+      "status": "PASS",
+      "detail": "What observable evidence would resolve 'run controller enforce budget', given th"
+    },
+    {
+      "name": "t01 inquiry id shared end to end",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t01 finding persisted in the fenced store",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t01 finding fields",
+      "status": "PASS",
+      "detail": "loop=questioning terminal=QUESTION_RESOLVED"
+    },
+    {
+      "name": "t01 provenance complete",
+      "status": "PASS",
+      "detail": "model=curiosity-questioning/v1 (mechanical refinement; no external cognition provider) triage=propose_investigation"
+    },
+    {
+      "name": "t01 payload file exists",
+      "status": "PASS",
+      "detail": "/home/hatch/workspace/worktrees/curp2-mission/proofs/cur_p2/runs/t01_end_to_end/payloads/ev_aa422058eabf420f.json"
+    },
+    {
+      "name": "t01 payload carries the precise question + passes",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t01 reasoning travelled the cognition inlet",
+      "status": "PASS",
+      "detail": "3 node summaries carry [cognize:<mc>]"
+    },
+    {
+      "name": "t01 terminal routed through the shared ledger",
+      "status": "PASS",
+      "detail": "routes=1 consumer=curiosity_evidence_store"
+    },
+    {
+      "name": "t01 attribution result recorded",
+      "status": "PASS",
+      "detail": "outcome=success"
+    },
+    {
+      "name": "t01 attribution admission retained (not accepted)",
+      "status": "PASS",
+      "detail": "verdict=retained"
+    },
+    {
+      "name": "t01 outcome view carries no microcontroller ids",
+      "status": "PASS",
+      "detail": "view keys=['loop', 'state', 'active_count', 'total_spawned', 'total_retired', 'total_refused']"
+    },
+    {
+      "name": "t02 finding reopens in a fresh process",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t02 reopened fields intact",
+      "status": "PASS",
+      "detail": "triage=propose_investigation"
+    },
+    {
+      "name": "t02 reopened payload intact",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t02 ledger route reopens fresh",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t03 activation refused with NO_BUDGET",
+      "status": "PASS",
+      "detail": "NO_BUDGET: FRM epoch 1 grants curiosity 0.000s: an inquiry with no budget does not start"
+    },
+    {
+      "name": "t03 nothing dispatched",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t03 loop never registered on the substrate",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t04_hard_shutdown refused with KILL_STATE",
+      "status": "PASS",
+      "detail": "KILL_STATE: enforcement state is HARD_SHUTDOWN_RESOURCE: no new curiosity activation while"
+    },
+    {
+      "name": "t04_hard_shutdown FRM never consulted",
+      "status": "PASS",
+      "detail": "evaluate_round calls=0"
+    },
+    {
+      "name": "t04_hard_shutdown nothing dispatched",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t04_suspended refused with KILL_STATE",
+      "status": "PASS",
+      "detail": "KILL_STATE: enforcement state is SUSPENDED_SAFETY: no new curiosity activation while the d"
+    },
+    {
+      "name": "t04_suspended FRM never consulted",
+      "status": "PASS",
+      "detail": "evaluate_round calls=0"
+    },
+    {
+      "name": "t04_suspended nothing dispatched",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t04_banned refused with KILL_STATE",
+      "status": "PASS",
+      "detail": "KILL_STATE: enforcement state is BANNED_6M: no new curiosity activation while the domain i"
+    },
+    {
+      "name": "t04_banned FRM never consulted",
+      "status": "PASS",
+      "detail": "evaluate_round calls=0"
+    },
+    {
+      "name": "t04_banned nothing dispatched",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t04_warning1 approved under WARNING_1",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t04_warning1 grant restricted to 25% of demand",
+      "status": "PASS",
+      "detail": "budget_s=15.0 slots=1"
+    },
+    {
+      "name": "t04_warning1 FRM consulted exactly once",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t04_warning1 inquiry still converges under the cap",
+      "status": "PASS",
+      "detail": "slice=15.00s spent=0.000587s"
+    },
+    {
+      "name": "t04_warning1_noslot refused with NO_SLOT",
+      "status": "PASS",
+      "detail": "NO_SLOT: FRM epoch 1 grants curiosity 15.000s with 0 concurrency slots: no inquiry can run under this grant (t"
+    },
+    {
+      "name": "t04_warning1_noslot nothing dispatched",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t05_missing refused (ATTESTATION_INVALID)",
+      "status": "PASS",
+      "detail": "ATTESTATION_INVALID: no roll-call attestation on record for the curiosity domain: missing roll-call "
+    },
+    {
+      "name": "t05_missed attestation classified MISSED",
+      "status": "PASS",
+      "detail": "MISSED"
+    },
+    {
+      "name": "t05_missed refused (ATTESTATION_INVALID)",
+      "status": "PASS",
+      "detail": "ATTESTATION_INVALID: latest roll-call attestation att_4666641e02334e6d classified MISSED (no respons"
+    },
+    {
+      "name": "t05_invalid attestation classified INVALID",
+      "status": "PASS",
+      "detail": "INVALID"
+    },
+    {
+      "name": "t05_invalid refused (ATTESTATION_INVALID)",
+      "status": "PASS",
+      "detail": "ATTESTATION_INVALID: latest roll-call attestation att_d0919cd157aa4159 classified INVALID (nonce_ech"
+    },
+    {
+      "name": "t05_met admitted under MET",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t06 non-question refused with FIT",
+      "status": "PASS",
+      "detail": "FIT: trigger trg_32cb3366b27a is not question-shaped (no interrogative marker): the questioning loop"
+    },
+    {
+      "name": "t06 unbounded objective refused with FIT",
+      "status": "PASS",
+      "detail": "FIT: bounded_objective is 281 chars (>280): unbounded scope refused"
+    },
+    {
+      "name": "t06 relevance recorded as advisory score",
+      "status": "PASS",
+      "detail": "score=1.0"
+    },
+    {
+      "name": "t06 triage never claims acceptance",
+      "status": "PASS",
+      "detail": "triage=propose_investigation"
+    },
+    {
+      "name": "t07 refused with LOOP_ABSENT",
+      "status": "PASS",
+      "detail": "LOOP_ABSENT: boundary class 'hypothesis_candidate' is owned by scientific_inquiry (Phase 3), which has no real machinery"
+    },
+    {
+      "name": "t07 absence named (scientific_inquiry)",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t07 nothing dispatched",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t08 microscopic grant issued",
+      "status": "PASS",
+      "detail": "budget_s=2e-05 slice=1e-05"
+    },
+    {
+      "name": "t08 terminal BLOCKED",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t08 exact consumption recorded",
+      "status": "PASS",
+      "detail": "spent=0.000362 budget=1e-05 cause=substrate refused: microcontroller_exhausted: pass microcontroller exhausted charging 0.0001s (state=exhausted)"
+    },
+    {
+      "name": "t08 inquiry SUSPENDED",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t08 checkpoint written",
+      "status": "PASS",
+      "detail": "ckpt_d8910c084842"
+    },
+    {
+      "name": "t08 checkpoint index locates the inquiry",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t08 BLOCKED finding reopens fresh",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t08 BLOCKED payload carries boundary + partial work",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t08 BLOCKED routed through the shared ledger",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t08 attribution records the failed attempt",
+      "status": "PASS",
+      "detail": "BLOCKED: resource boundary"
+    },
+    {
+      "name": "t09 inquiry ACTIVE before kill",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t09 kill executed via the executive",
+      "status": "PASS",
+      "detail": "proof kill"
+    },
+    {
+      "name": "t09 kill checkpointed",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t09 kill reason preserved",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t09 killed inquiry does not advance",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t09 kill checkpoint indexed",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t09 resumed in a fresh process",
+      "status": "PASS",
+      "detail": "resumed_from=inq-inq_e8242eda3822-ckpt-1"
+    },
+    {
+      "name": "t09 lineage persists across the process boundary",
+      "status": "PASS",
+      "detail": "lineage_events=6"
+    },
+    {
+      "name": "t09 same inquiry id after resume",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t09 spent_s preserved across resume",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t09 resumed inquiry converges",
+      "status": "PASS",
+      "detail": "terminal=QUESTION_RESOLVED"
+    },
+    {
+      "name": "t09 tampered checkpoint refused",
+      "status": "PASS",
+      "detail": "checkpoint ckpt_cfbab6d2473a: integrity hash mismatch: the row was tampered with after sav"
+    },
+    {
+      "name": "t09 tampered checkpoint never marked verified",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t09 first attempt recorded as failed",
+      "status": "PASS",
+      "detail": "killed: proof kill"
+    },
+    {
+      "name": "t09 second attempt linked to the first",
+      "status": "PASS",
+      "detail": "parent=work_inq_e8242eda3822"
+    },
+    {
+      "name": "t09 second attempt succeeded with evidence",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t09 resumed run re-executed the loop",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t10 spend accumulated while active",
+      "status": "PASS",
+      "detail": "0.0004732990000775317"
+    },
+    {
+      "name": "t10 paused",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t10 spend frozen while paused",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t10 resumed from pause",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t10 converges after resume",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t11 priorities declared",
+      "status": "PASS",
+      "detail": "hi=0 lo=1"
+    },
+    {
+      "name": "t11 mid-epoch grant shared by identity",
+      "status": "PASS",
+      "detail": "same grant object -> per-grant slot accounting"
+    },
+    {
+      "name": "t11 slot occupied by the first inquiry",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t11 contenders both pending while the slot is held",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t11 high-priority admitted first despite dispatch order",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t11 hi terminated while lo still pending",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t11 both inquiries converged",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t12 curiosity spawn ok",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t12 primary cannot retire curiosity MC",
+      "status": "PASS",
+      "detail": "unknown_microcontroller"
+    },
+    {
+      "name": "t12 primary spawn ok",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t12 curiosity cannot retire primary MC",
+      "status": "PASS",
+      "detail": "unknown_microcontroller"
+    },
+    {
+      "name": "t12 curiosity refuses Primary loop names",
+      "status": "PASS",
+      "detail": "loop_unregistered"
+    },
+    {
+      "name": "t12 primary refuses curiosity loop names",
+      "status": "PASS",
+      "detail": "loop_unregistered"
+    },
+    {
+      "name": "t12 executive holds no machinery handle",
+      "status": "PASS",
+      "detail": "held_references={'frm': 'FinancialResourceManager', 'gam': 'GovernanceAttestationMonitor', 'run_controller': 'CuriosityRunController', 'enforcement_state_dir': 'path (pull-only reads)'}"
+    },
+    {
+      "name": "t12 held_references names no substrate",
+      "status": "PASS",
+      "detail": "{'frm': 'FinancialResourceManager', 'gam': 'GovernanceAttestationMonitor', 'run_controller': 'CuriosityRunController', 'enforcement_state_dir': 'path (pull-only reads)'}"
+    },
+    {
+      "name": "t12 executive view has no microcontroller ids",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t12 executive view has no purposes",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t12 executive view carries loop aggregates",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t13_resolved terminal QUESTION_RESOLVED",
+      "status": "PASS",
+      "detail": "score=3 spent=0.000622s"
+    },
+    {
+      "name": "t13_resolved payload precise question present",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t13_insufficient terminal INSUFFICIENT_EVIDENCE",
+      "status": "PASS",
+      "detail": "score=2 spent=0.001323s"
+    },
+    {
+      "name": "t13_insufficient payload precise question present",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t13_boundary terminal BOUNDARY_ESTABLISHED",
+      "status": "PASS",
+      "detail": "score=2 spent=0.001273s"
+    },
+    {
+      "name": "t13_boundary payload precise question present",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "t16 dead provider suspends instead of resolving",
+      "status": "PASS",
+      "detail": "terminal=BLOCKED"
+    },
+    {
+      "name": "t16 cause names the cognition failure",
+      "status": "PASS",
+      "detail": "substrate refused: cognition_failed: extract_unknown via cognize on mc-14a3b11031a1: simulated provi"
+    },
+    {
+      "name": "t16 no reasoning fabricated past the dead inlet",
+      "status": "PASS",
+      "detail": "partial_passes=0"
+    },
+    {
+      "name": "t16 failure externalized as a BLOCKED finding",
+      "status": "PASS",
+      "detail": ""
+    }
+  ]
+}

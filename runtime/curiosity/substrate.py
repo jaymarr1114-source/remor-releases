@@ -1,0 +1,73 @@
+"""Curiosity-side microcontroller substrate.
+
+FLAGGED DEVIATION from the Primary-as-template rule (recorded here and in
+the mission report): the frozen MicrocontrollerSubstrate
+(runtime/core/microcontroller/substrate.py, microcontroller-interface/v1)
+registers only the Primary's six loops, and widening that vocabulary inside
+the frozen module would be a breaking change requiring James's explicit
+decision. This subclass reuses ALL of the base machinery -- spawn/retire
+semantics, depth and concurrency caps, per-loop admission pools, budget
+charging, cascade unwind, fabricated-retire detection, LoopView
+encapsulation, the export/import checkpoint seam -- and overrides exactly
+ONE method, register_loop, to accept the curiosity executive's own
+(provisional, C-6.1) loop names. This is an adapter, not a second
+implementation: the lifecycle bounds are the base class's, unchanged.
+
+C-1.4: the Curiosity Run Controller owns a SEPARATE INSTANCE of this class
+from any Primary-side substrate instance. No path exists for either side to
+spawn, retire, or inspect the other's microcontrollers -- enforced by
+separate instances, verified adversarially (cross-instance spawn/retire
+attempts fail with unknown_parent / unknown_microcontroller).
+"""
+
+from __future__ import annotations
+
+from typing import Tuple
+
+from swarm_engine.core.microcontroller.substrate import (
+    LoopAdmission,
+    MicrocontrollerSubstrate,
+)
+from swarm_engine.curiosity.cognition import PrecisionCognitionProvider
+
+#: The curiosity executive's loop vocabulary (provisional, C-6.1). Phase 2
+#: builds exactly one: questioning. Later phases add loop controllers here
+#: as their convergence boundaries are demonstrated -- never speculatively.
+CURIOSITY_LOOPS: Tuple[str, ...] = ("questioning",)
+CURIOSITY_LOOP_SET = frozenset(CURIOSITY_LOOPS)
+
+LOOP_QUESTIONING = "questioning"
+
+
+class CuriositySubstrate(MicrocontrollerSubstrate):
+    """MicrocontrollerSubstrate with the curiosity loop vocabulary.
+
+    Everything except register_loop is inherited verbatim. The curiosity
+    substrate hosts ONLY curiosity loops: Primary loop names are refused
+    here (they belong to the Primary side's instance).
+
+    The curiosity substrate's registered cognition provider is the
+    deterministic mechanical precision reasoner (D-8: the same
+    cognition utility shape the Primary uses; no separate mind). A
+    different provider can still be installed via set_cognition_provider.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.set_cognition_provider(PrecisionCognitionProvider())
+
+    def register_loop(self, loop: str, *, budget_s: float,
+                      max_concurrent: int = 64) -> None:
+        if loop not in CURIOSITY_LOOP_SET:
+            raise ValueError(
+                f"unknown curiosity loop {loop!r}; expected one of "
+                f"{CURIOSITY_LOOPS} (Primary loop names belong to the "
+                "Primary side's substrate instance)")
+        if budget_s <= 0:
+            raise ValueError("loop budget_s must be > 0")
+        # Same registration body as the base class; the loop admission
+        # pool, concurrency cap, and idle state are the base machinery.
+        self._loops[loop] = LoopAdmission(
+            loop=loop, budget_s=float(budget_s),
+            max_concurrent=int(max_concurrent))
+        self._loop_state.setdefault(loop, "idle")

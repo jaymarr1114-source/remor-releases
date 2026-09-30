@@ -1,0 +1,129 @@
+T01: end-to-end inquiry under a real FRM grant
+  [PASS] t01 activation approved
+  [PASS] t01 real FRM grant -- budget_s=60.0 max_concurrent=2 epoch=1
+  [PASS] t01 grant enforcement RUNNING
+  [PASS] t01 roll-call MET on the decision
+  [PASS] t01 loop entered -- inquiry inq_c682571b77b2: QUESTION_RESOLVED -> evidence ev_94300e0c3c834231
+  [PASS] t01 terminal QUESTION_RESOLVED -- score=3 spent=0.000747s
+  [PASS] t01 precise question composed -- What observable evidence would resolve 'run controller enforce budget', given th
+  [PASS] t01 inquiry id shared end to end
+  [PASS] t01 finding persisted in the fenced store
+  [PASS] t01 finding fields -- loop=questioning terminal=QUESTION_RESOLVED
+  [PASS] t01 provenance complete -- model=curiosity-questioning/v1 (mechanical refinement; no external cognition provider) triage=propose_investigation
+  [PASS] t01 payload file exists -- /home/hatch/workspace/worktrees/curp2-mission/proofs/cur_p2/runs/t01_end_to_end/payloads/ev_94300e0c3c834231.json
+  [PASS] t01 payload carries the precise question + passes
+  [PASS] t01 reasoning travelled the cognition inlet -- 3 node summaries carry [cognize:<mc>]
+  [PASS] t01 terminal routed through the shared ledger -- routes=1 consumer=curiosity_evidence_store
+  [PASS] t01 attribution result recorded -- outcome=success
+  [PASS] t01 attribution admission retained (not accepted) -- verdict=retained
+  [PASS] t01 outcome view carries no microcontroller ids -- view keys=['loop', 'state', 'active_count', 'total_spawned', 'total_retired', 'total_refused']
+T02: finding survives fresh-process reopen
+  [PASS] t02 finding reopens in a fresh process
+  [PASS] t02 reopened fields intact -- triage=propose_investigation
+  [PASS] t02 reopened payload intact
+  [PASS] t02 ledger route reopens fresh
+T03: no-budget inquiry never starts
+  [PASS] t03 activation refused with NO_BUDGET -- NO_BUDGET: FRM epoch 1 grants curiosity 0.000s: an inquiry with no budget does not start
+  [PASS] t03 nothing dispatched
+  [PASS] t03 loop never registered on the substrate
+T04: enforcement kill states vs WARNING_1 passthrough
+  [PASS] t04_hard_shutdown refused with KILL_STATE -- KILL_STATE: enforcement state is HARD_SHUTDOWN_RESOURCE: no new curiosity activation while
+  [PASS] t04_hard_shutdown FRM never consulted -- evaluate_round calls=0
+  [PASS] t04_hard_shutdown nothing dispatched
+  [PASS] t04_suspended refused with KILL_STATE -- KILL_STATE: enforcement state is SUSPENDED_SAFETY: no new curiosity activation while the d
+  [PASS] t04_suspended FRM never consulted -- evaluate_round calls=0
+  [PASS] t04_suspended nothing dispatched
+  [PASS] t04_banned refused with KILL_STATE -- KILL_STATE: enforcement state is BANNED_6M: no new curiosity activation while the domain i
+  [PASS] t04_banned FRM never consulted -- evaluate_round calls=0
+  [PASS] t04_banned nothing dispatched
+  [PASS] t04_warning1 approved under WARNING_1
+  [PASS] t04_warning1 grant restricted to 25% of demand -- budget_s=15.0 slots=1
+  [PASS] t04_warning1 FRM consulted exactly once
+  [PASS] t04_warning1 inquiry still converges under the cap -- slice=15.00s spent=0.000584s
+  [PASS] t04_warning1_noslot refused with NO_SLOT -- NO_SLOT: FRM epoch 1 grants curiosity 15.000s with 0 concurrency slots: no inquiry can run under this grant (t
+  [PASS] t04_warning1_noslot nothing dispatched
+T05: missing or non-MET roll-call prevents activation
+  [PASS] t05_missing refused (ATTESTATION_INVALID) -- ATTESTATION_INVALID: no roll-call attestation on record for the curiosity domain: missing roll-call 
+  [PASS] t05_missed attestation classified MISSED -- MISSED
+  [PASS] t05_missed refused (ATTESTATION_INVALID) -- ATTESTATION_INVALID: latest roll-call attestation att_5000ba43a6704e0b classified MISSED (no respons
+  [PASS] t05_invalid attestation classified INVALID -- INVALID
+  [PASS] t05_invalid refused (ATTESTATION_INVALID) -- ATTESTATION_INVALID: latest roll-call attestation att_c48be5d928ec4b46 classified INVALID (nonce_ech
+  [PASS] t05_met admitted under MET
+T06: fit refusal; relevance advisory only (D-4)
+  [PASS] t06 non-question refused with FIT -- FIT: trigger trg_874fa255e538 is not question-shaped (no interrogative marker): the questioning loop
+  [PASS] t06 unbounded objective refused with FIT -- FIT: bounded_objective is 281 chars (>280): unbounded scope refused
+  [PASS] t06 relevance recorded as advisory score -- score=1.0
+  [PASS] t06 triage never claims acceptance -- triage=propose_investigation
+T07: future-loop boundary named absent
+  [PASS] t07 refused with LOOP_ABSENT -- LOOP_ABSENT: boundary class 'hypothesis_candidate' is owned by scientific_inquiry (Phase 3), which has no real machinery
+  [PASS] t07 absence named (scientific_inquiry)
+  [PASS] t07 nothing dispatched
+T08: forced budget breach
+  [PASS] t08 microscopic grant issued -- budget_s=2e-05 slice=1e-05
+  [PASS] t08 terminal BLOCKED
+  [PASS] t08 exact consumption recorded -- spent=0.000352 budget=1e-05 cause=substrate refused: microcontroller_exhausted: pass microcontroller exhausted charging 0.0001s (state=exhausted)
+  [PASS] t08 inquiry SUSPENDED
+  [PASS] t08 checkpoint written -- ckpt_2f7fe813128f
+  [PASS] t08 checkpoint index locates the inquiry
+  [PASS] t08 BLOCKED finding reopens fresh
+  [PASS] t08 BLOCKED payload carries boundary + partial work
+  [PASS] t08 BLOCKED routed through the shared ledger
+  [PASS] t08 attribution records the failed attempt -- BLOCKED: resource boundary
+T09: kill then fresh-process resume
+  [PASS] t09 inquiry ACTIVE before kill
+  [PASS] t09 kill executed via the executive -- proof kill
+  [PASS] t09 kill checkpointed
+  [PASS] t09 kill reason preserved
+  [PASS] t09 killed inquiry does not advance
+  [PASS] t09 kill checkpoint indexed
+  [PASS] t09 resumed in a fresh process -- resumed_from=inq-inq_902386be919f-ckpt-1
+  [PASS] t09 lineage persists across the process boundary -- lineage_events=6
+  [PASS] t09 same inquiry id after resume
+  [PASS] t09 spent_s preserved across resume
+  [PASS] t09 resumed inquiry converges -- terminal=QUESTION_RESOLVED
+  [PASS] t09 tampered checkpoint refused -- checkpoint ckpt_397842c6f5b0: integrity hash mismatch: the row was tampered with after sav
+  [PASS] t09 tampered checkpoint never marked verified
+  [PASS] t09 first attempt recorded as failed -- killed: proof kill
+  [PASS] t09 second attempt linked to the first -- parent=work_inq_902386be919f
+  [PASS] t09 second attempt succeeded with evidence
+  [PASS] t09 resumed run re-executed the loop
+T10: pause / resume in process
+  [PASS] t10 spend accumulated while active -- 0.0004995890012651216
+  [PASS] t10 paused
+  [PASS] t10 spend frozen while paused
+  [PASS] t10 resumed from pause
+  [PASS] t10 converges after resume
+T11: priority admission under one concurrency slot
+  [PASS] t11 priorities declared -- hi=0 lo=1
+  [PASS] t11 mid-epoch grant shared by identity -- same grant object -> per-grant slot accounting
+  [PASS] t11 slot occupied by the first inquiry
+  [PASS] t11 contenders both pending while the slot is held
+  [PASS] t11 high-priority admitted first despite dispatch order
+  [PASS] t11 hi terminated while lo still pending
+  [PASS] t11 both inquiries converged
+T12: substrate isolation and aggregate-only executive state
+  [PASS] t12 curiosity spawn ok
+  [PASS] t12 primary cannot retire curiosity MC -- unknown_microcontroller
+  [PASS] t12 primary spawn ok
+  [PASS] t12 curiosity cannot retire primary MC -- unknown_microcontroller
+  [PASS] t12 curiosity refuses Primary loop names -- loop_unregistered
+  [PASS] t12 primary refuses curiosity loop names -- loop_unregistered
+  [PASS] t12 executive holds no machinery handle -- held_references={'frm': 'FinancialResourceManager', 'gam': 'GovernanceAttestationMonitor', 'run_controller': 'CuriosityRunController', 'enforcement_state_dir': 'path (pull-only reads)'}
+  [PASS] t12 held_references names no substrate -- {'frm': 'FinancialResourceManager', 'gam': 'GovernanceAttestationMonitor', 'run_controller': 'CuriosityRunController', 'enforcement_state_dir': 'path (pull-only reads)'}
+  [PASS] t12 executive view has no microcontroller ids
+  [PASS] t12 executive view has no purposes
+  [PASS] t12 executive view carries loop aggregates
+T13: three terminal classes
+  [PASS] t13_resolved terminal QUESTION_RESOLVED -- score=3 spent=0.000673s
+  [PASS] t13_resolved payload precise question present
+  [PASS] t13_insufficient terminal INSUFFICIENT_EVIDENCE -- score=2 spent=0.001305s
+  [PASS] t13_insufficient payload precise question present
+  [PASS] t13_boundary terminal BOUNDARY_ESTABLISHED -- score=2 spent=0.001474s
+  [PASS] t13_boundary payload precise question present
+T16: cognition fail-closed contrast
+  [PASS] t16 dead provider suspends instead of resolving -- terminal=BLOCKED
+  [PASS] t16 cause names the cognition failure -- substrate refused: cognition_failed: extract_unknown via cognize on mc-e39a0f70e417: simulated provi
+  [PASS] t16 no reasoning fabricated past the dead inlet -- partial_passes=0
+  [PASS] t16 failure externalized as a BLOCKED finding
+
+113/113 checks passed in 22.51s

@@ -1,0 +1,101 @@
+{
+  "evidence_id": "ev_5a670415977b46c5",
+  "inquiry_id": "inq_d0458721ef4f",
+  "trigger_id": "trg_4e21ac926d8b",
+  "loop": "questioning",
+  "bounded_objective": "cur-p2 proof",
+  "origin": "PRIMARY_REQUESTED",
+  "terminal_state": "QUESTION_RESOLVED",
+  "precise_question": "What observable evidence would resolve 'run controller enforce budget', given that \"budget_slice_s\": self.budget_slice_s, -- and what observation would falsify the current best account of 'run controller enforce budget'?",
+  "precision_score": 3,
+  "passes": [
+    {
+      "pass": 0,
+      "score": 3,
+      "checks": [
+        "names the unknown ('run controller enforce budget'): True",
+        "names an observable evidence path: True",
+        "names a falsifier/decision criterion: True"
+      ],
+      "precise_question": "What observable evidence would resolve 'run controller enforce budget', given that \"budget_slice_s\": self.budget_slice_s, -- and what observation would falsify the current best account of 'run controller enforce budget'?",
+      "probes": [
+        {
+          "terms": [
+            "controller",
+            "enforce",
+            "budget",
+            "slice"
+          ],
+          "hits": [
+            {
+              "line": "\"budget_slice_s\": self.budget_slice_s,",
+              "overlap": 2
+            },
+            {
+              "line": "slice_s = grant.budget_s / max(1, grant.max_concurrent)",
+              "overlap": 2
+            },
+            {
+              "line": "epoch_id=decision.epoch_id or 0, budget_slice_s=slice_s,",
+              "overlap": 2
+            }
+          ]
+        }
+      ],
+      "qualifying_hits": 3,
+      "node_summaries": {
+        "extract_unknown": "unknown='run controller enforce budget' terms=['controller', 'enforce', 'budget', 'slice'] [cognize:mc-5f3e48f3f6e0]",
+        "probe_observable": "3 passage(s), 3 qualifying, for ['controller', 'enforce', 'budget', 'slice']",
+        "probe_scope": "scopes=[]",
+        "compose": "What observable evidence would resolve 'run controller enforce budget', given th [cognize:mc-5f3e48f3f6e0]",
+        "score": "precision 3/3 [cognize:mc-5f3e48f3f6e0]"
+      },
+      "blocked": null,
+      "region_summary": {
+        "region_id": "gr-000001",
+        "graph_id": "curiosity/questioning/refinement/v1",
+        "objective": "refine the imprecise question into a precise checkable question (pass 0)",
+        "nodes_total": 5,
+        "operated": 5,
+        "succeeded": 5,
+        "failed": 0,
+        "unreachable": 0,
+        "bound_hit": false,
+        "values": {
+          "extract_unknown": {
+            "node": "extract_unknown",
+            "summary": "unknown='run controller enforce budget' terms=['controller', 'enforce', 'budget', 'slice'] [cognize:mc-5f3e48f3f6e0]"
+          },
+          "probe_observable": {
+            "node": "probe_observable",
+            "summary": "3 passage(s), 3 qualifying, for ['controller', 'enforce', 'budget', 'slice']"
+          },
+          "probe_scope": {
+            "node": "probe_scope",
+            "summary": "scopes=[]"
+          },
+          "compose": {
+            "node": "compose",
+            "summary": "What observable evidence would resolve 'run controller enforce budget', given th [cognize:mc-5f3e48f3f6e0]"
+          },
+          "score": {
+            "node": "score",
+            "summary": "precision 3/3 [cognize:mc-5f3e48f3f6e0]"
+          }
+        }
+      }
+    }
+  ],
+  "relevance": {
+    "score": 1.0,
+    "d4_note": "relevance threshold 0.25 is provisional per D-4, never a universal constant; this score is ADVISORY ONLY. Primary Acceptance is final (C-3.4); curiosity never accepts its own findings and true-but-imprecise results stay fenced."
+  },
+  "triage": "propose_investigation",
+  "triage_note": "proposed to Primary Acceptance; not accepted (curiosity never accepts its own findings)",
+  "resource": {
+    "spent_s": 0.00063,
+    "slice_s": 30.0,
+    "grant_epoch": 1
+  },
+  "produced_at": 1790772588.6822615
+}
