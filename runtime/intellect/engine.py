@@ -53,6 +53,18 @@ def _stable_id(prefix: str, *parts: str) -> str:
     return f"{prefix}_{digest}"
 
 
+# Closed set of experiment design kinds _execute_experiment can run.
+# A design whose kind is not in this set is refused, never executed.
+# External reasoners must constrain design_experiment output to this set;
+# it is the schema against which their output is validated.
+KNOWN_EXPERIMENT_KINDS = frozenset({
+    "replay_validation_comparison",
+    "expressiveness_check",
+    "pattern_robustness_check",
+    "epistemic_reassessment",
+})
+
+
 @dataclass
 class CycleReport:
     question_id: Optional[str]
@@ -102,6 +114,7 @@ class IntellectualEngine:
         observations: List[Observation] = []
         observations.extend(self._observe_recurring_exhaustion())
         observations.extend(self._observe_strong_concepts())
+        observations.extend(self._observe_reasoner_questions())
         # Writes go through the unified-memory facade: the builder-produced
         # observations keep their ids, content, source, and raw payload;
         # the facade adds the canonical provenance block.
@@ -116,6 +129,35 @@ class IntellectualEngine:
                 observation_id=obs.observation_id,
             )
         return observations
+
+    def _observe_reasoner_questions(self) -> List[Observation]:
+        """Ask the external reasoner for questions the fixed observers cannot open.
+
+        No-op while NoExternalReasoner is installed (it returns []). Proposed
+        questions enter the agenda like any other question — the reasoner only
+        proposes; prioritization and verification stay with the engine.
+        """
+        proposed = self.reasoner.propose_questions(
+            {"open_questions": len(self.agenda.open_questions())})
+        out: List[Observation] = []
+        for text in proposed or []:
+            if not isinstance(text, str) or not text.strip():
+                continue
+            question_id = _stable_id("q_reasoner", text.strip())
+            if self.agenda.get(question_id) is not None:
+                continue
+            question = Question(
+                question_id=question_id, text=text.strip(),
+                origin="external_reasoner",
+                provenance={"generated_by": "external_reasoner"})
+            question.log("raised from external_reasoner.propose_questions")
+            self.agenda.add(question)
+            out.append(Observation(
+                observation_id=_stable_id("obs_reasoner_q", question_id),
+                content=f"external reasoner proposed question: {text.strip()}",
+                source="external_reasoner",
+                raw={"question_id": question_id}))
+        return out
 
     def _observe_rollbacks(self) -> List[Observation]:
         from swarm_engine.improvement.substrate import ImprovementState
@@ -482,6 +524,8 @@ class IntellectualEngine:
 
     def _execute_experiment(self, experiment: Experiment) -> Dict[str, Any]:
         kind = experiment.design.get("kind")
+        if kind not in KNOWN_EXPERIMENT_KINDS:
+            return {"error": f"unknown experiment kind {kind!r}; not executed"}
         if kind == "replay_validation_comparison":
             return self._run_rollback_experiment(experiment)
         if kind == "expressiveness_check":

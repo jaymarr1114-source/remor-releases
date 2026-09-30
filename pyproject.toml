@@ -1,0 +1,26 @@
+[project]
+name = "remor-engine"
+version = "10.0.0"
+description = "REMOR self-governing engine (swarm_engine, SWarm V6) — stdlib-only core"
+requires-python = ">=3.10"
+dependencies = []
+# The core ships on the standard library only. Everything that needs a
+# third-party package lives behind an extra below, never in dependencies.
+
+[project.optional-dependencies]
+# A reasoning model behind an OpenAI-compatible endpoint. The adapter speaks
+# plain HTTP via urllib (stdlib) — this extra exists so install tooling has a
+# named slot for it; it intentionally pulls in no new packages.
+brain-remote = []
+# A locally-run reasoning model. Intentionally empty until a model lands
+# through the governed acquisition path (trusted index, sha256-verified,
+# sandbox-scoped). Do not hand-add a wheel here to "make it work".
+brain-local = []
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["runtime*", "pylib*"]
