@@ -145,8 +145,17 @@ class AcceptanceLoopTest(unittest.TestCase):
         self.assertTrue(auth2.passed, auth2.as_dict())
         self.assertTrue(auth2.counterfactuals["diverges"])
 
-        rec = self.loop.present("demo-run-1", GOAL, attempt2, auth2)
+        # PLOOP-12: re-presenting a rejected run with present() is refused
+        # loudly — it would wipe the evidence chain via INSERT OR REPLACE.
+        with self.assertRaises(ValueError):
+            self.loop.present("demo-run-1", GOAL, attempt2, auth2)
+        rec = self.loop.present_retry("demo-run-1", attempt2, auth2)
         self.assertEqual(rec.state, AcceptanceState.CANDIDATE)
+        # PLOOP-12: the evidence chain survives the retry — near-miss ids
+        # and round count carry forward instead of being wiped by a
+        # duplicate present (which is now refused loudly).
+        self.assertEqual(rec.near_miss_ids, [nm.near_miss_id])
+        self.assertEqual(rec.rounds, 2)
 
         # SIMULATED USER VERDICT (satisfied): only this closes the loop.
         rec = self.loop.record_verdict("demo-run-1", satisfied=True)
