@@ -309,16 +309,27 @@ public class CaptureService extends Service {
         // A second grant replaces the first: tear down the old
         // pipeline before building the new one (no leak).
         teardownPipeline();
-        ImageReader reader = ImageReader.newInstance(
-                displayWidth, displayHeight, PixelFormat.RGBA_8888,
-                MAX_IMAGES);
-        VirtualDisplay vd = proj.createVirtualDisplay(
-                VD_NAME, displayWidth, displayHeight, displayDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.getSurface(), null, workerHandler);
+        // SDK 36 (Android 16) enforces what older releases only
+        // recommended: registerCallback() MUST precede
+        // createVirtualDisplay(), or it throws IllegalStateException
+        // ("Must register a callback before starting capture").
+        // Register first, so a revoked/stopped projection tears its
+        // own pipeline down instead of leaking it.
         proj.registerCallback(new MediaProjection.Callback() {
+            // The pipeline this callback belongs to. A second grant
+            // replaces the pipeline while the old projection's onStop
+            // may still be queued on the worker thread -- that stale
+            // callback must not tear down (or blank the state of)
+            // the new pipeline.
+            private final MediaProjection mine = proj;
+
             @Override
             public void onStop() {
+                synchronized (LOCK) {
+                    if (projection != mine) {
+                        return; // stale callback, not our pipeline
+                    }
+                }
                 // The user revoked the projection (or the system
                 // stopped it): drop everything so the next capture
                 // answers CAPTURE_UNAVAILABLE instead of serving
@@ -328,6 +339,27 @@ public class CaptureService extends Service {
                 teardown();
             }
         }, workerHandler);
+        ImageReader reader = ImageReader.newInstance(
+                displayWidth, displayHeight, PixelFormat.RGBA_8888,
+                MAX_IMAGES);
+        VirtualDisplay vd;
+        try {
+            vd = proj.createVirtualDisplay(
+                    VD_NAME, displayWidth, displayHeight, displayDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    reader.getSurface(), null, workerHandler);
+        } catch (Exception e) {
+            // Fail-closed AND recorded: release what we opened, stop
+            // the stillborn projection (its onStop is stale by the
+            // instance check above, so the FAILED state keeps showing
+            // its reason), drop foreground status.
+            recordCaptureFailure(
+                    "CaptureService.createVirtualDisplay", e);
+            reader.close();
+            proj.stop();
+            stopForeground(true);
+            return;
+        }
         synchronized (LOCK) {
             projection = proj;
             virtualDisplay = vd;
