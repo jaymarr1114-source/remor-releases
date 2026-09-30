@@ -12,12 +12,14 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Base64;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.WindowManager;
@@ -29,6 +31,7 @@ import android.widget.TextView;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -98,6 +101,7 @@ public class DispatchAccessibilityService extends AccessibilityService {
     // ------------------------------------------------------------------
     @Override
     public void onServiceConnected() {
+        CrashDiagnostics.install(this);
         mainHandler = new Handler(Looper.getMainLooper());
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         bridge = new BridgeServer(this, BRIDGE_PORT);
@@ -313,21 +317,100 @@ public class DispatchAccessibilityService extends AccessibilityService {
     // ------------------------------------------------------------------
 
     /**
-     * Serve one capture_frame bridge command.
+     * Serve one capture_frame bridge command via the app's
+     * MediaProjection flow ({@link CaptureService}).
      *
-     * FAIL-CLOSED STUB: the real implementation is the app's
-     * MediaProjection flow (see BridgeProtocol.md: request the
-     * projection via MediaProjectionManager.createScreenCaptureIntent,
-     * render into an ImageReader surface, acquireLatestImage per call,
-     * intersect clip, downscale to max_w/max_h, PNG, base64). Until
-     * that flow exists and the user has granted the projection, this
-     * throws CAPTURE_UNAVAILABLE -- the bridge replies ok:false and
-     * the Python side raises, never a stale or placeholder image.
+     * <p>Fail-closed, per BridgeProtocol.md v1:
+     * <ul>
+     *   <li>No media-projection grant → {@code CAPTURE_UNAVAILABLE}
+     *       (never a stale or placeholder image).
+     *   <li>The user kill latch gates capture like every actuator
+     *       command (enforced by {@code BridgeServer} before this
+     *       runs): a latched kill stops the stream even in the
+     *       lost-event case.
+     *   <li>The requested {@code clip} is intersected with the real
+     *       display at capture; {@code max_w}/{@code max_h} (0 = none)
+     *       bound the returned size, downscaling preserving aspect.
+     *   <li>No frame is persisted: the Bitmap is recycled before
+     *       return, the Image is closed on acquire.
+     *   <li>{@code synthesized} is false: these are real captures.
+     * </ul>
      */
     JSONObject doCaptureFrame(JSONObject p) throws Exception {
-        throw new Exception("CAPTURE_UNAVAILABLE: media projection"
-                + " permission not granted (MediaProjection capture flow"
-                + " not yet implemented in the target app)");
+        CaptureService.Frame frame = CaptureService.acquireLatestFrame();
+        if (frame == null) {
+            if (CaptureService.hasProjection()) {
+                throw new Exception("CAPTURE_FAILED: projection held but"
+                        + " the pipeline produced no frame");
+            }
+            throw new Exception("CAPTURE_UNAVAILABLE: media projection"
+                    + " permission not granted (grant screen capture in"
+                    + " the target app's setup screen)");
+        }
+        Bitmap full = frame.bitmap;
+        try {
+            // Intersect the requested clip with the real display.
+            int cx = 0, cy = 0, cw = full.getWidth(), ch = full.getHeight();
+            JSONObject clip = p.optJSONObject("clip");
+            if (clip != null) {
+                int x = clip.optInt("x", 0);
+                int y = clip.optInt("y", 0);
+                int w = clip.optInt("w", cw);
+                int h = clip.optInt("h", ch);
+                int x2 = Math.min(x + w, cw);
+                int y2 = Math.min(y + h, ch);
+                cx = Math.max(x, 0);
+                cy = Math.max(y, 0);
+                cw = Math.max(x2 - cx, 0);
+                ch = Math.max(y2 - cy, 0);
+                if (cw <= 0 || ch <= 0) {
+                    throw new Exception(
+                            "clip lies outside the display");
+                }
+            }
+            Bitmap cropped = (cx == 0 && cy == 0
+                    && cw == full.getWidth() && ch == full.getHeight())
+                    ? full
+                    : Bitmap.createBitmap(full, cx, cy, cw, ch);
+            // Downscale only, preserving aspect.
+            int maxW = p.optInt("max_w", 0);
+            int maxH = p.optInt("max_h", 0);
+            double scale = 1.0;
+            if (maxW > 0) {
+                scale = Math.min(scale, (double) maxW / cw);
+            }
+            if (maxH > 0) {
+                scale = Math.min(scale, (double) maxH / ch);
+            }
+            Bitmap out = cropped;
+            if (scale < 1.0) {
+                int sw = Math.max(1, (int) (cw * scale));
+                int sh = Math.max(1, (int) (ch * scale));
+                out = Bitmap.createScaledBitmap(cropped, sw, sh, true);
+            }
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            if (!out.compress(Bitmap.CompressFormat.PNG, 100, bos)) {
+                throw new Exception("PNG encode failed");
+            }
+            String b64 = Base64.encodeToString(
+                    bos.toByteArray(), Base64.NO_WRAP);
+            JSONObject r = new JSONObject();
+            r.put("width", out.getWidth());
+            r.put("height", out.getHeight());
+            r.put("format", "png");
+            r.put("data_b64", b64);
+            r.put("ts", frame.tsSeconds);
+            r.put("synthesized", false);
+            if (out != cropped) {
+                out.recycle();
+            }
+            if (cropped != full) {
+                cropped.recycle();
+            }
+            return r;
+        } finally {
+            full.recycle();
+        }
     }
 
     // ------------------------------------------------------------------

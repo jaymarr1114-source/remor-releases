@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Kill-action notification (API 33+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Screen capture: MediaProjection must be held by a foreground
+         service with the mediaProjection type on API 29+ -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <application
         android:label="REMOR Dispatch Target"
@@ -30,6 +35,15 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- Owns the MediaProjection capture pipeline for the session
+             stream. Holds no session state and performs no
+             authorization; the kill latch is enforced in BridgeServer
+             before capture_frame is dispatched. -->
+        <service
+            android:name=".CaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
     </application>
 </manifest>
