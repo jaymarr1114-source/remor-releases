@@ -92,6 +92,13 @@ class CognitionResult:
     ok: bool
     text: str = ""
     error: str = ""
+    # Governance provenance (BRAIN-SCAFFOLD-1, additive): set by the
+    # governed provider. "native:<mechanism>" or "borrowed:<model>@<rev>".
+    provenance: str = ""
+    # The named native refusal that justified a borrow ("", if none).
+    native_refusal: str = ""
+    # Telemetry correlation id for proposal-survival tracking.
+    result_id: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)

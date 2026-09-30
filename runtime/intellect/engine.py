@@ -46,6 +46,7 @@ from swarm_engine.intellect.capability_growth import CapabilityGrowthConnector
 from swarm_engine.intellect.experience import ExperienceHarvester, ExperienceLog
 from swarm_engine.intellect.patterns import IntellectualPattern, PatternMiner, PatternStore
 from swarm_engine.intellect.reasoner import EvidenceArbiter, ExternalReasoner, NoExternalReasoner
+from swarm_engine.intellect.governed_reasoner import GovernedExternalReasoner
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -87,12 +88,24 @@ class CycleReport:
 
 class IntellectualEngine:
     def __init__(self, swarm_engine, db_path: str = "swarm_engine.db",
-                external_reasoner: Optional[ExternalReasoner] = None):
+                 external_reasoner: Optional[ExternalReasoner] = None,
+                 cognition_substrate=None):
         self.engine = swarm_engine
         self.agenda = IntellectualAgenda(db_path=db_path)
         self.epistemic = EpistemicStore(db_path=db_path)
         self.arbiter = EvidenceArbiter()
-        self.reasoner = external_reasoner or NoExternalReasoner()
+        # U-5 (BRAIN-SCAFFOLD-1): any provided reasoner is wrapped in the
+        # governed facade -- it can no longer be called directly by the
+        # engine (no private FRM bypass). The facade fails closed to the
+        # empty default unless the hosting layer supplies a substrate,
+        # an mc_id, and an FrmGrant in context; cognition_substrate is
+        # the wiring seam for executive hosting (SEAM-WIRE-1's territory).
+        raw = external_reasoner or NoExternalReasoner()
+        if isinstance(raw, (NoExternalReasoner, GovernedExternalReasoner)):
+            self.reasoner = raw
+        else:
+            self.reasoner = GovernedExternalReasoner(
+                raw, substrate=cognition_substrate)
         # Pattern discovery: general, not category-specific — see patterns.py.
         self.harvester = ExperienceHarvester(swarm_engine)
         self.experience_log = ExperienceLog(db_path=db_path)

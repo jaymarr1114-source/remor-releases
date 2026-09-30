@@ -28,6 +28,9 @@ from swarm_engine.core.microcontroller.substrate import (
     LoopAdmission,
     MicrocontrollerSubstrate,
 )
+from swarm_engine.core.microcontroller.granted_cognition import (
+    GrantedCognitionProvider,
+)
 from swarm_engine.curiosity.cognition import PrecisionCognitionProvider
 
 #: The curiosity executive's loop vocabulary (provisional, C-6.1). Phase 2
@@ -46,15 +49,20 @@ class CuriositySubstrate(MicrocontrollerSubstrate):
     substrate hosts ONLY curiosity loops: Primary loop names are refused
     here (they belong to the Primary side's instance).
 
-    The curiosity substrate's registered cognition provider is the
-    deterministic mechanical precision reasoner (D-8: the same
-    cognition utility shape the Primary uses; no separate mind). A
-    different provider can still be installed via set_cognition_provider.
+    The curiosity substrate's cognition inlet is the governed provider
+    (BRAIN-SCAFFOLD-1): GrantedCognitionProvider with the deterministic
+    mechanical precision reasoner as its native tier (D-8: the same
+    cognition utility shape the Primary uses; no separate mind).
+    Existing OP_* cognition calls take the native path -- no grant
+    needed, no FRM charge -- so behavior is unchanged; the borrow path
+    activates only on a named native refusal with an FrmGrant.
+    A different provider can still be installed via set_cognition_provider.
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.set_cognition_provider(PrecisionCognitionProvider())
+        self.set_cognition_provider(GrantedCognitionProvider(
+            substrate=self, native=PrecisionCognitionProvider()))
 
     def register_loop(self, loop: str, *, budget_s: float,
                       max_concurrent: int = 64) -> None:
