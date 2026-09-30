@@ -51,6 +51,64 @@ public final class CrashDiagnostics {
         });
     }
 
+    /**
+     * Record a caught (non-crash) failure with the same device context
+     * as a crash trace. Fail-closed paths must never be fail-silent:
+     * a swallowed exception is evidence the next diagnosis needs.
+     * Never throws; diagnostics must never break the app.
+     */
+    public static void recordFailure(Context ctx, String where,
+                                     Throwable t) {
+        try {
+            Context appCtx = ctx.getApplicationContext();
+            File dir = new File(appCtx.getFilesDir(), DIR);
+            if (!dir.mkdirs() && !dir.isDirectory()) {
+                return;
+            }
+            String ts = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+                    .format(new Date());
+            File f = new File(dir, "failure-" + ts + ".txt");
+            try (PrintWriter pw = new PrintWriter(new FileWriter(f))) {
+                pw.println("package: " + appCtx.getPackageName());
+                pw.println("kind: captured failure (not a crash)");
+                pw.println("where: " + where);
+                pw.println("time: " + ts);
+                pw.println("thread: "
+                        + Thread.currentThread().getName());
+                pw.println("android: " + Build.VERSION.RELEASE
+                        + " (sdk " + Build.VERSION.SDK_INT + ")");
+                pw.println("device: " + Build.MANUFACTURER + " "
+                        + Build.MODEL);
+                pw.println("--- stack ---");
+                t.printStackTrace(pw);
+                Throwable cause = t.getCause();
+                while (cause != null) {
+                    pw.println("--- caused by ---");
+                    cause.printStackTrace(pw);
+                    cause = cause.getCause();
+                }
+            }
+            pruneOld(dir);
+        } catch (Exception ignored) {
+            // Diagnostics must never mask the real failure.
+        }
+    }
+
+    /** Keep the diagnostics dir bounded: newest 12 files survive. */
+    private static void pruneOld(File dir) {
+        File[] files = dir.listFiles((d, name) ->
+                (name.startsWith("crash-") || name.startsWith("failure-"))
+                        && name.endsWith(".txt"));
+        if (files == null || files.length <= 12) {
+            return;
+        }
+        java.util.Arrays.sort(files, (a, b) -> Long.compare(
+                a.lastModified(), b.lastModified()));
+        for (int i = 0; i < files.length - 12; i++) {
+            files[i].delete();
+        }
+    }
+
     private static void writeTrace(Context ctx, Thread t, Throwable e)
             throws Exception {
         File dir = new File(ctx.getFilesDir(), DIR);
@@ -113,7 +171,8 @@ public final class CrashDiagnostics {
     private static File latestFile(Context ctx) {
         File dir = new File(ctx.getFilesDir(), DIR);
         File[] files = dir.listFiles((d, name) ->
-                name.startsWith("crash-") && name.endsWith(".txt"));
+                (name.startsWith("crash-") || name.startsWith("failure-"))
+                        && name.endsWith(".txt"));
         if (files == null || files.length == 0) {
             return null;
         }

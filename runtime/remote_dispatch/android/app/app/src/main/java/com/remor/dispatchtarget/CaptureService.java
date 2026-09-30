@@ -70,6 +70,79 @@ public class CaptureService extends Service {
     private static final Object LOCK = new Object();
     private static CaptureService instance = null;
 
+    /**
+     * Capture state machine. The setup UI must show the terminal
+     * state, never a transient sample: refreshStatus() runs before
+     * the worker thread finishes, so a bare hasProjection() check
+     * always reports MISSING on the grant path even on success.
+     */
+    public enum CaptureState {
+        IDLE,      // no grant held
+        STARTING,  // grant received, worker building the pipeline
+        ACTIVE,    // live projection held
+        FAILED     // setup failed; detail carries the reason
+    }
+
+    /** Immutable snapshot of the capture state for the UI. */
+    public static final class StateSnapshot {
+        public final CaptureState state;
+        public final String detail; // failure reason when FAILED
+
+        StateSnapshot(CaptureState state, String detail) {
+            this.state = state;
+            this.detail = detail;
+        }
+    }
+
+    /** Same-process listener; MainActivity refreshes on change. */
+    public interface StateListener {
+        void onCaptureStateChanged();
+    }
+
+    private static CaptureState captureState = CaptureState.IDLE;
+    private static String failureDetail = "";
+    private static StateListener stateListener = null;
+
+    /** Terminal capture state for the setup UI. */
+    public static StateSnapshot captureState() {
+        synchronized (LOCK) {
+            return new StateSnapshot(captureState, failureDetail);
+        }
+    }
+
+    public static void setStateListener(StateListener l) {
+        synchronized (LOCK) {
+            stateListener = l;
+        }
+    }
+
+    private static void setState(CaptureState s, String detail) {
+        StateListener l;
+        synchronized (LOCK) {
+            captureState = s;
+            failureDetail = detail == null ? "" : detail;
+            l = stateListener;
+        }
+        if (l != null) {
+            l.onCaptureStateChanged();
+        }
+    }
+
+    /** One-line reason for the setup UI; never multiline. */
+    private static String shortReason(Throwable t) {
+        String msg = t.getClass().getSimpleName();
+        if (t.getMessage() != null && !t.getMessage().isEmpty()) {
+            msg += ": " + t.getMessage();
+        }
+        msg = msg.replace('\n', ' ').replace('\r', ' ');
+        return msg.length() > 110 ? msg.substring(0, 110) + "…" : msg;
+    }
+
+    private void recordCaptureFailure(String where, Throwable t) {
+        CrashDiagnostics.recordFailure(this, where, t);
+        setState(CaptureState.FAILED, shortReason(t));
+    }
+
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private ImageReader imageReader;
@@ -156,8 +229,13 @@ public class CaptureService extends Service {
             synchronized (LOCK) {
                 h = workerHandler;
             }
+            setState(CaptureState.STARTING, "");
             if (h != null) {
                 h.post(() -> startCapture(rc, d));
+            } else {
+                recordCaptureFailure("CaptureService.onStartCommand",
+                        new IllegalStateException(
+                                "worker thread missing after ensure"));
             }
         }
         return START_STICKY;
@@ -166,6 +244,7 @@ public class CaptureService extends Service {
     @Override
     public void onDestroy() {
         teardown();
+        setState(CaptureState.IDLE, "");
         synchronized (LOCK) {
             if (instance == this) {
                 instance = null;
@@ -185,20 +264,33 @@ public class CaptureService extends Service {
         try {
             startCaptureInner(resultCode, data);
         } catch (Throwable t) {
-            // Fail-closed: never let a capture-setup failure crash
-            // the app -- this includes Errors such as an
-            // OutOfMemoryError from the full-screen ImageReader
-            // allocation. The bridge answers CAPTURE_UNAVAILABLE.
+            // Fail-closed AND recorded: never let a capture-setup
+            // failure crash the app -- this includes Errors such as
+            // an OutOfMemoryError from the full-screen ImageReader
+            // allocation -- but write the trace so the next
+            // diagnostics copy carries the cause instead of "nothing
+            // happened". The bridge answers CAPTURE_UNAVAILABLE.
+            recordCaptureFailure("CaptureService.startCapture", t);
             teardown();
             stopForeground(true);
         }
     }
 
     private void startCaptureInner(int resultCode, Intent data) {
-        if (resultCode != Activity.RESULT_OK || data == null) {
-            // No grant: stay fail-closed. The service simply has no
-            // projection; captures answer CAPTURE_UNAVAILABLE.
-            // Drop foreground status: there is nothing to hold.
+        if (resultCode != Activity.RESULT_OK) {
+            // The user dismissed/denied the system dialog: not an
+            // app failure, no trace. Drop foreground status: there is
+            // nothing to hold.
+            setState(CaptureState.IDLE, "");
+            stopForeground(true);
+            return;
+        }
+        if (data == null) {
+            // RESULT_OK but the grant token did not survive the trip
+            // to the service: this is the anomaly worth diagnosing.
+            recordCaptureFailure("CaptureService.startCaptureInner",
+                    new IllegalStateException(
+                            "grant data null despite RESULT_OK"));
             stopForeground(true);
             return;
         }
@@ -208,6 +300,8 @@ public class CaptureService extends Service {
         try {
             proj = mpm.getMediaProjection(resultCode, data);
         } catch (Exception e) {
+            recordCaptureFailure(
+                    "CaptureService.getMediaProjection", e);
             stopForeground(true);
             return; // fail-closed: no projection held
         }
@@ -228,7 +322,9 @@ public class CaptureService extends Service {
                 // The user revoked the projection (or the system
                 // stopped it): drop everything so the next capture
                 // answers CAPTURE_UNAVAILABLE instead of serving
-                // frames from a dead pipeline.
+                // frames from a dead pipeline. Revocation is a user
+                // action, not a failure: back to IDLE, no trace.
+                setState(CaptureState.IDLE, "");
                 teardown();
             }
         }, workerHandler);
@@ -237,6 +333,7 @@ public class CaptureService extends Service {
             virtualDisplay = vd;
             imageReader = reader;
         }
+        setState(CaptureState.ACTIVE, "");
     }
 
     /** Start the worker thread if it is not running yet. */

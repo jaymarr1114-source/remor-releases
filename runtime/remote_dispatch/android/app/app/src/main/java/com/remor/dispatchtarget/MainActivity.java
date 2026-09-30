@@ -164,7 +164,15 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        CaptureService.setStateListener(
+                () -> runOnUiThread(this::refreshStatus));
         refreshStatus();
+    }
+
+    @Override
+    protected void onPause() {
+        CaptureService.setStateListener(null);
+        super.onPause();
     }
 
     /**
@@ -219,13 +227,32 @@ public class MainActivity extends Activity {
                 DispatchAccessibilityService.PREFS, MODE_PRIVATE);
         boolean token = !prefs.getString(
                 DispatchAccessibilityService.PREF_USER_TOKEN, "").isEmpty();
-        boolean capture = CaptureService.hasProjection();
+        // The terminal capture state, not a transient sample: the
+        // worker thread may still be building the pipeline when this
+        // runs, and a failure must show its reason, never a bare
+        // MISSING that hides the cause.
+        CaptureService.StateSnapshot snap = CaptureService.captureState();
+        String captureMark;
+        switch (snap.state) {
+            case ACTIVE:
+                captureMark = "OK";
+                break;
+            case STARTING:
+                captureMark = "STARTING…";
+                break;
+            case FAILED:
+                captureMark = "FAILED: " + snap.detail;
+                break;
+            default:
+                captureMark = "MISSING";
+                break;
+        }
         statusView.setText(
                 "Accessibility service: " + mark(a11y) + "\n"
                         + "Overlay permission: " + mark(overlay) + "\n"
                         + "Notification permission: " + mark(notif) + "\n"
                         + "User token saved: " + mark(token) + "\n"
-                        + "Screen capture: " + mark(capture));
+                        + "Screen capture: " + captureMark);
     }
 
     private String mark(boolean ok) {
