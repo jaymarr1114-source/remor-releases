@@ -22,6 +22,7 @@ subclass or fork it.
 from __future__ import annotations
 
 import os
+import signal
 import sqlite3
 import threading
 import time
@@ -87,6 +88,11 @@ class RemoteDispatchTarget:
         # the same session is refused; the slot is released on disconnect
         # so a legitimate reconnect (fresh hello) still works.
         self._active: Dict[str, int] = {}
+        # Processes launched by each session (pid per session_id), so a
+        # kill can causally terminate the session's remote work (U-9).
+        # Guarded by self._lock. end_session abandons them (graceful);
+        # only kill terminates them (emergency brake).
+        self._launched: Dict[str, List[int]] = {}
         self._listener.on_disconnect = self._on_disconnect
 
     @property
@@ -133,11 +139,54 @@ class RemoteDispatchTarget:
         out = self.store.kill_session(session_id, by="user:target")
         self._close_capture()
         self._hide_indicator(session_id)
+        # The target-local kill switch is the same emergency brake:
+        # the session's launched processes die with it.
+        out["processes_terminated"] = self._terminate_session_processes(
+            session_id)
         # Release the target: a killed session no longer holds the
         # cursor, so a new session may connect.
         with self._lock:
             self._active.pop(session_id, None)
         return out
+
+    def _terminate_session_processes(self, session_id: str) -> int:
+        """Causally terminate everything this session launched at the
+        target (U-9: kill means stop the remote work). SIGTERM goes to
+        the whole process GROUP of each tracked pid -- launch_app uses
+        start_new_session, so the child is a session leader and its
+        entire tree dies. Brief grace, then SIGKILL survivors, then
+        reap. Returns the number of pids signaled. A pid that already
+        exited is skipped via an existence check first; the residual
+        pid-reuse race (the OS recycling a dead pid between the check
+        and killpg) is microscopic and noted here, not hidden."""
+        with self._lock:
+            pids = self._launched.pop(session_id, [])
+        signaled = 0
+        for pid in pids:
+            try:
+                os.kill(pid, 0)  # skip the already-dead
+            except (ProcessLookupError, PermissionError):
+                continue
+            try:
+                os.killpg(pid, signal.SIGTERM)
+                signaled += 1
+            except (ProcessLookupError, PermissionError):
+                pass
+        if signaled:
+            time.sleep(0.5)
+            for pid in pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            for pid in pids:
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except (ChildProcessError, ProcessLookupError, OSError):
+                    pass
+            self.store.log_event("session_processes_terminated",
+                                 session_id, {"signaled": signaled})
+        return signaled
 
     # -- channel handlers ----------------------------------------------
     def _on_hello(self, msg: Dict[str, Any]) -> str:
@@ -221,11 +270,19 @@ class RemoteDispatchTarget:
             self.store.kill_session(session_id, by="controller-relay")
             self._close_capture()
             self._hide_indicator(session_id)
-            return {"kind": "kill_ok", "body": {"state": "killed"}}
+            # U-9 causal termination: the session's launched processes
+            # are remote work at the target -- they die with the kill.
+            procs = self._terminate_session_processes(session_id)
+            return {"kind": "kill_ok",
+                    "body": {"state": "killed",
+                             "processes_terminated": procs}}
         if kind == "end":
             self.store.end_session(session_id)
             self._close_capture()
             self._hide_indicator(session_id)
+            # Graceful end: launched processes are abandoned, not killed.
+            with self._lock:
+                self._launched.pop(session_id, None)
             return {"kind": "end_ok", "body": {"state": "ended"}}
         if kind == "get_frame":
             return self._on_get_frame(msg)
@@ -260,7 +317,13 @@ class RemoteDispatchTarget:
 
         results = []
         for action in actions:
-            results.append(self._execute(action, scope, _is_live))
+            # U-9 causal termination: a kill landing between two actions
+            # of one batch must stop the later actions, not just the
+            # next keystroke. type() also checks per keystroke; this
+            # covers move/click/scroll/key/launch_app between actions.
+            _is_live()
+            results.append(self._execute(session_id, action, scope,
+                                         _is_live))
         # budget charged only for actions that actually executed
         self.store.charge_budget(session_id, len(actions))
         return {"kind": "action_ok", "body": {"results": results}}
@@ -350,18 +413,18 @@ class RemoteDispatchTarget:
         finally:
             conn.close()
 
-    def _execute(self, action: Dict[str, Any],
+    def _execute(self, session_id: str, action: Dict[str, Any],
                  scope: Scope, is_live) -> Dict[str, Any]:
         # A substrate policy refusal (e.g. the Android app's local kill
         # latch) is an explicit action_refused, never a transport error.
         # All other CursorErrors keep their existing behavior, so the X11
         # substrate's wire semantics are unchanged.
         try:
-            return self._execute_inner(action, scope, is_live)
+            return self._execute_inner(session_id, action, scope, is_live)
         except SubstrateRefusal as e:
             raise TargetRefusal(str(e))
 
-    def _execute_inner(self, action: Dict[str, Any],
+    def _execute_inner(self, session_id: str, action: Dict[str, Any],
                        scope: Scope, is_live) -> Dict[str, Any]:
         if self._cursor is None:
             self._cursor = self._substrate.make_cursor(
@@ -380,8 +443,14 @@ class RemoteDispatchTarget:
         if kind == "key":
             return self._cursor.key(action["keysym"])
         if kind == "launch_app":
-            return self._cursor.launch_app(action["argv"],
-                                           scope.apps or [])
+            out = self._cursor.launch_app(action["argv"], scope.apps or [])
+            # Track the session's remote processes: kill must causally
+            # terminate them (U-9). end_session deliberately leaves them.
+            pid = out.get("pid")
+            if isinstance(pid, int) and pid > 0:
+                with self._lock:
+                    self._launched.setdefault(session_id, []).append(pid)
+            return out
         raise TargetRefusal(f"unexecutable action {kind!r}")
 
     # -- live-session indicator (delegated to the substrate) -----------
