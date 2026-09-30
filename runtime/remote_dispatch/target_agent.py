@@ -144,15 +144,26 @@ class RemoteDispatchTarget:
         body = msg.get("body", {})
         session_id = msg.get("session_id", "")
         token = body.get("session_token", "")
+        # A kill intent marks a kill-only control connection: it carries
+        # no cursor control, only the session's kill switch. The session
+        # token is verified exactly like any hello (a bad token is still
+        # refused), and replay/sequence guards apply to its messages.
+        kill_intent = (body.get("intent") == "kill")
         try:
             self.store.check_session_token(session_id, token)
         except SessionError as e:
             raise chan.ChannelError(f"hello refused: {e}")
         with self._lock:
-            if self._active.get(session_id):
+            if self._active.get(session_id) and not kill_intent:
                 raise chan.ChannelError(
                     "hello refused: session already has a live connection"
                     " (concurrent duplicate refused)")
+            # A kill intent may preempt the session's own live control
+            # connection: the user's kill switch must stay prompt during
+            # a long-running dispatch. This does not weaken the
+            # concurrent-hello guard -- control hellos (no kill intent)
+            # are still refused while one is live, and the kill
+            # connection itself can never drive the cursor.
             # Target-wide exclusivity: the cursor is a single shared
             # resource, so at most one session may hold a live
             # remote-control connection at a time. Stale entries for
@@ -171,14 +182,18 @@ class RemoteDispatchTarget:
                         f" session ({other[:13]}...): one live"
                         " remote-control session per target")
                 self._active.pop(other, None)
-            self._active[session_id] = 1
-        try:
-            self.store.mark_live(session_id)
-            self._show_indicator(session_id)
-        except Exception:
-            with self._lock:
-                self._active.pop(session_id, None)
-            raise
+            if not kill_intent:
+                self._active[session_id] = 1
+        # A kill-only connection neither marks the session live nor shows
+        # the indicator: it exists solely to deliver the kill.
+        if not kill_intent:
+            try:
+                self.store.mark_live(session_id)
+                self._show_indicator(session_id)
+            except Exception:
+                with self._lock:
+                    self._active.pop(session_id, None)
+                raise
         # A reconnecting controller restarts its counter at hello=1; tell
         # it the persisted next action sequence so it can synchronize.
         next_seq = self.store._get_session(session_id)["seq_next"]

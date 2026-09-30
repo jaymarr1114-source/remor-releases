@@ -63,10 +63,22 @@ class RemoteDispatchController:
         return self.store.request_session(device_id, scope)
 
     def connect(self, session_id: str, session_token: str, host: str,
-                port: int) -> "RemoteSession":
+                port: int,
+                intent: Optional[str] = None,
+                verify_proof: bool = True) -> "RemoteSession":
         """Establish the channel: TLS (pinned target identity) + hello +
         mutual authentication. Raises ControllerError if the target's
-        identity proof fails."""
+        identity proof fails. intent="kill" marks a kill-only control
+        connection (no cursor control): the target still verifies the
+        session token and all replay guards, but the hello is not refused
+        as a concurrent duplicate of the session's live control
+        connection, so the user's kill switch stays prompt during a
+        long-running dispatch. verify_proof=False skips ONLY the
+        thread-affine registry authentication of the identity proof (the
+        kill relay runs on the bypass thread, never the engine thread):
+        TLS pinning, the paired-device binding checks, and the target's
+        own session-token verification still apply, and the target
+        remains the authorization gate for the kill itself."""
         sess = self.store._get_session(session_id)
         dev = self.store.get_device(sess["device_id"])
         pin = (dev or {}).get("cert_fingerprint")
@@ -77,14 +89,15 @@ class RemoteDispatchController:
                 " target identity")
         ch = chan.ControllerChannel(host, port, pinned_fingerprint=pin)
         try:
-            body = ch.hello(session_id, session_token)
+            body = ch.hello(session_id, session_token, intent=intent)
         except chan.ChannelError as e:
             ch.close()
             raise ControllerError(f"handshake failed: {e}")
         proof = body.get("identity_proof", {})
         agent_id = proof.get("agent_id", "")
         agent_token = proof.get("agent_token", "")
-        if not self.agents.authenticate(agent_id, agent_token):
+        if verify_proof and not self.agents.authenticate(agent_id,
+                                                        agent_token):
             ch.close()
             raise ControllerError(
                 "target identity proof FAILED authentication "

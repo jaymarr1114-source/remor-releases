@@ -173,12 +173,18 @@ class ControllerChannel:
         self._seq += 1
         return self._seq
 
-    def hello(self, session_id: str, session_token: str) -> Dict[str, Any]:
+    def hello(self, session_id: str, session_token: str,
+              intent: Optional[str] = None) -> Dict[str, Any]:
         """Returns the hello_ok body, including the target's identity_proof.
         The caller MUST authenticate the proof against the AgentDirectory
-        and the paired device binding before sending any action."""
-        proto.send(self._sock, "hello", session_id, self._next_seq(),
-                   {"session_token": session_token})
+        and the paired device binding before sending any action.
+        intent="kill" marks a kill-only control connection: it carries no
+        cursor control, only the session's kill switch (the target still
+        verifies the session token and all replay guards)."""
+        body: Dict[str, Any] = {"session_token": session_token}
+        if intent:
+            body["intent"] = intent
+        proto.send(self._sock, "hello", session_id, self._next_seq(), body)
         reply = proto.decode(self._sock)
         if reply["kind"] != "hello_ok":
             raise ChannelError(
