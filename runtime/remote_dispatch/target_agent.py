@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Optional
 from . import channel as chan
 from . import protocol as proto
 from . import tls
+from .announce import build_announcement, post_endpoint_announcement
 from .session_model import (CONSENTED, LIVE, RemoteDispatchStore, Scope,
                             SessionError)
 from .substrates import (ANDROID_PROFILE, CursorError, SubstrateRefusal,
@@ -48,12 +49,22 @@ class RemoteDispatchTarget:
                  display: Optional[str] = None,
                  cert_dir: Optional[str] = None,
                  substrate: Optional[ExecutionTargetProfile] = None,
-                 substrate_config: Optional[Dict[str, Any]] = None):
+                 substrate_config: Optional[Dict[str, Any]] = None,
+                 announce_url: Optional[str] = None):
+        """announce_url: the controller API base URL (e.g.
+        "http://controller-host:PORT"). When set, start() POSTs the
+        authenticated endpoint announcement to
+        <announce_url>/api/remote/announce so the controller learns
+        where this target is reachable. When None (bench default) only
+        the local store row is written -- same as before this mission.
+        """
         self.store = RemoteDispatchStore(db_path)
         self.db_path = db_path
         self.device_id = device_id
         self.agent_id = agent_id
         self.agent_token = agent_token  # presented as identity proof
+        self.announce_url = announce_url
+        self.last_announce: Optional[Dict[str, Any]] = None
         # Substrate resolution is by capability profile, never by device
         # identity. Default keeps the historical bench behavior (x11).
         self._substrate: Substrate = resolve_substrate(
@@ -104,12 +115,33 @@ class RemoteDispatchTarget:
         return tls.fingerprint(self._cert_path)
 
     # -- lifecycle ----------------------------------------------------
-    def start(self) -> None:
+    def start(self) -> Optional[Dict[str, Any]]:
         self.store.announce_endpoint(self.device_id, self._listener.host,
                                      self.port)
         self._thread = threading.Thread(
             target=self._listener.serve_forever, daemon=True)
         self._thread.start()
+        # Network announcement (RD-TARGET-ENDPOINT-1): tell the
+        # controller where this target is reachable, authenticated by
+        # the pairing agent token and replay-guarded by (ts, nonce).
+        # A failed announcement does not stop the listener -- the
+        # announcement is delivery of a fact, and the listener is the
+        # fact -- but it is recorded honestly: without it the
+        # controller cannot resolve this device.
+        self.last_announce = None
+        if self.announce_url:
+            body = build_announcement(
+                self.device_id, self.agent_token, self._listener.host,
+                self.port, self.cert_fingerprint())
+            try:
+                self.last_announce = post_endpoint_announcement(
+                    self.announce_url, body)
+            except Exception as e:  # noqa: BLE001 -- recorded, not raised
+                self.store.log_event(
+                    "endpoint_announce_failed", None,
+                    {"device_id": self.device_id,
+                     "reason": str(e)[:300]})
+        return self.last_announce
 
     def stop(self) -> None:
         self._listener.stop()

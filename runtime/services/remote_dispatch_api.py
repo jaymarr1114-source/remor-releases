@@ -6,6 +6,18 @@ Routes (the GUI's Dispatch tab binds to these once the route exists):
     One-time enrollment. Engine-privileged (the service runs as the
     engine). The agent_token must reach the target device out of band
     (in product: the pairing flow).
+  POST /api/remote/announce
+    {device_id, agent_token, host, port, cert_fingerprint, ann_ts,
+     ann_nonce} -> {ok, device_id, endpoint_host, endpoint_port,
+                    pinned}
+    The target's endpoint announcement (RD-TARGET-ENDPOINT-1):
+    authenticated by the pairing agent token, replay-guarded by the
+    store's (ann_ts, ann_nonce) check, the announced fingerprint
+    matched against the pairing-time pin (or bound
+    trust-on-first-announcement). The controller resolves a paired
+    device_id to this live endpoint on the connect path; every
+    refusal (unknown device, never announced, stale/unreachable
+    endpoint) carries its exact reason.
   POST /api/remote/sessions
     {device_id, scope} -> {session_id, state: "pending"}
     The controller requests; ONLY the user (on the target) can consent.
@@ -38,8 +50,10 @@ from typing import Any, Dict, List, Optional
 
 from swarm_engine.governance import caller_authorization as authz
 from swarm_engine.remote_dispatch import channel as chan
+from swarm_engine.remote_dispatch.announce import (
+    AnnounceError, validate_announcement)
 from swarm_engine.remote_dispatch.controller import (
-    RemoteDispatchController, RemoteSession)
+    ControllerError, RemoteDispatchController, RemoteSession)
 from swarm_engine.remote_dispatch.session_model import (
     ENDED, EXPIRED, KILLED, RemoteDispatchStore, Scope, SessionError)
 
@@ -93,22 +107,41 @@ class RemoteDispatchService:
         finally:
             conn.close()
 
-    def _endpoint(self, session_id: str) -> Dict[str, Any]:
-        import sqlite3
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+    def announce(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/remote/announce: the target's endpoint
+        announcement (RD-TARGET-ENDPOINT-1).
+
+        Body: {device_id, agent_token, host, port, cert_fingerprint,
+               ann_ts, ann_nonce}. Authenticated by the pairing agent
+        token (the same bearer credential the target presents in the
+        hello identity proof); replay-guarded by the store's
+        (ann_ts, ann_nonce) check; the announced certificate
+        fingerprint is matched against the pairing-time pin (or bound
+        trust-on-first-announcement). Every refusal carries its exact
+        reason -- a forged token, a replayed announcement, an endpoint
+        hijack for another device's id, or a fingerprint mismatch all
+        fail closed here and never reach the registry.
+        """
         try:
-            s = conn.execute(
-                "SELECT device_id FROM rd_sessions WHERE session_id=?",
-                (session_id,)).fetchone()
-            if not s:
-                return {}
-            d = conn.execute(
-                "SELECT endpoint_host, endpoint_port FROM rd_devices"
-                " WHERE device_id=?", (s["device_id"],)).fetchone()
-            return dict(d) if d else {}
-        finally:
-            conn.close()
+            (device_id, agent_token, host, port, cert_fp, ann_ts,
+             ann_nonce) = validate_announcement(body or {})
+        except AnnounceError as e:
+            return {"ok": False, "error": str(e)}
+        dev = self.controller.store.get_device(device_id)
+        if not dev:
+            return {"ok": False,
+                    "error": f"unknown device {device_id!r}: not paired"}
+        agent_id = dev["agent_id"]
+        if not self.controller.agents.authenticate(agent_id, agent_token):
+            return {"ok": False,
+                    "error": "announcement refused: agent token"
+                             " authentication failed"}
+        try:
+            out = self.controller.store.record_endpoint_announcement(
+                device_id, host, port, cert_fp, ann_ts, ann_nonce)
+        except SessionError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, **out}
 
     def dispatch(self, body: Dict[str, Any]) -> Dict[str, Any]:
         """A dispatch request targeting the remote session."""
@@ -118,14 +151,14 @@ class RemoteDispatchService:
         if not session_id or not session_token or not actions:
             return {"ok": False,
                     "error": "session_id, session_token, actions required"}
-        ep = self._endpoint(session_id)
-        if not ep.get("endpoint_host"):
-            return {"ok": False,
-                    "error": "target endpoint unknown (device offline?)"}
         try:
-            sess = self.controller.connect(
-                session_id, session_token,
-                ep["endpoint_host"], ep["endpoint_port"])
+            # The endpoint resolves from the device's announced endpoint
+            # (RD-TARGET-ENDPOINT-1): no announcement, stale endpoint,
+            # or unreachable endpoint each refuse here with the exact
+            # reason -- the old "target endpoint unknown (device
+            # offline?)" pre-check is gone, replaced by the precise
+            # resolution refusal or the true transport error.
+            sess = self.controller.connect(session_id, session_token)
         except Exception as e:  # noqa: BLE001 -- refusal is body data
             return {"ok": False, "refused": f"connect: {e}"}
         try:
@@ -175,11 +208,15 @@ class RemoteDispatchService:
         if s["state"] in (KILLED, ENDED, EXPIRED):
             return {"target_relay": "already_terminal",
                     "target_relay_detail": s["state"]}
-        ep = self._endpoint(session_id)
-        if not ep.get("endpoint_host"):
+        try:
+            # Resolve through the announced-endpoint registry
+            # (RD-TARGET-ENDPOINT-1): the no_endpoint status now carries
+            # the exact resolution reason (unknown device, unpaired,
+            # never announced) instead of the old vague string.
+            host, port = self.controller.resolve_endpoint(s["device_id"])
+        except (ControllerError, SessionError) as e:
             return {"target_relay": "no_endpoint",
-                    "target_relay_detail":
-                        "target endpoint unknown (device offline?)"}
+                    "target_relay_detail": str(e)}
         if not session_token:
             return {"target_relay": "no_token",
                     "target_relay_detail":
@@ -199,7 +236,7 @@ class RemoteDispatchService:
             # remains the authorization gate for the kill itself.
             sess = self.controller.connect(
                 session_id, session_token,
-                ep["endpoint_host"], ep["endpoint_port"], intent="kill",
+                host, port, intent="kill",
                 verify_proof=False)
         except Exception as e:  # noqa: BLE001 -- refusal is body data
             return {"target_relay": "relay_failed",
@@ -271,6 +308,7 @@ def routes_for_remote_dispatch(
 
     return {
         ("POST", "/api/remote/pair"): svc.pair,
+        ("POST", "/api/remote/announce"): svc.announce,
         ("POST", "/api/remote/sessions"): svc.request_session,
         ("GET", "/api/remote/sessions"): svc.list_sessions,
         ("POST", "/api/remote/dispatch"): svc.dispatch,

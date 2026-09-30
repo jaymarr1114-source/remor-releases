@@ -67,6 +67,7 @@ class TargetListener:
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((host, port))
         self._sock.listen(8)
+        self._bound_port = self._sock.getsockname()[1]
         self._stop = threading.Event()
         self.on_hello: Optional[
             Callable[[Dict[str, Any]],
@@ -85,7 +86,9 @@ class TargetListener:
 
     @property
     def bound_port(self) -> int:
-        return self._sock.getsockname()[1]
+        # Cached at bind time: a stopped listener's last-known port
+        # stays queryable (its announcement record outlives it too).
+        return self._bound_port
 
     def serve_forever(self) -> None:
         self._sock.settimeout(0.5)
@@ -94,6 +97,12 @@ class TargetListener:
                 conn, _ = self._sock.accept()
             except socket.timeout:
                 continue
+            except OSError:
+                # The listening socket was closed by stop(): a closed
+                # listener is a stopped listener.
+                if self._stop.is_set():
+                    return
+                raise
             # TLS before any protocol byte: the handshake must complete
             # or the connection is dropped unanswered.
             if self._tls_context is not None:
@@ -111,6 +120,18 @@ class TargetListener:
 
     def stop(self) -> None:
         self._stop.set()
+        # Release the port: a stopped listener must not keep the
+        # address bound (a half-open listener accepts TCP but never
+        # answers, which reads as a hung endpoint rather than a dead
+        # one). Idempotent: stopping twice is safe.
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
 
     def _handle(self, conn: socket.socket) -> None:
         # The error reply must be sent BEFORE the socket closes: the

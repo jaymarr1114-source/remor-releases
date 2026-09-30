@@ -52,7 +52,13 @@ CREATE TABLE IF NOT EXISTS rd_devices (
     status       TEXT NOT NULL DEFAULT 'active',
     endpoint_host TEXT,
     endpoint_port INTEGER,
-    cert_fingerprint TEXT
+    cert_fingerprint TEXT,
+    -- target-endpoint registration (RD-TARGET-ENDPOINT-1): the last
+    -- accepted announcement's (timestamp, nonce). The replay guard
+    -- accepts only a strictly-newer announcement, so a replayed old
+    -- announcement can never resurrect a dead endpoint.
+    announce_ts REAL,
+    announce_nonce TEXT
 );
 CREATE TABLE IF NOT EXISTS rd_user_tokens (
     user_id      TEXT PRIMARY KEY,
@@ -221,6 +227,16 @@ class RemoteDispatchStore:
         if "cert_fingerprint" not in cols:
             self._conn.execute(
                 "ALTER TABLE rd_devices ADD COLUMN cert_fingerprint TEXT")
+        # migration: announcement replay-guard columns
+        # (RD-TARGET-ENDPOINT-1); ALTER is a no-op-safe guarded by PRAGMA.
+        cols = [r[1] for r in self._conn.execute(
+            "PRAGMA table_info(rd_devices)")]
+        if "announce_ts" not in cols:
+            self._conn.execute(
+                "ALTER TABLE rd_devices ADD COLUMN announce_ts REAL")
+        if "announce_nonce" not in cols:
+            self._conn.execute(
+                "ALTER TABLE rd_devices ADD COLUMN announce_nonce TEXT")
         self._conn.commit()
 
     # -- chained event log -------------------------------------------
@@ -302,6 +318,92 @@ class RemoteDispatchStore:
         self._conn.commit()
         self.log_event("endpoint_announced", None,
                        {"device_id": device_id, "port": port})
+
+    @_locked
+    def record_endpoint_announcement(
+            self, device_id: str, host: str, port: int,
+            cert_fingerprint: Optional[str], ann_ts: float,
+            ann_nonce: str) -> Dict[str, Any]:
+        """Record an authenticated target->controller endpoint
+        announcement (RD-TARGET-ENDPOINT-1).
+
+        Authentication (the agent token) is verified by the CALLER
+        (the service handler) before this runs; this method enforces
+        the storage-side invariants, all inside one locked transaction
+        so a new announcement supersedes the old one exactly once,
+        atomically:
+
+        - unknown device / inactive device: refused (never stored).
+        - replay guard: the announcement is accepted only if its
+          (ann_ts, ann_nonce) is strictly newer than the last accepted
+          one -- an old announcement is refused and cannot resurrect a
+          dead endpoint. A byte-identical re-delivery of the latest
+          announcement is also refused (same ts AND same nonce), so a
+          retry can never double-apply.
+        - certificate fingerprint: if the device record already pins
+          one, the announced fingerprint must match it (mismatch =
+          possible impersonation, refused). If none is pinned, the
+          announced fingerprint is bound trust-on-first-announcement
+          (the announcement is token-authenticated, so only the
+          enrolled target's agent can set it).
+
+        Returns {"device_id", "endpoint_host", "endpoint_port",
+        "pinned": bool} -- pinned=True when this announcement bound
+        the fingerprint for the first time.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM rd_devices WHERE device_id=?",
+            (device_id,)).fetchone()
+        if not row:
+            raise SessionError(
+                f"unknown device {device_id!r}: not paired")
+        dev = dict(row)
+        if dev["status"] != "active":
+            raise SessionError(
+                f"device {device_id!r} is not active")
+        last_ts = dev.get("announce_ts")
+        last_nonce = dev.get("announce_nonce")
+        if last_ts is not None and (
+                ann_ts < last_ts or
+                (ann_ts == last_ts and ann_nonce == last_nonce)):
+            raise SessionError(
+                "stale announcement: replay refused")
+        pinned_fp = dev.get("cert_fingerprint")
+        fp = (cert_fingerprint or "").strip().lower() or None
+        pinned_now = False
+        if fp:
+            if pinned_fp and fp != pinned_fp.lower():
+                raise SessionError(
+                    "certificate fingerprint mismatch: possible"
+                    " impersonation (announcement refused)")
+            if not pinned_fp:
+                pinned_now = True
+        else:
+            fp = pinned_fp  # keep the existing pin; do not clear it
+        self._conn.execute(
+            "UPDATE rd_devices SET endpoint_host=?, endpoint_port=?,"
+            " cert_fingerprint=?, announce_ts=?, announce_nonce=?"
+            " WHERE device_id=?",
+            (host, port, fp, ann_ts, ann_nonce, device_id))
+        self._conn.commit()
+        self.log_event("endpoint_announced", None,
+                       {"device_id": device_id, "host": host,
+                        "port": port, "pinned": pinned_now,
+                        "superseded": last_ts is not None})
+        return {"device_id": device_id, "endpoint_host": host,
+                "endpoint_port": port, "pinned": pinned_now}
+
+    @_locked
+    def get_announced_endpoint(self, device_id: str
+                               ) -> Optional[Dict[str, Any]]:
+        """The last accepted announcement for a device, or None."""
+        row = self._conn.execute(
+            "SELECT endpoint_host, endpoint_port, announce_ts,"
+            " announce_nonce, cert_fingerprint FROM rd_devices"
+            " WHERE device_id=?", (device_id,)).fetchone()
+        if not row or not row["endpoint_host"]:
+            return None
+        return dict(row)
 
     # -- user principals (consent authority) --------------------------
     @_locked

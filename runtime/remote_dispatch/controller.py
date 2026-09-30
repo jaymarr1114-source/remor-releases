@@ -62,8 +62,33 @@ class RemoteDispatchController:
                         scope: Scope) -> Dict[str, Any]:
         return self.store.request_session(device_id, scope)
 
-    def connect(self, session_id: str, session_token: str, host: str,
-                port: int,
+    def resolve_endpoint(self, device_id: str) -> "tuple[str, int]":
+        """Resolve a paired device_id to its live endpoint through the
+        announced-endpoint registry (RD-TARGET-ENDPOINT-1). Every
+        refusal carries its exact reason -- never a guessed address:
+
+        - unknown device / unpaired: the device was never paired.
+        - not active: the pairing is not active.
+        - target endpoint unknown: paired, but no endpoint announcement
+          has been accepted for it (the target is not known to be
+          reachable anywhere).
+        """
+        dev = self.store.get_device(device_id)
+        if not dev:
+            raise ControllerError(
+                f"unknown device {device_id!r}: not paired")
+        if dev["status"] != "active":
+            raise ControllerError(
+                f"device {device_id!r} is not active")
+        host, port = dev.get("endpoint_host"), dev.get("endpoint_port")
+        if not host or not port:
+            raise ControllerError(
+                "target endpoint unknown: no endpoint announced for"
+                f" device {device_id!r}")
+        return host, port
+
+    def connect(self, session_id: str, session_token: str,
+                host: Optional[str] = None, port: Optional[int] = None,
                 intent: Optional[str] = None,
                 verify_proof: bool = True) -> "RemoteSession":
         """Establish the channel: TLS (pinned target identity) + hello +
@@ -78,8 +103,15 @@ class RemoteDispatchController:
         kill relay runs on the bypass thread, never the engine thread):
         TLS pinning, the paired-device binding checks, and the target's
         own session-token verification still apply, and the target
-        remains the authorization gate for the kill itself."""
+        remains the authorization gate for the kill itself.
+
+        When host/port are omitted they are resolved from the device's
+        announced endpoint (resolve_endpoint); an announced-but-dead
+        endpoint refuses with the true transport reason, never a silent
+        downgrade and never an invented address."""
         sess = self.store._get_session(session_id)
+        if host is None or port is None:
+            host, port = self.resolve_endpoint(sess["device_id"])
         dev = self.store.get_device(sess["device_id"])
         pin = (dev or {}).get("cert_fingerprint")
         if not pin:
@@ -87,7 +119,12 @@ class RemoteDispatchController:
                 "no pinned certificate for device "
                 f"{sess['device_id']!r}: refusing to connect without"
                 " target identity")
-        ch = chan.ControllerChannel(host, port, pinned_fingerprint=pin)
+        try:
+            ch = chan.ControllerChannel(host, port,
+                                        pinned_fingerprint=pin)
+        except OSError as e:
+            raise ControllerError(
+                f"target endpoint unreachable ({host}:{port}): {e}")
         try:
             body = ch.hello(session_id, session_token, intent=intent)
         except chan.ChannelError as e:
