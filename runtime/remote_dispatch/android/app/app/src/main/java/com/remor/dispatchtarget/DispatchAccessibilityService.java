@@ -61,6 +61,13 @@ public class DispatchAccessibilityService extends AccessibilityService {
     public static final int BRIDGE_PORT = 47631;
     static final String PREFS = "dispatch_target_prefs";
     static final String PREF_USER_TOKEN = "user_token";
+
+    /** Live instance for the RemoteListener's input sink/indicator. */
+    private static volatile DispatchAccessibilityService instance;
+
+    public static DispatchAccessibilityService instance() {
+        return instance;
+    }
     private static final String ACTION_LOCAL_KILL =
             "com.remor.dispatchtarget.LOCAL_KILL";
     private static final int NOTIF_ID = 3101;
@@ -101,6 +108,7 @@ public class DispatchAccessibilityService extends AccessibilityService {
     // ------------------------------------------------------------------
     @Override
     public void onServiceConnected() {
+        instance = this;
         CrashDiagnostics.install(this);
         mainHandler = new Handler(Looper.getMainLooper());
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
@@ -138,6 +146,7 @@ public class DispatchAccessibilityService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        instance = null;
         try {
             unregisterReceiver(killReceiver);
         } catch (Exception ignored) {
@@ -517,6 +526,10 @@ public class DispatchAccessibilityService extends AccessibilityService {
                         ? "<unknown>" : sessionId;
         hideOverlay();
         cancelKillNotification();
+        // Causal kill (U-9): tear the session down in the target's own
+        // registry and clear the indicator -- not just the latch above.
+        // Works even when no control connection is currently open.
+        RemoteListener.killSession(sessionId);
         new Thread(() -> {
             try {
                 SharedPreferences prefs =

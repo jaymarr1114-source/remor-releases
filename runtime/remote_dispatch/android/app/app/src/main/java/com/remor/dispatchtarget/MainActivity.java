@@ -42,6 +42,13 @@ public class MainActivity extends Activity {
 
     private TextView statusView;
     private EditText tokenField;
+    private EditText controllerUrlField;
+    private EditText deviceIdField;
+    private EditText agentIdField;
+    private EditText agentTokenField;
+    private EditText listenerPortField;
+    private TextView fingerprintView;
+    private TextView listenerStatusView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -137,6 +144,107 @@ public class MainActivity extends Activity {
                 + " (localhost only)");
         layout.addView(bridgeInfo);
 
+        // ---------------------------------------------------------
+        // Remote dispatch: LAN listener + controller pairing.
+        // Out-of-band pairing ceremony:
+        //   1. Start the listener below; note the TLS fingerprint.
+        //   2. On the controller machine, run the pairing step with
+        //      this device's fingerprint; it prints the agent token.
+        //   3. Enter the controller URL, device id, agent id and the
+        //      agent token here and save. The token is app-private
+        //      (see the EncryptedSharedPreferences hardening gap).
+        //   4. Press Announce: the controller learns this target's
+        //      endpoint and can request sessions. Session requests
+        //      appear via "Check for sessions" for explicit consent.
+        // ---------------------------------------------------------
+        TextView rdTitle = new TextView(this);
+        rdTitle.setText("Remote dispatch (LAN)");
+        rdTitle.setTextSize(20);
+        rdTitle.setPadding(0, pad, 0, 0);
+        layout.addView(rdTitle);
+
+        listenerStatusView = new TextView(this);
+        listenerStatusView.setPadding(0, pad / 2, 0, pad / 2);
+        layout.addView(listenerStatusView);
+
+        fingerprintView = new TextView(this);
+        fingerprintView.setPadding(0, 0, 0, pad / 2);
+        fingerprintView.setTextIsSelectable(true);
+        layout.addView(fingerprintView);
+
+        SharedPreferences rdPrefs =
+                getSharedPreferences(RemoteListener.PREFS, MODE_PRIVATE);
+
+        controllerUrlField = mkField(layout,
+                "Controller URL (e.g. http://192.168.1.10:8080):",
+                rdPrefs.getString(RemoteListener.PREF_CONTROLLER_URL,
+                        ""));
+        deviceIdField = mkField(layout, "Device ID:",
+                rdPrefs.getString(RemoteListener.PREF_DEVICE_ID, ""));
+        agentIdField = mkField(layout, "Agent ID:",
+                rdPrefs.getString(RemoteListener.PREF_AGENT_ID, ""));
+        agentTokenField = mkField(layout, "Agent token (from pairing):",
+                "");
+        String savedAgent = rdPrefs.getString(
+                RemoteListener.PREF_AGENT_TOKEN, "");
+        if (!savedAgent.isEmpty()) {
+            agentTokenField.setHint("token saved ✓ (paste to replace)");
+        }
+        listenerPortField = mkField(layout,
+                "Listener port (0 = ephemeral):",
+                String.valueOf(rdPrefs.getInt(
+                        RemoteListener.PREF_LISTENER_PORT, 0)));
+
+        layout.addView(mkButton("Save pairing", v -> {
+            SharedPreferences.Editor e = rdPrefs.edit();
+            e.putString(RemoteListener.PREF_CONTROLLER_URL,
+                    controllerUrlField.getText().toString().trim());
+            e.putString(RemoteListener.PREF_DEVICE_ID,
+                    deviceIdField.getText().toString().trim());
+            e.putString(RemoteListener.PREF_AGENT_ID,
+                    agentIdField.getText().toString().trim());
+            String at = agentTokenField.getText().toString().trim();
+            if (!at.isEmpty()) {
+                e.putString(RemoteListener.PREF_AGENT_TOKEN, at);
+                agentTokenField.setText("");
+                agentTokenField.setHint(
+                        "token saved ✓ (paste to replace)");
+            }
+            try {
+                e.putInt(RemoteListener.PREF_LISTENER_PORT,
+                        Integer.parseInt(listenerPortField.getText()
+                                .toString().trim()));
+            } catch (NumberFormatException nfe) {
+                e.putInt(RemoteListener.PREF_LISTENER_PORT, 0);
+            }
+            e.apply();
+            refreshStatus();
+        }));
+
+        layout.addView(mkButton("Start listener", v -> {
+            Intent i = new Intent(this, RemoteListener.class)
+                    .setAction(RemoteListener.ACTION_START);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(i);
+            } else {
+                startService(i);
+            }
+            listenerStatusView.postDelayed(this::refreshStatus, 1500);
+        }));
+
+        layout.addView(mkButton("Stop listener", v -> {
+            Intent i = new Intent(this, RemoteListener.class)
+                    .setAction(RemoteListener.ACTION_STOP);
+            startService(i);
+            listenerStatusView.postDelayed(this::refreshStatus, 500);
+        }));
+
+        layout.addView(mkButton("Announce to controller", v ->
+                onAnnounce()));
+
+        layout.addView(mkButton("Check for sessions (consent)", v ->
+                onCheckSessions()));
+
         setContentView(scroll);
     }
 
@@ -215,6 +323,106 @@ public class MainActivity extends Activity {
         return b;
     }
 
+    private EditText mkField(LinearLayout layout, String label,
+                             String value) {
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        tv.setPadding(0, pad / 2, 0, 0);
+        layout.addView(tv);
+        EditText f = new EditText(this);
+        f.setText(value);
+        layout.addView(f);
+        return f;
+    }
+
+    /** Announce this target's endpoint to the configured controller. */
+    private void onAnnounce() {
+        TargetApiClient api = new TargetApiClient(this);
+        if (!api.configured()) {
+            listenerStatusView.setText(
+                    "Announce: save the pairing first (controller URL,"
+                            + " device id, agent id, agent token).");
+            return;
+        }
+        if (!RemoteListener.isRunning()) {
+            listenerStatusView.setText(
+                    "Announce: start the listener first.");
+            return;
+        }
+        listenerStatusView.setText("Announcing…");
+        new Thread(() -> {
+            try {
+                String fp = RemoteListener.currentFingerprint();
+                int port = RemoteListener.boundPort();
+                if (port <= 0) {
+                    runOnUiThread(() -> listenerStatusView.setText(
+                            "Announce: listener has no bound port."));
+                    return;
+                }
+                org.json.JSONObject resp = api.announce(port, fp);
+                runOnUiThread(() -> {
+                    if (resp.optBoolean("ok", false)) {
+                        listenerStatusView.setText(
+                                "Announced OK: controller knows this"
+                                        + " target.");
+                    } else {
+                        listenerStatusView.setText(
+                                "Announce failed: "
+                                        + resp.optString("error",
+                                                "unknown"));
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> listenerStatusView.setText(
+                        "Announce failed: " + e.getMessage()));
+            }
+        }, "rd-announce").start();
+    }
+
+    /** Poll the controller for pending sessions and open consent. */
+    private void onCheckSessions() {
+        TargetApiClient api = new TargetApiClient(this);
+        if (!api.configured()) {
+            listenerStatusView.setText(
+                    "Save the pairing first.");
+            return;
+        }
+        if (!RemoteListener.isRunning()) {
+            listenerStatusView.setText(
+                    "Start the listener first.");
+            return;
+        }
+        listenerStatusView.setText("Checking for sessions…");
+        new Thread(() -> {
+            try {
+                java.util.List<TargetApiClient.PendingSession> pending =
+                        api.pollPending();
+                runOnUiThread(() -> {
+                    if (pending.isEmpty()) {
+                        listenerStatusView.setText(
+                                "No pending sessions.");
+                        return;
+                    }
+                    TargetApiClient.PendingSession s = pending.get(0);
+                    Intent i = new Intent(this, ConsentActivity.class)
+                            .putExtra(ConsentActivity.EXTRA_SESSION_ID,
+                                    s.sessionId)
+                            .putExtra(ConsentActivity.EXTRA_SCOPE_JSON,
+                                    s.scope.toString())
+                            .putExtra(ConsentActivity.EXTRA_CREATED_AT,
+                                    s.createdAt);
+                    startActivity(i);
+                    listenerStatusView.setText(
+                            pending.size() + " pending session(s).");
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> listenerStatusView.setText(
+                        "Session check failed: " + e.getMessage()));
+            }
+        }, "rd-session-poll").start();
+    }
+
     private void refreshStatus() {
         boolean a11y = isAccessibilityEnabled();
         boolean overlay = Build.VERSION.SDK_INT < 23
@@ -253,6 +461,14 @@ public class MainActivity extends Activity {
                         + "Notification permission: " + mark(notif) + "\n"
                         + "User token saved: " + mark(token) + "\n"
                         + "Screen capture: " + captureMark);
+        // Remote-dispatch listener status.
+        boolean listening = RemoteListener.isRunning();
+        listenerStatusView.setText(
+                "Listener: " + (listening ? "RUNNING" : "stopped"));
+        String fp = RemoteListener.currentFingerprint();
+        fingerprintView.setText(listening
+                ? "TLS fingerprint (pair with this):\n" + fp
+                : "TLS fingerprint: (start the listener to mint/show)");
     }
 
     private String mark(boolean ok) {

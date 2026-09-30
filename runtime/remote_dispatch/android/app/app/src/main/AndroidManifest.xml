@@ -45,5 +45,15 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <!-- Hosts the remote-dispatch TLS TargetServer on 0.0.0.0 so
+             the paired controller on the LAN can reach it. -->
+        <service
+            android:name=".RemoteListener"
+            android:exported="false" />
+
+        <activity
+            android:name=".ConsentActivity"
+            android:exported="false" />
+
     </application>
 </manifest>

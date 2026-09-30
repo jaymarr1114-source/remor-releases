@@ -33,7 +33,10 @@ $BT/aapt2 link -o "$BUILD/base.apk" -I "$AJAR" \
   "$BUILD/compiled/res.zip"
 
 echo "== javac"
-find "$APP/src/main/java" "$BUILD/gen" -name "*.java" > "$BUILD/sources.txt"
+# BenchTarget.java is bench-only (the interop harness's Java side);
+# it must never ship in the APK.
+find "$APP/src/main/java" "$BUILD/gen" -name "*.java" \
+  ! -name "BenchTarget.java" > "$BUILD/sources.txt"
 wc -l "$BUILD/sources.txt"
 # NOTE: -cp (not -bootclasspath): javac needs the real JDK's
 # java.lang.invoke for lambda metafactory; d8 dexes the result.

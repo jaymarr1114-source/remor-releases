@@ -1,5 +1,5 @@
 #!/bin/bash
-# RD-TARGET-ENDPOINT-1 gate: reproduces the mission's full evidence
+# RD-TARGET-REMOTE-1 gate: reproduces the mission's full evidence
 # battery in fresh sequential processes. Felix's independent re-run
 # is this one command from the worktree root:
 #
@@ -54,6 +54,8 @@ declare -a BATTERIES=(
     "proofs/rd1_proof.py"
     "proofs/rd1_adversarial.py"
     "proofs/rd1_fresh_process.py"
+    "proofs/rd1_remote_interop.py"
+    "proofs/rd1_inproc_product_path.py"
 )
 
 OVERALL=0
