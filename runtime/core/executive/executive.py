@@ -166,7 +166,8 @@ class ExecutiveController:
     # -- construction ---------------------------------------------------
     def _build_inlet(self, loop: str) -> LoopInlet:
         if loop == LOOP_RUN:
-            return RunLoopInlet(self._run_controller, self._substrate)
+            return RunLoopInlet(self._run_controller, self._substrate,
+                                gap_registry=self._gap_registry)
         if loop == LOOP_ACQUISITION:
             return AcquisitionLoopInlet(self._gap_registry, self._substrate)
         if loop == LOOP_EXECUTION:

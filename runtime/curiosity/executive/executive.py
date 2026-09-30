@@ -153,13 +153,20 @@ class CuriosityExecutive:
     gam: GovernanceAttestationMonitor (pull-only roll_call_status).
     run_controller: CuriosityRunController (owns cadence + substrate).
     demand_budget_s / demand_concurrent: the curiosity demand stated per
-        contention round (an honest estimate, recorded by the FRM).
+        contention round when no demand_bridge is bound (the standing
+        fallback, named loudly in the decision notes).
+    demand_bridge: FrmBridge (optional). When bound, the FRM round's
+        demands are STATED BY THE REAL CONTROLLERS via the bridge
+        (primary from the Primary RunController's arbitration_status,
+        curiosity from this run_controller's inquiry_views) -- SEAM-WIRE-1.
+        Unbound, the standing fallback demands apply and the notes say so.
     """
 
     def __init__(self, *, frm: Any, enforcement_state_dir: str,
                  gam: Any, run_controller: Any,
                  demand_budget_s: float = 60.0,
                  demand_concurrent: int = 2,
+                 demand_bridge: Any = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._frm = frm
         self._enforcement_state_dir = enforcement_state_dir
@@ -167,6 +174,7 @@ class CuriosityExecutive:
         self._run_controller = run_controller
         self._demand_budget_s = demand_budget_s
         self._demand_concurrent = demand_concurrent
+        self._demand_bridge = demand_bridge
         self._clock = clock
 
     # -- activation -----------------------------------------------------
@@ -208,18 +216,36 @@ class CuriosityExecutive:
         roll_call, roll_notes = self._check_roll_call()
 
         # 4. FRM grant: a real contention-round evaluation. No budget ->
-        # the inquiry does not start (C-4.2).
+        # the inquiry does not start (C-4.2). Demands are stated by the
+        # real controllers when a demand_bridge is bound (SEAM-WIRE-1);
+        # otherwise the standing fallback values apply, named loudly.
         from swarm_engine.curiosity.frm.policy import DomainDemand
+        if self._demand_bridge is not None:
+            demands = self._demand_bridge.demands()
+            primary_demand = demands.primary
+            curiosity_demand = demands.curiosity
+            demand_note = (
+                "FRM demands stated by the controllers: "
+                f"primary({demands.provenance['primary']}); "
+                f"curiosity({demands.provenance['curiosity']})")
+        else:
+            primary_demand = DomainDemand(domain="primary",
+                                         budget_s=0.0, max_concurrent=0)
+            curiosity_demand = DomainDemand(
+                domain="curiosity", budget_s=self._demand_budget_s,
+                max_concurrent=self._demand_concurrent)
+            demand_note = (
+                "FRM demands are the standing fallback (no demand_bridge "
+                "bound): primary=0, curiosity="
+                f"{self._demand_budget_s}s/{self._demand_concurrent}")
         round_ = self._frm.evaluate_round(
             enforcement_state=enforcement_state,
-            primary_demand=DomainDemand(domain="primary",
-                                       budget_s=0.0, max_concurrent=0),
-            curiosity_demand=DomainDemand(
-                domain="curiosity", budget_s=self._demand_budget_s,
-                max_concurrent=self._demand_concurrent),
+            primary_demand=primary_demand,
+            curiosity_demand=curiosity_demand,
         )
         grant = round_.grants["curiosity"]
         notes = list(roll_notes)
+        notes.append(demand_note)
         if round_.mid_epoch_refusal:
             notes.append(
                 f"FRM mid-epoch: reusing active epoch {round_.epoch_id} "

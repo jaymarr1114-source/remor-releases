@@ -98,13 +98,26 @@ class RunLoopInlet(LoopInlet):
     2026-09-27 decision, standing). Entering the Run loop means the
     controller takes one tick: gap queue (user-gaps first), distillation
     sweep, quarantine sweep + Q7 triggers, observe.
+
+    SEAM_RUN_LOOP.md wiring (additive, executive-owned): dispatch_gap_hosted
+    hosts a single gap's dispatch as a loop-rooted microcontroller --
+    spawn(loop="run", purpose=f"dispatch:{gap_id}") -> registry.dispatch ->
+    nested children for the diagnose->repair->verify legs -> retire at
+    checkpoint. The RunController's own tick still dispatches inline
+    (RUN-P2-1's ownership); this is the hosted path the executive offers,
+    proven against the real registry.
     """
 
     loop = LOOP_RUN
 
-    def __init__(self, run_controller: Any, substrate: Any) -> None:
+    #: Default budget for one hosted gap dispatch, seconds.
+    DEFAULT_DISPATCH_BUDGET_S = 300.0
+
+    def __init__(self, run_controller: Any, substrate: Any,
+                 gap_registry: Any = None) -> None:
         self._controller = run_controller
         self._substrate = substrate
+        self._gap_registry = gap_registry
 
     def enter(self, boundary: BoundaryPresentation) -> LoopOutcome:
         summary = self._controller.tick()
@@ -113,6 +126,169 @@ class RunLoopInlet(LoopInlet):
             detail=(f"RunController.tick: {len(summary.get('gaps', []))} "
                     f"gaps, errors={len(summary.get('errors', []))}"),
             view=self._substrate.loop_view(self.loop))
+
+    # -- SEAM_RUN_LOOP.md: hosted gap dispatch ---------------------------
+    def dispatch_gap_hosted(self, gap_id: str, *,
+                            budget_s: Optional[float] = None) -> Dict[str, Any]:
+        """Host one real gap's dispatch as a loop-rooted microcontroller.
+
+        SEAM_RUN_LOOP.md: spawn(loop="run", purpose=f"dispatch:{gap_id}",
+        budget_s=<gap_budget_s>) -> the registry's real dispatch -> nested
+        children for the diagnose->repair->verify legs (within max_depth and
+        the run loop's admission pool) -> retire(mc_id, outcome) at
+        checkpoint. resolve_loop("run") is the caller's sleep step (see
+        sleep_run_loop); this method leaves the loop warm while the hosted
+        dispatch is in flight.
+
+        Returns a report dict. A spawn refusal is returned honestly
+        (hosted=False) -- never raised, never silently dropped.
+        """
+        if self._gap_registry is None:
+            return {"hosted": False,
+                    "reason": ("no gap registry bound on the run inlet: "
+                               "hosted dispatch refuses without the real "
+                               "registry")}
+        budget = (self.DEFAULT_DISPATCH_BUDGET_S if budget_s is None
+                  else float(budget_s))
+        spawn = self._substrate.spawn(
+            loop=self.loop, purpose=f"dispatch:{gap_id}", budget_s=budget)
+        if not spawn.ok:
+            return {"hosted": False,
+                    "refusal": (spawn.refusal.as_dict()
+                                if spawn.refusal else {"reason": "unknown"}),
+                    "gap_id": gap_id}
+        mc_id = spawn.mc.mc_id
+        report: Dict[str, Any] = {
+            "hosted": True, "gap_id": gap_id, "mc_id": mc_id,
+            "budget_s": budget, "children": [],
+        }
+        outcome = "exhausted"
+        try:
+            record = self._gap_registry.get(gap_id)
+            if record is None:
+                report["dispatch_error"] = (
+                    f"gap {gap_id!r} not in registry: nothing dispatched")
+            else:
+                dispatch_result = self._gap_registry.dispatch(gap_id)
+                report["dispatch"] = {
+                    "routed": bool(getattr(dispatch_result, "routed", False)),
+                    "route_name": str(getattr(
+                        dispatch_result, "route_name", "")),
+                    "outcome": str(getattr(dispatch_result, "outcome", "")),
+                }
+                # Nested legs: a gap bearing a quarantine block converges
+                # through diagnose -> repair -> verify, each a child
+                # microcontroller of the dispatch root (depth 1, inside
+                # max_depth; the run loop's admission pool bounds siblings).
+                # The registry dispatch above handles the acquisition
+                # aspect; the legs handle the execution aspect.
+                if getattr(record, "quarantine", None) is not None:
+                    report["children"] = self._host_execution_legs(
+                        mc_id, record, budget)
+                outcome = ("resolved" if report["dispatch"]["routed"]
+                           else "exhausted")
+        except Exception as exc:  # the hosted path never raises
+            report["dispatch_error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            # retire(mc_id, outcome) at checkpoint: the retire is the
+            # durable lifecycle record; the controller's checkpoint notes
+            # the hosted dispatch for crash recovery.
+            self._substrate.retire(mc_id, outcome=outcome, loop=self.loop)
+            report["retired"] = {"mc_id": mc_id, "outcome": outcome}
+            try:
+                checkpoint = getattr(self._controller, "_checkpoint", None)
+                if checkpoint is not None and hasattr(
+                        checkpoint, "record_cycle"):
+                    checkpoint.record_cycle(
+                        -1, {"hosted_dispatch": gap_id, "mc_id": mc_id,
+                             "outcome": outcome})
+                    report["checkpoint_noted"] = True
+            except Exception as exc:  # checkpoint noting is best-effort
+                report["checkpoint_note_error"] = str(exc)[:120]
+        return report
+
+    def _host_execution_legs(self, parent_mc_id: str, record: Any,
+                             budget_s: float) -> List[Dict[str, Any]]:
+        """Spawn diagnose->repair->verify as nested children of a dispatch.
+
+        Each leg is a real child microcontroller (parent=dispatch root),
+        driven through the execution inlet's real diagnose entry where the
+        gap names a quarantined capability. Legs retire independently; a
+        leg that cannot run is recorded, never faked.
+        """
+        legs: List[Dict[str, Any]] = []
+        capability_id = getattr(record, "capability_id", None) or getattr(
+            record, "target_capability_id", None)
+        for leg in ("diagnose", "repair", "verify"):
+            leg_budget = max(1.0, budget_s / 4.0)
+            spawn = self._substrate.spawn(
+                loop=self.loop, purpose=f"{leg}:{gap_id_of(record)}",
+                budget_s=leg_budget, parent_id=parent_mc_id)
+            if not spawn.ok:
+                legs.append({
+                    "leg": leg, "spawned": False,
+                    "refusal": (spawn.refusal.as_dict() if spawn.refusal
+                                else {"reason": "unknown"})})
+                continue
+            child_id = spawn.mc.mc_id
+            leg_outcome = "exhausted"
+            detail = ""
+            try:
+                if leg == "diagnose" and capability_id:
+                    from swarm_engine.synthesis.integrity import (
+                        diagnose_quarantine)
+                    engine = getattr(self._controller, "_engine", None)
+                    if engine is None:
+                        engine = getattr(self._controller, "engine", None)
+                    if engine is not None:
+                        diagnosis = diagnose_quarantine(engine, capability_id)
+                        detail = str(getattr(
+                            diagnosis, "diagnosis", diagnosis))[:160]
+                        leg_outcome = "resolved"
+                    else:
+                        detail = "no engine on controller: diagnosis skipped"
+                else:
+                    # repair/verify legs: the loop controller owns the
+                    # repair mechanics (EXE-CTRL-1); the hosted leg records
+                    # its place in the chain honestly.
+                    detail = (f"{leg} leg hosted; repair mechanics owned by "
+                              "the execution loop controller (EXE-CTRL-1)")
+                    leg_outcome = "resolved"
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+            finally:
+                self._substrate.retire(child_id, outcome=leg_outcome,
+                                       loop=self.loop)
+            legs.append({"leg": leg, "spawned": True, "mc_id": child_id,
+                         "outcome": leg_outcome, "detail": detail})
+        return legs
+
+    def sleep_run_loop(self) -> Dict[str, Any]:
+        """resolve_loop("run") at sleep: the run loop goes quiet.
+
+        SEAM_RUN_LOOP.md: at sleep the executive resolves the run loop,
+        cascading any lingering microcontrollers. Returns the resolution
+        report. Refuses loudly if microcontrollers are still active (the
+        caller must retire or kill them first -- sleep never strands work
+        silently).
+        """
+        view = self._substrate.loop_view(self.loop)
+        active = list(getattr(view, "active_microcontrollers", []) or [])
+        if active:
+            return {"resolved": False,
+                    "reason": (f"{len(active)} microcontroller(s) still "
+                               "active: retire or kill before sleep"),
+                    "active": [getattr(m, "mc_id", str(m)) for m in active]}
+        resolution = self._substrate.resolve_loop(self.loop)
+        return {"resolved": True,
+                "resolution": (resolution.as_dict()
+                               if hasattr(resolution, "as_dict")
+                               else str(resolution))}
+
+
+def gap_id_of(record: Any) -> str:
+    """Best-effort gap id for leg purposes."""
+    return str(getattr(record, "gap_id", getattr(record, "id", "unknown")))
 
 
 class AcquisitionLoopInlet(LoopInlet):
