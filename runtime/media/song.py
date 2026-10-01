@@ -26,9 +26,10 @@ HONEST BOUNDS
 
 from __future__ import annotations
 
+import io
 import os
 import wave
-from typing import Dict
+from typing import Dict, List, Tuple
 
 import numpy as np
 from scipy import signal as spsig
@@ -47,40 +48,6 @@ def _synthesize_voice(text: str, wav_path: str, voice: str = "default") -> Dict:
     """
     from swarm_engine.media.voice import synthesize  # noqa: E402
     return synthesize(text, wav_path, voice=voice)
-
-
-def _read_wav_mono(path: str) -> tuple:
-    with wave.open(path, "rb") as w:
-        sr = w.getframerate()
-        nch = w.getnchannels()
-        sw = w.getsampwidth()
-        raw = w.readframes(w.getnframes())
-    if sw == 2:
-        data = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
-    elif sw == 4:
-        data = np.frombuffer(raw, dtype=np.int32).astype(np.float64) / 2147483648.0
-    else:
-        raise ValueError(f"unsupported sample width {sw} in {path}")
-    data = data.reshape(-1, nch).mean(axis=1)  # mono for analysis
-    return data, sr
-
-
-def _read_wav_stereo(path: str) -> tuple:
-    with wave.open(path, "rb") as w:
-        sr = w.getframerate()
-        nch = w.getnchannels()
-        sw = w.getsampwidth()
-        raw = w.readframes(w.getnframes())
-    if sw == 2:
-        data = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
-    elif sw == 4:
-        data = np.frombuffer(raw, dtype=np.int32).astype(np.float64) / 2147483648.0
-    else:
-        raise ValueError(f"unsupported sample width {sw} in {path}")
-    data = data.reshape(-1, nch)
-    if nch == 1:
-        data = np.repeat(data, 2, axis=1)
-    return data[:, :2], sr
 
 
 def _resample_to(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
@@ -114,15 +81,103 @@ def _vocal_activity_mask(vocal: np.ndarray, sr: int) -> np.ndarray:
     return np.repeat(sm, frame)[:len(vocal)]
 
 
-def _write_wav_stereo(path: str, stereo: np.ndarray, sr: int = SAMPLE_RATE) -> None:
+def _decode_wav_bytes(data: bytes) -> Tuple[np.ndarray, int]:
+    """Decode WAV bytes -> (stereo float64 array, sample_rate).
+
+    Raises ValueError when the bytes are not decodable PCM WAV audio.
+    Silence is decoded honestly (a silent array) -- it is not an error.
+    """
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        raise ValueError("empty audio data")
+    try:
+        bio = io.BytesIO(bytes(data))
+        with wave.open(bio, "rb") as w:
+            sr = w.getframerate()
+            nch = w.getnchannels()
+            sw = w.getsampwidth()
+            raw = w.readframes(w.getnframes())
+    except (wave.Error, EOFError, OSError) as exc:
+        raise ValueError("not decodable WAV audio: %s" % (exc,))
+    if sw == 2:
+        pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
+    elif sw == 4:
+        pcm = np.frombuffer(raw, dtype=np.int32).astype(np.float64) / 2147483648.0
+    else:
+        raise ValueError("unsupported sample width %d (need 16/32-bit PCM)" % sw)
+    if pcm.size == 0:
+        raise ValueError("WAV contains no audio frames")
+    pcm = pcm.reshape(-1, nch)
+    if nch == 1:
+        pcm = np.repeat(pcm, 2, axis=1)
+    return pcm[:, :2], sr
+
+
+def _encode_wav_bytes(stereo: np.ndarray, sr: int = SAMPLE_RATE) -> bytes:
+    """Encode a stereo float64 array -> 16-bit PCM WAV bytes."""
     peak = max(float(np.max(np.abs(stereo))), 1e-9)
     stereo = stereo * (0.89 / peak)
     pcm = (np.clip(stereo, -1.0, 1.0) * 32767.0).astype(np.int16)
-    with wave.open(path, "wb") as w:
+    bio = io.BytesIO()
+    with wave.open(bio, "wb") as w:
         w.setnchannels(2)
         w.setsampwidth(2)
         w.setframerate(sr)
         w.writeframes(pcm.tobytes())
+    return bio.getvalue()
+
+
+def mix_stems(instrumental_wav: bytes, voice_wavs: List[bytes],
+              sample_rate: int = SAMPLE_RATE) -> Dict:
+    """Mix one instrumental WAV + N voice WAVs into a full-song WAV.
+
+    Shared core used by both assemble_song() (file path) and the
+    POST /api/artifacts/audio/mix route (artifact bytes). Voices are
+    summed and mixed forward (+2 dB); the instrumental is ducked ~4 dB
+    under segments where the summed vocal is active (energy-envelope
+    sidechain). Output is peak-normalized stereo WAV bytes.
+
+    Returns {"ok": True, "wav_bytes", "duration_s", "sample_rate",
+    "n_voices"} or {"ok": False, "error"} on clean refusal. Never
+    synthesizes: undecodable input is refused, silence passes through
+    honestly.
+    """
+    if not isinstance(voice_wavs, (list, tuple)) or not voice_wavs:
+        return {"ok": False, "error": "at least one voice stem is required"}
+    try:
+        inst_st, inst_sr = _decode_wav_bytes(instrumental_wav)
+    except ValueError as exc:
+        return {"ok": False, "error": "instrumental stem: %s" % (exc,)}
+    voices = []
+    for i, vwav in enumerate(voice_wavs):
+        try:
+            v_st, v_sr = _decode_wav_bytes(vwav)
+        except ValueError as exc:
+            return {"ok": False, "error": "voice stem %d: %s" % (i, exc)}
+        voices.append(_resample_to(v_st, v_sr, sample_rate))
+    inst_st = _resample_to(inst_st, inst_sr, sample_rate)
+
+    n = max(len(inst_st), max(len(v) for v in voices))
+    inst_pad = np.zeros((n, 2))
+    inst_pad[:len(inst_st)] = inst_st
+    voc_sum = np.zeros((n, 2))
+    for v in voices:
+        voc_sum[:len(v)] += v
+    # average (not sum) so N voices don't clip the vocal bus
+    voc_pad = voc_sum / len(voices)
+
+    mask = _vocal_activity_mask(voc_pad.mean(axis=1), sample_rate)
+    duck = 1.0 - 0.37 * mask[:, None]          # ~ -4 dB under vocal
+    mix = inst_pad * duck * 0.9 + voc_pad * 1.26  # vocal forward (+2 dB)
+
+    wav_bytes = _encode_wav_bytes(mix, sample_rate)
+    return {
+        "ok": True,
+        "wav_bytes": wav_bytes,
+        "duration_s": n / sample_rate,
+        "sample_rate": sample_rate,
+        "n_voices": len(voices),
+    }
+
 
 
 def assemble_song(lyrics: str, spec: Dict, out_path: str, work_dir: str) -> Dict:
@@ -146,25 +201,21 @@ def assemble_song(lyrics: str, spec: Dict, out_path: str, work_dir: str) -> Dict
         return {"ok": False, "error": "voice synthesis failed",
                 "out_path": out_path}
 
-    inst_st, inst_sr = _read_wav_stereo(inst_path)
-    voc_st, voc_sr = _read_wav_stereo(vocal_path)
-    inst_st = _resample_to(inst_st, inst_sr, SAMPLE_RATE)
-    voc_st = _resample_to(voc_st, voc_sr, SAMPLE_RATE)
-
-    n = max(len(inst_st), len(voc_st))
-    inst_pad = np.zeros((n, 2)); inst_pad[:len(inst_st)] = inst_st
-    voc_pad = np.zeros((n, 2)); voc_pad[:len(voc_st)] = voc_st
-
-    mask = _vocal_activity_mask(voc_pad.mean(axis=1), SAMPLE_RATE)
-    duck = 1.0 - 0.37 * mask[:, None]          # ~ -4 dB under vocal
-    mix = inst_pad * duck * 0.9 + voc_pad * 1.26  # vocal forward (+2 dB)
-
-    _write_wav_stereo(out_path, mix, SAMPLE_RATE)
+    with open(inst_path, "rb") as fh:
+        inst_bytes = fh.read()
+    with open(vocal_path, "rb") as fh:
+        vocal_bytes = fh.read()
+    mixed = mix_stems(inst_bytes, [vocal_bytes])
+    if not mixed.get("ok"):
+        return {"ok": False, "error": "mix failed: %s" % mixed.get("error"),
+                "out_path": out_path}
+    with open(out_path, "wb") as fh:
+        fh.write(mixed["wav_bytes"])
     return {
         "ok": True,
         "out_path": out_path,
-        "duration_s": n / SAMPLE_RATE,
-        "sample_rate": SAMPLE_RATE,
+        "duration_s": mixed["duration_s"],
+        "sample_rate": mixed["sample_rate"],
         "instrumental_path": inst_path,
         "vocal_path": vocal_path,
         "instrumental_duration_s": inst["duration_s"],

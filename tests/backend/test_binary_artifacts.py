@@ -41,6 +41,30 @@ def _zip_bytes():
     return buf.getvalue()
 
 
+def _wav_bytes(freq=440.0, seconds=1.0, sample_rate=22050, stereo=False):
+    """Tiny real PCM WAV (sine tone) built with the stdlib only."""
+    import math
+    import struct
+    import wave
+    n = int(seconds * sample_rate)
+    mono = [int(16000 * math.sin(2.0 * math.pi * freq * i / sample_rate))
+            for i in range(n)]
+    if stereo:
+        frames = struct.pack("<%dh" % (2 * n),
+                             *[s for m in mono for s in (m, m)])
+        nch = 2
+    else:
+        frames = struct.pack("<%dh" % n, *mono)
+        nch = 1
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(nch)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(frames)
+    return buf.getvalue()
+
+
 class TestBinaryRoundtrip(unittest.TestCase):
     def test_zip_bytes_in_byte_identical_out(self):
         td, store, blobs = _stores()
@@ -248,23 +272,73 @@ class TestListAll(unittest.TestCase):
             td.cleanup()
 
 
-class TestAudioUnavailable(unittest.TestCase):
-    def test_mix_audio_honestly_unavailable(self):
+class TestAudioMixReal(unittest.TestCase):
+    """POST /api/artifacts/audio/mix is REAL (AUDIO-1): stems stored as
+    binary artifacts are decoded, mixed, and stored as a song artifact."""
+
+    def _stems(self, blobs):
+        inst = blobs.store_file("inst.wav",
+                                _wav_bytes(220.0, 2.0, 22050, stereo=True),
+                                "audio/wav")
+        v1 = blobs.store_file("v1.wav", _wav_bytes(440.0, 1.0), "audio/wav")
+        v2 = blobs.store_file("v2.wav", _wav_bytes(660.0, 1.5), "audio/wav")
+        self.assertTrue(inst["ok"] and v1["ok"] and v2["ok"])
+        return inst["artifact_id"], [v1["artifact_id"], v2["artifact_id"]]
+
+    def test_mix_audio_real(self):
+        import struct
+        import wave
         td, store, blobs = _stores()
         try:
-            res = blobs.mix_audio(instrumental_id=1, voice_ids=[2, 3])
-            self.assertFalse(res["ok"])
-            un = res["unavailable"]
-            self.assertEqual(un["code"], "AUDIO_PIPELINE_ABSENT")
-            self.assertEqual(un["gui"], "coming_soon")
-            # Synced 2026-09-27 (phase 5 R3): the media-substrate mission
-            # has landed in canonical (runtime/media/{music,song,voice}),
-            # so the honest-unavailability text now names the true missing
-            # piece -- voice synthesis without piper -- not the mission.
-            self.assertIn("piper", un["missing_substrate"])
-            self.assertNotIn("substrate exists", un["reason"].lower())
-            self.assertIn("full song", un["reason"])
+            iid, vids = self._stems(blobs)
+            res = blobs.mix_audio(instrumental_id=iid, voice_ids=vids)
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(res["content_type"], "audio/wav")
+            self.assertEqual(res["n_voices"], 2)
+            # honestly labeled: ACE-Step is NOT the instrumental engine
+            self.assertIn("ACE-Step NOT", res["engines"]["instrumental"])
+            got = blobs.get_file(res["artifact_id"])
+            self.assertTrue(got["ok"], got)
+            self.assertEqual(got["sha256"], res["sha256"])  # recorded
+            self.assertEqual(hashlib.sha256(got["data"]).hexdigest(),
+                             res["sha256"])
+            # byte-real song: decodes as stereo WAV, non-silent, sane length
+            with wave.open(io.BytesIO(got["data"]), "rb") as w:
+                self.assertEqual(w.getnchannels(), 2)
+                self.assertEqual(w.getframerate(), 44100)
+                raw = w.readframes(w.getnframes())
+            samps = struct.unpack("<%dh" % (len(raw) // 2), raw)
+            self.assertGreater(max(abs(s) for s in samps), 1000)
+            dur = len(samps) // 2 / 44100
+            self.assertAlmostEqual(dur, 2.0, delta=0.15)
+            # listed among artifacts (artifact lab can serve it)
+            ids = [a["artifact_id"] for a in blobs.list_all()]
+            self.assertIn(res["artifact_id"], ids)
             json.dumps(res)
+        finally:
+            td.cleanup()
+
+    def test_mix_audio_refusals(self):
+        td, store, blobs = _stores()
+        try:
+            iid, vids = self._stems(blobs)
+            # unknown artifact id
+            r = blobs.mix_audio(instrumental_id=999999, voice_ids=vids)
+            self.assertFalse(r["ok"])
+            # non-audio bytes stored as an artifact
+            txt = blobs.store_file("note.txt", b"not audio at all",
+                                   "text/plain")
+            r = blobs.mix_audio(instrumental_id=txt["artifact_id"],
+                                voice_ids=vids)
+            self.assertFalse(r["ok"])
+            self.assertIn("decod", r["error"].lower())
+            # empty / malformed ids
+            self.assertFalse(blobs.mix_audio(instrumental_id=iid,
+                                             voice_ids=[])["ok"])
+            self.assertFalse(blobs.mix_audio(instrumental_id="x",
+                                             voice_ids=vids)["ok"])
+            self.assertFalse(blobs.mix_audio(instrumental_id=True,
+                                             voice_ids=vids)["ok"])
         finally:
             td.cleanup()
 
@@ -337,15 +411,29 @@ class TestRoutes(unittest.TestCase):
         finally:
             td.cleanup()
 
-    def test_audio_mix_route_unavailable(self):
+    def test_audio_mix_route_real(self):
         td, store, blobs = _stores()
         try:
             routes = routes_for_binary_artifacts(blobs)
+            inst = blobs.store_file("inst.wav",
+                                    _wav_bytes(220.0, 1.0, 22050,
+                                               stereo=True), "audio/wav")
+            v1 = blobs.store_file("v1.wav", _wav_bytes(440.0, 1.0),
+                                  "audio/wav")
             res = dispatch(routes, "POST", "/api/artifacts/audio/mix",
-                           {"instrumental_id": 1, "voice_ids": [2, 3]})
-            self.assertFalse(res["ok"])
-            self.assertEqual(res["unavailable"]["code"],
-                             "AUDIO_PIPELINE_ABSENT")
+                           {"instrumental_id": inst["artifact_id"],
+                            "voice_ids": [v1["artifact_id"]]})
+            self.assertTrue(res["ok"], res)
+            self.assertIn("artifact_id", res)
+            # the song is retrievable over the download route, byte-identical
+            dl = dispatch(
+                routes, "GET",
+                "/api/artifacts/binary/%d" % res["artifact_id"], {})
+            self.assertTrue(dl["ok"], dl)
+            self.assertEqual(dl["download"]["sha256"], res["sha256"])
+            raw = base64.b64decode(dl["download"]["bytes"])
+            self.assertEqual(hashlib.sha256(raw).hexdigest(),
+                             res["sha256"])
             json.dumps(res)
         finally:
             td.cleanup()
