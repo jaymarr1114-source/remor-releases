@@ -21,10 +21,29 @@ Supporting changes (same worktree):
   `mc_charge_state` from the student turn into `fast_out` (additive;
   previously dropped — the inlet could not observe pool exhaustion).
 
-## Gate: 5/5 green (pending your re-run)
+## Gate: 3/5 green, 2 blocked on host contention (honest partial)
 `proofs/router_inlet1/gate_run.sh` — one command, 5 batteries in fresh
 sequential processes, exit 0. Manages the student server lifecycle and
 refuses to run if a foreign `llama-cli` is active.
+
+- p1 (fast turn): **PASS** — real turn, `[final]` label, real grant,
+  charged 1.16s, provenance `governed-student:qwen3-0.6b@23749fef…`.
+- p3 (issuance/charging/exhaustion): **PASS** — shared issuer used by
+  both callers; per-grant consumption tracked; pool exhaustion reported
+  honestly as `mc_charge_state="exhausted"`.
+- p4 (adversarial, 4 cases): **PASS** — enforcement flip, issuance
+  failure, corrupt-GGUF transport failure, insufficient deep grant;
+  all fail closed with real reasons, zero phantom charges.
+- p5 (sustained load): **functional PASS, stability bound BLOCKED** —
+  10/10 turns ok, 10 distinct grants, no ledger leakage, every grant
+  charged; but one turn took 63s (median 1.47s) under a foreign 8B
+  inference saturating the 2-core host, and a rerun attempt hit a
+  transport timeout at load ~12. The bound correctly detected
+  contention; a clean uncontended rerun is owed.
+- p2 (think_hard live 8B): **BLOCKED, not run** — requires the 8B with
+  no foreign 8B active; a sibling mission's inference (substrate-fix-1,
+  pid 6797) has been wedged at ~5% CPU for 27+ minutes. Not killed:
+  it is another mission's proof.
 
 ## Per-mandate results
 1. **Fresh structural re-map — done.** Inventoried `runtime/services/`
@@ -88,7 +107,11 @@ refuses to run if a foreign `llama-cli` is active.
   epoch-loop integration remains future work — the inherited bound)
 - Labels in served output: **PROVEN**
 - Adversarial fail-closed (4 cases): **PROVEN**
-- Sustained load (10 turns): **PROVEN**
+- Sustained load (10 turns): **PROVEN functionally; stability bound
+  BLOCKED** (one 63s turn under foreign-8B contention; clean rerun
+  owed on a quiet host)
+- Live 8B think_hard through the inlet: **BLOCKED** (p2 not run;
+  sibling 8B inference wedged the host — rerun owed)
 - Enforcement-state store integration: **PROVEN BUT BOUNDED** (read
   path is real; no live store existed in the gate — default RUNNING
   exercised, store-backed read exercised only against a missing dir)
@@ -110,6 +133,8 @@ the inlet into the serving path (and decides lifecycle ownership).
 
 ## What remains unproven
 - Your independent gate re-run (this is REPORTED until then)
+- p2 (live 8B think_hard through the inlet) and the p5 stability
+  bound: both blocked on host contention, reruns owed on a quiet host
 - FRM epoch-loop integration (standing bound, unchanged)
 - Real-device behavior
 - Enforcement store backed by a live record (only the missing-dir /
