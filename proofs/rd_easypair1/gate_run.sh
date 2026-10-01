@@ -28,6 +28,24 @@ cd "$ROOT"
 PASS=0
 FAIL=0
 
+# Toolchain: the Java batteries need javac. If it is not already on PATH,
+# fall back to the workspace JDKs used by the mobile builds (checked in
+# order); fail with a clear message if none is found.
+if ! command -v javac >/dev/null 2>&1; then
+  for CAND in "$HOME/workspace/remor_mobile/jdk/jdk-17.0.20.1+1/bin" \
+              "$HOME/workspace/sdks/rd-target-android-1/jdk17/bin"; do
+    if [ -x "$CAND/javac" ]; then
+      export PATH="$CAND:$PATH"
+      echo "gate: using javac at $CAND"
+      break
+    fi
+  done
+fi
+if ! command -v javac >/dev/null 2>&1; then
+  echo "gate: ERROR: javac not found on PATH and no workspace JDK matched" >&2
+  exit 1
+fi
+
 run_battery() {
   local name="$1"; shift
   echo "=================================================================="
@@ -51,11 +69,11 @@ run_battery "python-bench (discovery, pairing, routes)" \
 JAVA_CLASSES="/tmp/rd-easypair-gate-classes"
 run_battery "java-compile (proto/)" \
   bash -c "rm -rf '$JAVA_CLASSES' && mkdir -p '$JAVA_CLASSES' && \
-    javac -d '$JAVA_CLASSES' \
+    javac -encoding UTF-8 -d '$JAVA_CLASSES' \
       runtime/remote_dispatch/android/app/app/src/main/java/com/remor/dispatchtarget/proto/*.java"
 if [ -d "$JAVA_CLASSES" ]; then
   run_battery "java-unit (PairingServer, DiscoveryBeacon)" \
-    bash -c "javac -cp '$JAVA_CLASSES' -d '$JAVA_CLASSES' \
+    bash -c "javac -encoding UTF-8 -cp '$JAVA_CLASSES' -d '$JAVA_CLASSES' \
       tests/java/com/remor/dispatchtarget/proto/PairingServerTest.java && \
       java -cp '$JAVA_CLASSES' com.remor.dispatchtarget.proto.PairingServerTest"
 fi
