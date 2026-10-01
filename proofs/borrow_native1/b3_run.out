@@ -1,0 +1,5 @@
+b3: engine built; running DistillationLoop.distill ...
+b3: distill finished in 13.6s: success=True route=fresh-synthesis promoted='acquired.acq_distilled_dlt_e976_8c7453f73496' reason="adaptation route: no near-miss capability: no active record carries exactly one bound constant different from the goal's target constant -- adaptation refused"
+[b3] PASS=7 FAIL=0
+BATTERY b3 PASS
+EXIT:0

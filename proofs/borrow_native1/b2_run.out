@@ -1,0 +1,16 @@
+  task 0: verified (charged 70.1s)
+  task 1: verified (charged 120.1s)
+  task 2: verified (charged 120.5s)
+  task 3: verified (charged 125.4s)
+  task 4: verified (charged 191.2s)
+  task 5: verified (charged 123.4s)
+  task 6: verified (charged 135.2s)
+  task 7: verified (charged 123.1s)
+  task 8: verified (charged 139.9s)
+  task 9: verified (charged 130.3s)
+  task 10: verified (charged 113.3s)
+  task 11: verified (charged 141.2s)
+b2: 12/12 verified demonstrations saved
+[b2] PASS=53 FAIL=0
+BATTERY b2 PASS
+EXIT:0

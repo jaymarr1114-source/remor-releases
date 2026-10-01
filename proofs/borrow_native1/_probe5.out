@@ -1,0 +1,6 @@
+engine built
+solved: True
+candidates: 12000
+stages: ['analogical', 'deductive', 'synthesis']
+plan: {"name": "synthesized_general", "params": {"a": "any", "b": "any", "claimed": "any"}, "steps": [{"id": "s1", "op": "equals", "args": {"a": {"$param": "b"}, "b": 14}}, {"id": "s2", "op": "equals", "args": {"a": {"$param": "claimed"}, "b": 24}}, {"id": "s3", "op": "equals", "args": {"a": {"$param": "a"}, "b": 2}}, {"id": "s4", "op": "equals", "args": {"a": {"$param": "claimed"}, "b": 6}}, {"id": "s5", "op": "modulo", "args": {"a": {"$param": "claimed"}, "b": 2}}, {"id": "s6", "op": "if_else", "args": {"condition": {"$step": "s3"}, "then": {"$step": "s4"}, "otherwise": {"$step": "s5"}}}, {"id": "s7", "op": "if_else", "args": {"condition": {"$step": "s1"}, "then": {"$step": "s2"}, "otherwise": {"$step": "s6"}}}], "output": {"$step": "s7"}}
+EXIT:0

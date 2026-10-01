@@ -1,0 +1,6 @@
+engine built
+solved: True
+stages: ['analogical', 'deductive', 'synthesis']
+candidates: 53494
+plan: {'name': 'synthesized_general', 'params': {'op': 'any', 'a': 'any', 'b': 'any', 'claimed': 'any'}, 'steps': [{'id': 's1', 'op': 'modulo', 'args': {'a': {'$param': 'claimed'}, 'b': 4.0}}, {'id': 's2', 'op': 'is_before', 'args': {'a': 1, 'b': {'$step': 's1'}}}], 'output': {'$step': 's2'}}
+EXIT:0

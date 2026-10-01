@@ -1,0 +1,13 @@
+{
+ "success": true,
+ "route": "fresh-synthesis",
+ "promoted_name": "acquired.acq_distilled_dlt_e976_8c7453f73496",
+ "capability_id": "cap_00b607c8f15f1eb99bd5",
+ "build_examples": 8,
+ "heldout_examples": 4,
+ "heldout_passed": 4,
+ "negative_controls_passed": 2,
+ "verdict_admitted": true,
+ "reason": "adaptation route: no near-miss capability: no active record carries exactly one bound constant different from the goal's target constant -- adaptation refused",
+ "delta_id": "dlt_e97606c8380b2ba7"
+}

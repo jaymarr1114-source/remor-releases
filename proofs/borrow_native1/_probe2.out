@@ -1,0 +1,6 @@
+engine built
+solved: False
+stages: ['analogical', 'deductive', 'synthesis']
+candidates: 1500
+expressiveness: {'checked': True, 'expressible_by_type': True, 'constructible_by_current_search': True, 'structural_exclusion': False, 'unsatisfiable_args': [{'op': 'xor', 'arg_name': 'a', 'required_type': 'bool', 'reason': 'no_constructible_producer'}, {'op': 'last', 'arg_name': 'items', 'required_type': 'list[any]', 'reason': 'no_constructible_producer'}, {'op': 'and', 'arg_name': 'a', 'required_type': 'bool', 'reason': 'no_constructible_producer'}], 'param_types': {'op': 'str', 'a': 'int', 'b': 'int', 'claim
+EXIT:0

@@ -1,0 +1,7 @@
+engine built
+11 examples
+success: True
+route: fresh-synthesis
+reason: adaptation route: no near-miss capability: no active record carries exactly one bound constant different from the goal's target constant -- adaptation refused
+promoted: acquired.acq_distilled_dlt_c720_c182787dac07
+EXIT:0

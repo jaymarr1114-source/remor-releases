@@ -1,0 +1,138 @@
+{
+ "demonstrations": [
+  {
+   "input": {
+    "a": 2,
+    "b": 3
+   },
+   "output": 5,
+   "teacher_text": "Compute: 2 + 3\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 2 + 3 = 5  \nresult: 5",
+   "grant_id": "bebe9b92-ddaf-4e5b-860e-04c3217c3524",
+   "charged_s": 70.14940916399996,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 5,
+    "b": 7
+   },
+   "output": 12,
+   "teacher_text": "Compute: 5 + 7\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 5 + 7 = 12  \nresult: 12",
+   "grant_id": "e84df0c6-af68-4494-adf6-443d5e4bd918",
+   "charged_s": 120.08059947499987,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 10,
+    "b": 20
+   },
+   "output": 30,
+   "teacher_text": "Compute: 10 + 20\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 10 + 20 = 30  \nresult: 30",
+   "grant_id": "b99ed54a-cfb2-453b-9b11-c6d1cddcef60",
+   "charged_s": 120.49572726399992,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 1,
+    "b": 1
+   },
+   "output": 2,
+   "teacher_text": "Compute: 1 + 1\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 1 + 1 = 2  \nresult: 2",
+   "grant_id": "792edd6b-f5a9-4072-8666-8cb7cb81be17",
+   "charged_s": 125.3674023399999,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 15,
+    "b": 25
+   },
+   "output": 40,
+   "teacher_text": "Compute: 15 + 25\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 15 + 25 = 40  \nresult: 40",
+   "grant_id": "b4310b35-7d19-4cd5-a8fc-5d76d0c95e22",
+   "charged_s": 191.246879067,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 3,
+    "b": 8
+   },
+   "output": 11,
+   "teacher_text": "Compute: 3 + 8\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 3 + 8 = 11  \nresult: 11",
+   "grant_id": "8e940cdf-93de-4c17-9ae7-34f3a50b7e3b",
+   "charged_s": 123.43353905899994,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 12,
+    "b": 4
+   },
+   "output": 16,
+   "teacher_text": "Compute: 12 + 4\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 12 + 4 = 16  \nresult: 16",
+   "grant_id": "2e4d63b3-fa39-42c5-a234-371aa9120a02",
+   "charged_s": 135.2265033849999,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 9,
+    "b": 6
+   },
+   "output": 15,
+   "teacher_text": "Compute: 9 + 6\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 9 + 6 = 15  \nresult: 15",
+   "grant_id": "a4b715bf-a89d-4290-a025-4aa114cf5277",
+   "charged_s": 123.10768805499993,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 7,
+    "b": 13
+   },
+   "output": 20,
+   "teacher_text": "Compute: 7 + 13\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 7 + 13 = 20  \nresult: 20",
+   "grant_id": "730cbaf2-5909-4c04-a54f-fddd2373f993",
+   "charged_s": 139.900599973,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 25,
+    "b": 30
+   },
+   "output": 55,
+   "teacher_text": "Compute: 25 + 30\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 25 + 30 = 55  \nresult: 55",
+   "grant_id": "9308f130-0b90-46bf-a7a5-7b8859376ae1",
+   "charged_s": 130.29753369799982,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 8,
+    "b": 12
+   },
+   "output": 20,
+   "teacher_text": "Compute: 8 + 12\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 8 + 12 = 20  \nresult: 20",
+   "grant_id": "f69e3529-a8a1-4459-bf43-574ebdbf6d3c",
+   "charged_s": 113.26783838599977,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  },
+  {
+   "input": {
+    "a": 40,
+    "b": 60
+   },
+   "output": 100,
+   "teacher_text": "Compute: 40 + 60\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 40 + 60 = 100  \nresult: 100",
+   "grant_id": "2a9f9459-1227-405a-aaed-99e1d9312026",
+   "charged_s": 141.19569825100007,
+   "provenance": "borrowed:qwen3@7c41481f57cb95916b40956ab2f0b139b296d974"
+  }
+ ],
+ "provenance_ok": true,
+ "discarded": 0
+}
