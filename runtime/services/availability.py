@@ -192,9 +192,9 @@ ENTRIES: List[Dict[str, Any]] = [
         kind="llm-template-instantiation",
         feature="LLM-template agent instantiation",
         code="agent_instantiation",
-        reason=("template tpl_llm_coder_v1: substrate_kind 'llm' has no "
-                "instantiable substrate in this build (honest ABSENT). "
-                "Refusing rather than simulating."),
+        reason=("template tpl_llm_coder_v1: substrate_kind 'llm' is not "
+                "wired in this service (no provider / grant source). "
+                "Honest ABSENT: refusing rather than simulating."),
         missing_substrate="instantiable substrate for substrate_kind 'llm'",
         route={"method": "POST", "path": "/api/agents"},
         probe={"template_id": "tpl_llm_coder_v1"},

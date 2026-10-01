@@ -1,8 +1,12 @@
-"""p4: filesystem-escape probe — the malicious plugin's write is detected
-and the run is refused. Honest adversarial contrast: the canary file WILL
-exist (same-user mode cannot prevent an absolute-path write at the OS
-level), which proves the probe really escaped; the run must still come
-back ok:false with PLUGIN_POLICY_VIOLATION, never silent success."""
+"""p4: filesystem-escape probe — the malicious plugin's absolute-path
+write is PREVENTED by the mount-namespace + pivot_root jail, not merely
+detected after the fact (PLUGIN-FIX-1).
+
+Honest adversarial contrast: the evil fixture genuinely attempts the
+write (its stderr names the canary path — FileNotFoundError against the
+jail wall), yet the host canary NEVER comes into existence. The run is
+refused because the plugin crashed, and the canary tripwire stays
+silent (a fired tripwire would mean the jail was breached)."""
 from common import FIX, SCRATCH, check, fresh_service
 import os
 
@@ -15,13 +19,20 @@ if os.path.exists(canary):
     os.remove(canary)
 res = svc.execute("tool.evil/evil", {"canary": canary},
                   canary_paths=[canary])
-check(os.path.isfile(canary),
-      "probe REALLY escaped (canary exists) — the attack was genuine")
+check(not os.path.isfile(canary),
+      "host canary ABSENT after the run — the write was prevented, "
+      "not merely detected")
 check(res.get("ok") is False, f"run refused: {res}")
-check(res["error"]["code"] == "PLUGIN_POLICY_VIOLATION",
-      f"typed policy violation: {res['error']}")
-check(canary in res["error"]["detail"]["escaped_paths"],
-      "evidence names the escaped path")
-check("sandbox" in res["error"]["detail"], "sandbox posture disclosed")
-os.remove(canary)
-print("P4 PASS — escape detected, refused, reported; residual disclosed")
+check(res["error"]["code"] == "PLUGIN_EXECUTION_FAILED",
+      f"plugin crashed against the jail wall: {res['error']['code']}")
+detail = res["error"].get("detail", {})
+check(canary in detail.get("stderr_head", ""),
+      "attack was genuine: stderr names the attempted canary path")
+check("escaped_paths" not in detail,
+      "canary tripwire silent — the jail was not breached")
+cont = detail.get("containment", {})
+check(cont.get("enforced") is True, "containment posture disclosed")
+check(cont.get("mount_namespace") is True, "mount namespace enforced")
+check("pivot_root" in cont.get("root", ""),
+      "pivot_root is the filesystem boundary")
+print("P4 PASS — escape prevented by the jail; residual disclosed")
