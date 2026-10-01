@@ -79,7 +79,8 @@ Backend-contract services (S1 — merged route table, dispatched FIRST):
   Tasks:     POST /api/tasks, GET /api/tasks?limit=, GET /api/tasks/item?task_id=,
              POST /api/tasks/cancel, GET /api/tasks/queue,
              POST /api/tasks/recurring -> real persistent recurrence
-             scheduler (interval specs; gated by REMOR_RECURRENCE_ENABLED),
+             scheduler (interval specs; on by default,
+             REMOR_RECURRENCE_ENABLED=0 is the kill switch),
              GET /api/tasks/recurring -> schedule list,
              POST /api/tasks/recurring/cancel -> cancel schedule,
              GET /api/tasks/recurring/exposure -> gate + tier decision
@@ -1731,9 +1732,9 @@ def build_services(base_dir: str) -> Dict[str, Any]:
     # [Worker C / Task 3] persistent recurrence scheduler: sqlite store +
     # pumper thread firing through metering.guarded_submit (real quota
     # guards). Constructed on the metering service so fires are metered
-    # exactly like manual submits. Exposure is gated by
-    # REMOR_RECURRENCE_ENABLED (default off); see recurrence.py for the
-    # open free-vs-paid decision.
+    # exactly like manual submits. Exposure defaults ON (RECURRENCE-1);
+    # REMOR_RECURRENCE_ENABLED=0 is the kill switch. See recurrence.py
+    # for the open free-vs-paid decision.
     from swarm_engine.services.recurrence import (
         RecurrenceService, routes_for_recurrence)
     # [Worker D / S10] bearer-token gate: AuthGate provisions
