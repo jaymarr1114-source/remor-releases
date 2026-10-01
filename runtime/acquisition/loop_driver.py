@@ -30,10 +30,16 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 #: Observation sources this driver reads and writes.
 SRC_DELTA = "technique_delta"          # written by M1/Q5 ingestion (frozen)
+#: V10-P3 charter deltas, written by
+#: runtime/intellect/delta_capture.emit_delta (source="delta-capture").
+#: RUN-CTRL-V10-1: the distill leg covers both generations (M1-ingest +
+#: V10-P3 charter) with unified consumption marking, so the Run
+#: Controller's one cadence distills every delta exactly once.
+SRC_DELTA_CHARTER = "delta-capture"
 SRC_OUTCOME = "loop_driver:distillation_outcome"  # this driver's processed marker
 SRC_CYCLE = "loop_driver:cycle"        # this driver's cycle summary
 SRC_GAP = "loop_driver:gap"            # gap-touching call sites (M7 switchover)
@@ -133,11 +139,19 @@ class CognitionLoop:
     # ------------------------------------------------------------------
     # Cycle
     # ------------------------------------------------------------------
-    def cycle(self, *, time_budget_s: Optional[float] = None) -> Dict[str, Any]:
+    def cycle(self, *, time_budget_s: Optional[float] = None,
+              run_quarantine_sweep: bool = True) -> Dict[str, Any]:
         """Run one full loop cycle. Never raises: every step is isolated.
 
         Returns a CycleReport dict: per-step results, errors, timing, and
         whether the budget stopped further work.
+
+        run_quarantine_sweep=False skips the loop's own quarantine sweep
+        leg. RUN-CTRL-V10-1 (James's directive): the Run Controller
+        drives this cycle as its acquisition leg and owns the quarantine
+        sweep + Q7 itself (Q4's bounded sweep, authorized caller), so one
+        cadence runs exactly one quarantine sweep. Standalone/test use
+        keeps the default True (the loop's own sweep, unchanged).
         """
         budget = (self.cycle_budget_s if time_budget_s is None
                   else float(time_budget_s))
@@ -163,21 +177,25 @@ class CognitionLoop:
             new_deltas = []
             report["errors"].append(f"delta_scan: {type(exc).__name__}: {exc}")
 
-        for payload in new_deltas:
+        for obs_id, raw in new_deltas:
             if _over_budget():
                 report["budget_exceeded"] = True
                 break
             try:
-                outcome = self._distill_delta(payload)
+                outcome = self._distill_delta(obs_id, raw)
                 report["distilled"].append(outcome)
             except Exception as exc:  # one bad delta never aborts the cycle
-                delta_id = (payload.get("delta") or {}).get("delta_id", "?")
+                delta_id = (raw.get("delta") or {}).get("delta_id", "?")
                 report["distill_errors"].append(
                     {"delta_id": delta_id,
                      "error": f"{type(exc).__name__}: {exc}"})
 
         # -- step 2: quarantine sweep (M5's driver, on the loop's cadence) --
-        if not _over_budget():
+        # Skipped when the Run Controller drives this cycle as its
+        # acquisition leg (run_quarantine_sweep=False): the Controller's
+        # tick owns the quarantine sweep + Q7 (Q4's bounded sweep), and one
+        # cadence runs exactly one sweep.
+        if run_quarantine_sweep and not _over_budget():
             try:
                 report["sweep"] = self._sweep_quarantine()
             except Exception as exc:
@@ -197,27 +215,56 @@ class CognitionLoop:
     # ------------------------------------------------------------------
     # Delta scan + M1→M2 adaptation + distillation
     # ------------------------------------------------------------------
-    def _scan_new_deltas(self) -> List[Dict[str, Any]]:
+    def _scan_new_deltas(self) -> List[Tuple[str, Dict[str, Any]]]:
         """Technique deltas recorded since the last processed marker.
 
-        Processed markers are the driver's own outcome observations, so the
-        scan is restart-safe: a delta is new iff no outcome observation
-        carries its delta_id.
+        Returns (observation_id, raw) tuples for both delta generations:
+        M1-ingest (source "technique_delta") and V10-P3 charter (source
+        "delta-capture").
+
+        RUN-CTRL-V10-1: the processed marker is UNIFIED with V10-P4's
+        consumption record (kind "distillation_consumption", keyed by
+        delta_observation_id). This driver's scan and V10-P4's
+        find_pending_deltas therefore see the same consumption, and the
+        Controller's one cadence can never double-drive a delta. The
+        driver's own outcome observations (keyed by delta_id) are also
+        honored, so deltas distilled before the unification are not
+        re-distilled.
         """
-        processed = set()
-        deltas = []
+        from swarm_engine.intellect.unified_memory import read_experiences
+        consumed: set = set()
+        for rec in read_experiences(
+                self.epistemic, origin_loop="acquisition",
+                kind="distillation_consumption", limit=10000):
+            oid = (rec.get("raw") or {}).get("delta_observation_id")
+            if oid:
+                consumed.add(oid)
+        legacy_processed: set = set()
+        deltas: List[Tuple[str, Dict[str, Any]]] = []
         for obs in self.epistemic.all_observations():
             src = getattr(obs, "source", "")
             raw = getattr(obs, "raw", None) or {}
             if src == SRC_OUTCOME and raw.get("delta_id"):
-                processed.add(raw["delta_id"])
-            elif src == SRC_DELTA and isinstance(raw.get("delta"), dict):
-                deltas.append(raw)
-        return [p for p in deltas
-                if p["delta"].get("delta_id") not in processed]
+                legacy_processed.add(raw["delta_id"])
+            elif (src in (SRC_DELTA, SRC_DELTA_CHARTER)
+                    and isinstance(raw.get("delta"), dict)):
+                deltas.append((getattr(obs, "observation_id", ""), raw))
+        return [(oid, raw) for oid, raw in deltas
+                if oid not in consumed
+                and (raw["delta"].get("delta_id")
+                     not in legacy_processed)]
 
-    def _distill_delta(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Adapt one M1-schema delta to M2's schema and distill it.
+    def _distill_delta(self, obs_id: str,
+                       raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Adapt one delta to M2's schema and distill it.
+
+        Two generations, one driver (RUN-CTRL-V10-1): M1-schema dicts
+        (Y-Z-T-E-D-V-C, source "technique_delta") go through
+        _adapt_m1_to_m2; V10-P3 charter dicts (technique_t/objective_x,
+        source "delta-capture") go through V10-P4's charter_to_delta_record.
+        Either way the outcome is recorded as an outcome observation AND
+        as V10-P4's consumption marker, so the unified scan never returns
+        the delta again and find_pending_deltas stays consistent.
 
         Never raises on a failed distillation — the failure is named in the
         returned outcome and persisted as an observation (the honest path,
@@ -225,28 +272,55 @@ class CognitionLoop:
         """
         from swarm_engine.acquisition.delta import (
             DeltaRecord, DeltaValidationError)
-        m1 = payload["delta"]
-        delta_id = m1.get("delta_id", "?")
-        outcome: Dict[str, Any] = {"delta_id": delta_id, "success": False,
-                                  "reason": "", "promoted_name": None}
+        from swarm_engine.acquisition.distill_driver import mark_consumed
+        delta = raw["delta"]
+        outcome: Dict[str, Any] = {
+            "delta_id": delta.get("delta_id", obs_id),
+            "success": False, "reason": "", "promoted_name": None}
 
-        actions = self._demo_actions_for(delta_id)
-        m2 = self._adapt_m1_to_m2(m1, actions)
-        try:
-            m2.validate()
-        except DeltaValidationError as exc:
-            outcome["reason"] = f"delta rejected: {exc}"
-            self._record_outcome(outcome, m1)
-            return outcome
+        def _consume(status: str, reason: str) -> None:
+            mark_consumed(
+                self.epistemic,
+                {"observation_id": obs_id, "raw": raw},
+                {"status": status, "reason": reason,
+                 "promoted_name": outcome["promoted_name"]})
+
+        is_charter = (isinstance(delta.get("technique_t"), dict)
+                      or "objective_x" in delta)
+        m2 = None
+        if is_charter:
+            from swarm_engine.acquisition.distill_driver import (
+                charter_to_delta_record, NotDistillable)
+            try:
+                m2 = charter_to_delta_record(
+                    {"observation_id": obs_id, "raw": raw})
+            except NotDistillable as exc:
+                outcome["reason"] = f"charter refused: {exc}"
+                self._record_outcome(outcome, delta)
+                _consume("refused", str(exc))
+                return outcome
+            outcome["delta_id"] = m2.delta_id
+        else:
+            actions = self._demo_actions_for(outcome["delta_id"])
+            m2 = self._adapt_m1_to_m2(delta, actions)
+            try:
+                m2.validate()
+            except DeltaValidationError as exc:
+                outcome["reason"] = f"delta rejected: {exc}"
+                self._record_outcome(outcome, delta)
+                _consume("refused", str(exc))
+                return outcome
 
         result = self._distiller().distill(m2)
         outcome["success"] = bool(result.success)
         outcome["reason"] = result.reason or ""
         outcome["promoted_name"] = result.promoted_name
         outcome["route"] = getattr(result, "route", "")
-        self._record_outcome(outcome, m1, result=result)
+        self._record_outcome(outcome, delta, result=result)
+        _consume("distilled" if result.success else "refused",
+                 outcome["reason"])
         if result.success:
-            self._record_experience(m1, m2, result)
+            self._record_experience(delta, m2, result)
         return outcome
 
     def _distiller(self) -> Any:

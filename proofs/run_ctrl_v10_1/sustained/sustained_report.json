@@ -1,0 +1,14 @@
+{
+ "pin": "5cbe778e550a0c1b439254fbeb26c65d83bb688f",
+ "dirty_runtime": false,
+ "elapsed_s": 3743.187201976776,
+ "cycles": 148,
+ "cycles_with_errors": 0,
+ "cycles_with_acceptance": 148,
+ "gap_dispatches": 18,
+ "seeded_gaps": 3,
+ "budget_exhausted": true,
+ "stopped": false,
+ "resumed": false,
+ "success": true
+}

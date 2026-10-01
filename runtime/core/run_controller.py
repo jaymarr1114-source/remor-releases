@@ -62,19 +62,33 @@ What this file builds (only the missing ownership layer):
     developmental-stage transition hooks (dormant until V10-P7).
 
 What it reuses (called, never edited, never rebuilt):
-  - run_distillation_sweep (V10-P4): the sweep; this file is the clock.
+  - CognitionLoop.cycle (Q1): the acquisition leg -- ingest scan,
+    distill scan (both delta generations, unified consumption), observe.
+    RUN-CTRL-V10-1 (James's directive): Q1's loop_driver.cycle() is the
+    seed the Controller drives. The RUN-EXEC-1 "never by the RunController"
+    clause is explicitly superseded: the Controller drives the cycle as
+    its acquisition leg with run_quarantine_sweep=False (the tick owns the
+    quarantine sweep + Q7 itself), and the cycle's distill leg covers the
+    V10-P3 charter generation via V10-P4's adapter, so the retired
+    run_distillation_sweep step double-drives nothing and orphans nothing.
   - GapRegistry.list_gaps / dispatch (M7): the gap queue and its routes.
-  - repair_all_quarantined / diagnose_quarantine (M5): the sweep + diagnosis.
+  - run_quarantine_sweep (Q4): the bounded, audited quarantine sweep --
+    per-capability isolation, total time bound, sweep audit trail; the
+    restore step runs under the engine's own caller context (authorized),
+    never a bare string. RUN-CTRL-V10-1 repaired the M5 unhardened path.
+  - diagnose_quarantine (M5): the diagnosis behind the Q7 trigger.
   - SubstrateAcquisitionDriver.attempt (M3): the Q7 trigger -- M5's
     diagnosis fires M3's driver from a real failure, no operator.
   - record_experience (V10-P1): every Controller action is an observation.
   - parse_dependency_reason (M3): reads the diagnosis, asserts nothing.
 
-Q1's CognitionLoop.cycle() is deliberately NOT driven here: it targets the
-pre-V10 record generation (M1-schema technique_delta source observations);
-the V10 generation (V10-P3 provenance-stamped deltas) is driven by V10-P4's
-sweep, which this Controller clocks. Driving both would double-drive
-distillation -- that is the duplication this mission refuses.
+One cadence (RUN-CTRL-V10-1): the Controller's tick is the only clock.
+Q1's cycle is driven inside it as the acquisition leg; the V10-P4 sweep
+step is retired (its charter adapter absorbed into the cycle's distill
+leg, its consumption marker unified with the cycle's). Driving both the
+cycle and the sweep would double-drive distillation -- that is the
+duplication this mission refused, proven causal before the repair
+(proofs/run_ctrl_v10_1/causal_01_double_drive.py).
 
 Anti-duplication contract (James, 2026-09-27): a second driver, a second
 scheduler, or a parallel gap queue in this file is the defect.
@@ -389,6 +403,12 @@ class RunController:
         self._stop = threading.Event()
         self._pause = threading.Event()  # set => paused
         self._scheduler = DumbScheduler(self.config.cadence_interval_s)
+        # RUN-CTRL-V10-1: Q1's CognitionLoop.cycle() is the seed the
+        # Controller drives -- the acquisition leg of every tick.
+        # Constructed once here (engine-injected, like everything else);
+        # the tick drives it with run_quarantine_sweep=False.
+        from swarm_engine.acquisition.loop_driver import CognitionLoop
+        self._cognition_loop = CognitionLoop(engine)
         if checkpoint_path is None:
             base = getattr(engine, "db_path", None)
             if base:
@@ -869,9 +889,10 @@ class RunController:
 
     # -- one cadence tick ----------------------------------------------------
     def tick(self, cycle_n: int = 0) -> Dict[str, Any]:
-        """One authorized tick: gap queue (user-gaps first), distillation
-        sweep, quarantine sweep + Q7 triggers, observe. Cooperative with the
-        cycle budget: a step already running is never killed mid-flight."""
+        """One authorized tick: gap queue (user-gaps first), acquisition leg
+        (Q1's cycle, driven by the Controller), quarantine sweep + Q7
+        triggers, observe. Cooperative with the cycle budget: a step
+        already running is never killed mid-flight."""
         cfg = self.config
         started = time.monotonic()
         summary: Dict[str, Any] = {
@@ -915,20 +936,29 @@ class RunController:
         if _over_budget():
             summary["budget_exceeded"] = True
 
-        # 2. distillation sweep (V10-P4; this Controller is the clock) -----
+        # 2. acquisition leg: Q1's cycle, driven by the Controller --------
+        # RUN-CTRL-V10-1: the tick is the one cadence; Q1's
+        # loop_driver.cycle() is the acquisition leg it drives (the seed).
+        # The retired V10-P4 sweep step double-drove distillation against
+        # this leg (proven causal); the cycle's distill leg now covers both
+        # delta generations with unified consumption.
         if not _over_budget():
             try:
-                summary["sweep"] = self._distill_sweep()
+                remaining = (started + cfg.cycle_budget_s
+                             - time.monotonic())
+                summary["sweep"] = self._acquisition_leg(remaining)
             except Exception as exc:
                 summary["errors"].append(
-                    f"distill_sweep: {type(exc).__name__}: {exc}")
+                    f"acquisition_leg: {type(exc).__name__}: {exc}")
         else:
             summary["budget_exceeded"] = True
 
         # 3. quarantine sweep + Q7 triggers --------------------------------
         if not _over_budget():
             try:
-                q = self._quarantine_sweep()
+                remaining = (started + cfg.cycle_budget_s
+                             - time.monotonic())
+                q = self._quarantine_sweep(budget_s=remaining)
                 summary["quarantine"] = q["sweep"]
                 summary["q7_attempts"] = q["q7_attempts"]
             except Exception as exc:
@@ -1029,33 +1059,62 @@ class RunController:
             causal_chain=[self._run_id, gap_id])
         return outcome
 
-    # -- distillation sweep ------------------------------------------------------
-    def _distill_sweep(self) -> Dict[str, Any]:
-        """Clock V10-P4's sweep. The sweep is the work; this is the clock."""
-        from swarm_engine.acquisition.distill_driver import (
-            run_distillation_sweep)
-        summary = run_distillation_sweep(
-            self.engine, self.epistemic, limit=1000)
+    # -- acquisition leg: Q1's cycle, driven by the Controller ---------------
+    def _acquisition_leg(self, budget_s: float) -> Dict[str, Any]:
+        """Drive Q1's CognitionLoop.cycle() as the acquisition leg of the tick.
+
+        RUN-CTRL-V10-1 (James's directive): the Q1 driver is the seed the
+        Controller drives. The cycle's distill leg covers both delta
+        generations (M1-ingest + V10-P3 charter) with unified consumption
+        marking -- this one drive replaces the retired V10-P4 sweep step,
+        so no delta is distilled twice and none is orphaned. The cycle's
+        own quarantine sweep is NOT driven here (run_quarantine_sweep=False):
+        the tick owns the quarantine sweep + Q7 (Q4's bounded sweep, step 3).
+        """
+        report = self._cognition_loop.cycle(
+            time_budget_s=max(0.0, budget_s), run_quarantine_sweep=False)
         self._observe(
-            "distill_sweep",
-            f"Run Controller: distillation sweep examined "
-            f"{summary.get('examined', 0)}, distilled "
-            f"{len(summary.get('distilled', []))}, refused "
-            f"{len(summary.get('refused', []))}, errors "
-            f"{len(summary.get('errors', []))}.",
-            {"kind": "distill_sweep", "summary": summary},
+            "acquisition_leg",
+            f"Run Controller: acquisition leg (Q1 cycle) distilled "
+            f"{len(report.get('distilled', []))}, distill errors "
+            f"{len(report.get('distill_errors', []))}, cycle errors "
+            f"{len(report.get('errors', []))}, budget_exceeded="
+            f"{report.get('budget_exceeded')}.",
+            {"kind": "acquisition_leg", "summary": report},
             causal_chain=[self._run_id])
-        return summary
+        return report
 
     # -- quarantine sweep + Q7 ------------------------------------------------------
-    def _quarantine_sweep(self) -> Dict[str, Any]:
-        """M5's sweep on the Controller's cadence, then the Q7 trigger:
+    def _quarantine_sweep(self, budget_s: float = 600.0) -> Dict[str, Any]:
+        """Q4's bounded sweep on the Controller's cadence, then the Q7 trigger:
         where the diagnosis identifies a missing substrate, M3's driver
-        fires from that diagnosis -- no operator."""
-        from swarm_engine.synthesis.integrity import repair_all_quarantined
-        sweep = repair_all_quarantined(
-            self.engine, caller="run_controller",
-            reason="run_controller cadence sweep")
+        fires from that diagnosis -- no operator.
+
+        RUN-CTRL-V10-1 repair: the sweep runs through Q4's
+        run_quarantine_sweep (per-capability error isolation, total time
+        bound, persistent audit trail) -- not M5's unbounded
+        repair_all_quarantined -- and the restore step runs under the
+        engine's own caller context (authorized via the oracle registry),
+        not the bare "run_controller" string, which restore_everywhere's
+        gate refuses (proven causal:
+        proofs/run_ctrl_v10_1/causal_03_bare_caller.py). worker_mode is
+        "in_process": the tick runs inside the live service process with
+        a live engine, and subprocess mode fail-closes against a
+        caller-supplied live engine (DB single-owner rule). The total
+        bound is the tick's remaining cycle budget: the sweep never
+        overruns the cadence it serves.
+        """
+        from swarm_engine.synthesis.integrity import run_quarantine_sweep
+        from swarm_engine.governance.caller_authorization import (
+            _engine_caller_context)
+        total = max(1.0, float(budget_s))
+        sweep = run_quarantine_sweep(
+            engine=self.engine, worker_mode="in_process",
+            caller=_engine_caller_context(self.engine),
+            per_capability_timeout_s=min(600.0, total),
+            total_timeout_s=total,
+            reason="run_controller cadence sweep",
+            audit=True)
         q7_attempts: List[Dict[str, Any]] = []
         try:
             quarantined = self.engine.capabilities.list(
@@ -1077,11 +1136,15 @@ class RunController:
                 q7_attempts.append(attempt)
         self._observe(
             "quarantine_sweep",
-            f"Run Controller: quarantine sweep saw "
-            f"{sweep.get('count', 0)} quarantined; "
+            f"Run Controller: quarantine sweep (Q4 bounded) saw "
+            f"{len(sweep.get('targets', []))} quarantined: "
+            f"{(sweep.get('summary') or {}).get('restored', 0)} restored, "
+            f"{(sweep.get('summary') or {}).get('errors', 0)} errors, "
+            f"{(sweep.get('summary') or {}).get('skipped', 0)} skipped; "
             f"{len(q7_attempts)} Q7 substrate triggers fired.",
             {"kind": "quarantine_sweep",
-             "count": sweep.get("count", 0),
+             "sweep_summary": sweep.get("summary"),
+             "run_id": sweep.get("run_id"),
              "q7_attempts": q7_attempts},
             causal_chain=[self._run_id])
         return {"sweep": sweep, "q7_attempts": q7_attempts}

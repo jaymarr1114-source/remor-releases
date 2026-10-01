@@ -42,20 +42,28 @@ LOOP_ACCEPTANCE = "acceptance"
 LOOP_DISTILLATION = "distillation"
 LOOP_GENERALIZATION = "generalization"
 
-#: Q1 settlement (RUN-EXEC-1 decision: EXPLICITLY SUBORDINATE).
-#: Q1's CognitionLoop is the Acquisition loop's cognition driver. It is
-#: retained (Q1 owns the file; no rewrite), and it is driven ONLY through
-#: AcquisitionLoopInlet.drive_cognition -- never directly, and never by the
-#: RunController (which keeps its V10-P2 no-double-drive discipline: the V10
-#: generation is driven by V10-P4's sweep, which the RunController clocks).
-#: Until the full Acquisition loop controller exists (ACQ-CTRL-1), nothing
-#: drives it on a schedule; the executive records that state honestly.
+#: Q1 settlement (RUN-EXEC-1 decision: EXPLICITLY SUBORDINATE; SUPERSEDED
+#: in part by RUN-CTRL-V10-1, James's directive 2026-10-01).
+#: Q1's CognitionLoop is the Acquisition loop's cognition driver AND the
+#: seed the Run Controller drives as its acquisition leg. The "never by the
+#: RunController" clause below is superseded: the Controller drives
+#: CognitionLoop.cycle() on its cadence (run_quarantine_sweep=False; the
+#: tick owns the quarantine sweep + Q7), and the cycle's distill leg covers
+#: both delta generations with unified consumption, so the retired V10-P4
+#: sweep step double-drives nothing. AcquisitionLoopInlet.drive_cognition
+#: remains the executive's HOSTED inlet path (a microcontroller with
+#: loop='acquisition'); the scheduled path is the Controller's tick.
+#: Q1 owns the file; the extension is additive (new keyword + charter
+#: generation in the distill leg), not a rewrite.
 Q1_COGNITION_DRIVER = "swarm_engine.acquisition.loop_driver.CognitionLoop"
 Q1_DRIVE_CONTRACT = (
-    "driven only through AcquisitionLoopInlet.drive_cognition, hosted in a "
-    "microcontroller with loop='acquisition' against the inlet's cycle "
-    "budget; the RunController never drives CognitionLoop.cycle() (V10-P2 "
-    "no-double-drive discipline); scheduled driving awaits ACQ-CTRL-1."
+    "driven by the RunController as its acquisition leg "
+    "(CognitionLoop.cycle(time_budget_s=..., run_quarantine_sweep=False), "
+    "RUN-CTRL-V10-1 supersedes the V10-P2 no-double-drive clause: the "
+    "cycle's distill leg covers both delta generations with unified "
+    "consumption marking); also drivable through "
+    "AcquisitionLoopInlet.drive_cognition, hosted in a microcontroller "
+    "with loop='acquisition' against the inlet's cycle budget."
 )
 
 
