@@ -5,16 +5,22 @@ perception/learning/action -- the epistemic store, the capability store,
 and the planner's primitive registry queried as ONE process, not three
 separate components with three separate vocabularies.
 
-Two mechanisms live here:
+Three mechanisms live here:
 
-1. ``UnifiedMemory`` -- one query interface spanning all three stores.
-   The stores stay authoritative: no duplicated state, no shadow copies,
-   no writes to the capability store or the registry (both are
-   read-only from this layer). The layer unifies access and resolves
-   cross-references (capability <-> distillation experience record <->
-   epistemic delta) from the linkage the loop itself writes.
+1. Unified write/read path -- record_experience / read_experiences (and
+   record_evidence / record_hypothesis / record_experiment). THE write path
+   every loop uses. The epistemic store stays the single physical substrate;
+   provenance is stamped additively. This is the live "one unified memory".
 
-2. Planner-attempt Z-check -- the honest replacement for the lexical
+2. Cross-store query helpers -- query_memory / trace_delta / trace_capability /
+   similar_experiences / prior_attempts (MEMORY-UNIFY-1: extracted from the
+   un-adopted UnifiedMemory class as plain module functions). Diagnostic
+   utilities; the stores stay authoritative, no duplicated state, no shadow
+   copies. The layer unifies access and resolves cross-references
+   (capability <-> distillation experience record <-> epistemic delta)
+   from the linkage the loop itself writes.
+
+3. Planner-attempt Z-check -- the honest replacement for the lexical
    ``_objective_overlap`` heuristic in the ingestion gate. Instead of
    asking "do any words overlap?", the system asks the planner to
    ATTEMPT the objective as a bounded sandboxed dry-run (PURE policy:
@@ -389,305 +395,321 @@ class UnifiedAnswer:
                 "links": self.links}
 
 
-class UnifiedMemory:
-    """One query interface over epistemic / capability / planner vocabularies.
+# ---------------------------------------------------------------------------
+# Cross-store query helpers (MEMORY-UNIFY-1).
+#
+# Extracted from the un-adopted UnifiedMemory class as plain module functions
+# per James's directive ("retain what's usable, kick what's not", U-9).
+# The class is gone; the query/trace logic remains available as functions
+# without a dead class standing beside the live module-level write/read path.
+#
+# These are diagnostic utilities. The engine's loops use record_experience /
+# read_experiences (the live unified write/read path above), not these helpers.
+# ---------------------------------------------------------------------------
 
-    All three stores stay authoritative; this layer holds no records of
-    its own (the z-check attempt log lives in the epistemic store via
-    the frozen API). The capability store and the primitive registry
-    are read-only from here -- never edited, never badge-flipped.
+def query_memory(epistemic: Any, capabilities: Any, registry: Any,
+                 question: str, limit: int = 10) -> UnifiedAnswer:
+    """Cross-store lexical query over epistemic / capability / primitive stores.
+
+    All three stores stay authoritative; this holds no records of its own.
+    Returns a UnifiedAnswer with hits from each store plus structural links.
     """
+    toks = _tokens(question)
+    ans = UnifiedAnswer(question=question)
+    ans.epistemic_hits = _search_epistemic(epistemic, toks, limit)[:limit]
+    ans.capability_hits = _search_capabilities(capabilities, toks, limit)[:limit]
+    ans.primitive_hits = _search_primitives(registry, toks, limit)[:limit]
+    ans.links = _resolve_links(epistemic, ans)
+    return ans
 
-    def __init__(self, epistemic: Any, capabilities: Any, registry: Any,
-                 planner: Any = None):
-        self.epistemic = epistemic
-        self.capabilities = capabilities
-        self.registry = registry
-        self.planner = planner
 
-    # -- unified query ----------------------------------------------------
-    def query(self, question: str, limit: int = 10) -> UnifiedAnswer:
-        toks = _tokens(question)
-        ans = UnifiedAnswer(question=question)
-        ans.epistemic_hits = self._search_epistemic(toks, limit)[:limit]
-        ans.capability_hits = self._search_capabilities(toks, limit)[:limit]
-        ans.primitive_hits = self._search_primitives(toks, limit)[:limit]
-        ans.links = self._resolve_links(ans)
-        return ans
+def _search_epistemic(epistemic: Any, toks: Sequence[str],
+                      limit: int) -> List[Dict[str, Any]]:
+    hits = []
+    try:
+        observations = epistemic.all_observations()
+    except Exception:
+        observations = []
+    for o in observations:
+        score = _overlap_score(toks, o.content or "", o.source or "")
+        if score > 0:
+            hits.append({"kind": "observation",
+                         "id": o.observation_id,
+                         "source": o.source,
+                         "summary": (o.content or "")[:200],
+                         "score": round(score, 3)})
+    try:
+        hyps = epistemic.all_hypotheses()
+    except Exception:
+        hyps = []
+    for h in hyps:
+        score = _overlap_score(toks, getattr(h, "statement", "") or "")
+        if score > 0:
+            hits.append({"kind": "hypothesis",
+                         "id": getattr(h, "hypothesis_id", "?"),
+                         "source": "hypothesis",
+                         "summary": (getattr(h, "statement", "") or "")[:200],
+                         "score": round(score, 3)})
+    hits.sort(key=lambda h: -h["score"])
+    return hits[:limit]
 
-    def _search_epistemic(self, toks: Sequence[str],
-                          limit: int) -> List[Dict[str, Any]]:
-        hits = []
-        try:
-            observations = self.epistemic.all_observations()
-        except Exception:
-            observations = []
-        for o in observations:
-            score = _overlap_score(toks, o.content or "", o.source or "")
-            if score > 0:
-                hits.append({"kind": "observation",
-                             "id": o.observation_id,
-                             "source": o.source,
-                             "summary": (o.content or "")[:200],
-                             "score": round(score, 3)})
-        try:
-            hyps = self.epistemic.all_hypotheses()
-        except Exception:
-            hyps = []
-        for h in hyps:
-            score = _overlap_score(toks, getattr(h, "statement", "") or "")
-            if score > 0:
-                hits.append({"kind": "hypothesis",
-                             "id": getattr(h, "hypothesis_id", "?"),
-                             "source": "hypothesis",
-                             "summary": (getattr(h, "statement", "") or "")[:200],
-                             "score": round(score, 3)})
-        hits.sort(key=lambda h: -h["score"])
-        return hits[:limit]
 
-    def _search_capabilities(self, toks: Sequence[str],
-                             limit: int) -> List[Dict[str, Any]]:
-        hits = []
-        try:
-            records = self.capabilities.list(status="active", limit=200)
-        except Exception:
-            records = []
-        for r in records:
-            score = _overlap_score(
-                toks, getattr(r, "name", "") or "",
-                getattr(r, "goal", "") or "",
-                getattr(r, "capability_id", "") or "")
-            if score > 0:
-                hits.append({"kind": "capability",
-                             "id": getattr(r, "capability_id", "?"),
-                             "source": "capability_store",
-                             "summary": (f"{getattr(r, 'name', '?')}: "
-                                         f"{getattr(r, 'goal', '') or ''}")[:200],
-                             "score": round(score, 3),
-                             "status": getattr(r, "status", "?")})
-        hits.sort(key=lambda h: -h["score"])
-        return hits[:limit]
+def _search_capabilities(capabilities: Any, toks: Sequence[str],
+                         limit: int) -> List[Dict[str, Any]]:
+    hits = []
+    try:
+        records = capabilities.list(status="active", limit=200)
+    except Exception:
+        records = []
+    for r in records:
+        score = _overlap_score(
+            toks, getattr(r, "name", "") or "",
+            getattr(r, "goal", "") or "",
+            getattr(r, "capability_id", "") or "")
+        if score > 0:
+            hits.append({"kind": "capability",
+                         "id": getattr(r, "capability_id", "?"),
+                         "source": "capability_store",
+                         "summary": (f"{getattr(r, 'name', '?')}: "
+                                     f"{getattr(r, 'goal', '') or ''}")[:200],
+                         "score": round(score, 3),
+                         "status": getattr(r, "status", "?")})
+    hits.sort(key=lambda h: -h["score"])
+    return hits[:limit]
 
-    def _search_primitives(self, toks: Sequence[str],
-                           limit: int) -> List[Dict[str, Any]]:
-        hits = []
-        try:
-            names = self.registry.names()
-        except Exception:
-            names = []
-        get = getattr(self.registry, "get", None)
-        for n in names:
-            prim = get(n) if callable(get) else None
-            doc = getattr(prim, "doc", "") if prim else ""
-            fam = getattr(prim, "family", "") if prim else ""
-            score = _overlap_score(toks, n or "", doc or "", fam or "")
-            if score > 0:
-                hits.append({"kind": "primitive",
-                             "id": n,
-                             "source": "primitive_registry",
-                             "summary": f"{n} [{fam}]: {doc[:120]}",
-                             "score": round(score, 3)})
-        hits.sort(key=lambda h: -h["score"])
-        return hits[:limit]
 
-    def _delta_id_of(self, raw: Dict[str, Any]) -> Optional[str]:
-        """Extract a delta id from an observation's raw payload, honoring
-        the real shapes the loop writes: M1 persists the delta record at
-        raw["delta"]["delta_id"]; M2's experience log writes
-        raw["delta_id"."""
-        if not raw:
-            return None
-        if raw.get("delta_id"):
-            return raw["delta_id"]
-        inner = raw.get("delta")
-        if isinstance(inner, dict) and inner.get("delta_id"):
-            return inner["delta_id"]
+def _search_primitives(registry: Any, toks: Sequence[str],
+                       limit: int) -> List[Dict[str, Any]]:
+    hits = []
+    try:
+        names = registry.names()
+    except Exception:
+        names = []
+    get = getattr(registry, "get", None)
+    for n in names:
+        prim = get(n) if callable(get) else None
+        doc = getattr(prim, "doc", "") if prim else ""
+        fam = getattr(prim, "family", "") if prim else ""
+        score = _overlap_score(toks, n or "", doc or "", fam or "")
+        if score > 0:
+            hits.append({"kind": "primitive",
+                         "id": n,
+                         "source": "primitive_registry",
+                         "summary": f"{n} [{fam}]: {doc[:120]}",
+                         "score": round(score, 3)})
+    hits.sort(key=lambda h: -h["score"])
+    return hits[:limit]
+
+
+def _delta_id_of(raw: Dict[str, Any]) -> Optional[str]:
+    """Extract a delta id from an observation's raw payload, honoring
+    the real shapes the loop writes: M1 persists the delta record at
+    raw["delta"]["delta_id"]; M2's experience log writes raw["delta_id"]."""
+    if not raw:
         return None
+    if raw.get("delta_id"):
+        return raw["delta_id"]
+    inner = raw.get("delta")
+    if isinstance(inner, dict) and inner.get("delta_id"):
+        return inner["delta_id"]
+    return None
 
-    def _resolve_links(self, ans: UnifiedAnswer) -> List[Dict[str, Any]]:
-        """Cross-references from the linkage the loop itself writes.
 
-        delta observation --(raw.delta_id)--> experience records, and
-        experience/delta records --(capability_id mention)--> capability
-        records. Only structural links; no guessing.
-        """
-        links = []
-        delta_ids = set()
-        for h in ans.epistemic_hits:
-            rid = self._delta_id_of(self._raw_of(h.get("id")) or {})
-            if rid:
-                delta_ids.add(rid)
-        # experience records -> their delta
-        for h in ans.epistemic_hits:
-            raw = self._raw_of(h.get("id")) or {}
-            did = self._delta_id_of(raw)
-            if did and h.get("id") != did:
-                links.append({"from": h["id"], "to": did,
-                              "via": "delta_id"})
-        # capability -> mentioning records
-        cap_ids = {h["id"] for h in ans.capability_hits}
-        for h in ans.epistemic_hits:
-            raw = self._raw_of(h.get("id")) or {}
-            blob = _json_norm(raw) + " " + (h.get("summary") or "")
-            for cid in cap_ids:
-                if cid and cid in blob:
-                    links.append({"from": cid, "to": h["id"],
-                                  "via": "capability_id_mention"})
-        # delta -> synthesized capability (M2 fills C)
-        for h in ans.epistemic_hits:
-            raw = self._raw_of(h.get("id")) or {}
-            inner = raw.get("delta") if isinstance(raw.get("delta"), dict) else {}
+def _resolve_links(epistemic: Any, ans: UnifiedAnswer) -> List[Dict[str, Any]]:
+    """Cross-references from the linkage the loop itself writes.
+
+    delta observation --(raw.delta_id)--> experience records, and
+    experience/delta records --(capability_id mention)--> capability
+    records. Only structural links; no guessing.
+    """
+    links = []
+    delta_ids = set()
+    for h in ans.epistemic_hits:
+        rid = _delta_id_of(_raw_of(epistemic, h.get("id")) or {})
+        if rid:
+            delta_ids.add(rid)
+    # experience records -> their delta
+    for h in ans.epistemic_hits:
+        raw = _raw_of(epistemic, h.get("id")) or {}
+        did = _delta_id_of(raw)
+        if did and h.get("id") != did:
+            links.append({"from": h["id"], "to": did,
+                          "via": "delta_id"})
+    # capability -> mentioning records
+    cap_ids = {h["id"] for h in ans.capability_hits}
+    for h in ans.epistemic_hits:
+        raw = _raw_of(epistemic, h.get("id")) or {}
+        blob = _json_norm(raw) + " " + (h.get("summary") or "")
+        for cid in cap_ids:
+            if cid and cid in blob:
+                links.append({"from": cid, "to": h["id"],
+                              "via": "capability_id_mention"})
+    # delta -> synthesized capability (M2 fills C)
+    for h in ans.epistemic_hits:
+        raw = _raw_of(epistemic, h.get("id")) or {}
+        inner = raw.get("delta") if isinstance(raw.get("delta"), dict) else {}
+        cap = (raw.get("synthesized_capability_id")
+               or raw.get("capability_id")
+               or inner.get("C"))
+        if cap and isinstance(cap, str):
+            links.append({"from": h["id"], "to": cap,
+                          "via": "synthesized_capability"})
+    # dedupe
+    seen, out = set(), []
+    for l in links:
+        key = (l["from"], l["to"], l["via"])
+        if key not in seen:
+            seen.add(key)
+            out.append(l)
+    return out
+
+
+def _raw_of(epistemic: Any,
+            observation_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not observation_id:
+        return None
+    try:
+        for o in epistemic.all_observations():
+            if o.observation_id == observation_id:
+                return o.raw or {}
+    except Exception:
+        pass
+    return None
+
+
+def trace_delta(epistemic: Any, delta_id: str) -> Dict[str, Any]:
+    """Everything the loop knows about one delta: the delta record,
+    its experience records, and any synthesized capability."""
+    out = {"delta_id": delta_id, "delta": None, "experience": [],
+           "capability_id": None}
+    try:
+        observations = epistemic.all_observations()
+    except Exception:
+        observations = []
+    for o in observations:
+        raw = o.raw or {}
+        oid = o.observation_id
+        did = _delta_id_of(raw)
+        if oid != delta_id and did != delta_id:
+            continue
+        is_delta_record = (
+            oid == delta_id
+            or getattr(o, "source", "") == "technique_delta"
+            or isinstance(raw.get("delta"), dict))
+        if is_delta_record:
+            out["delta"] = {"id": oid, "source": o.source,
+                            "summary": (o.content or "")[:200],
+                            "raw": raw}
+            inner = raw.get("delta") if isinstance(
+                raw.get("delta"), dict) else {}
             cap = (raw.get("synthesized_capability_id")
                    or raw.get("capability_id")
                    or inner.get("C"))
             if cap and isinstance(cap, str):
-                links.append({"from": h["id"], "to": cap,
-                              "via": "synthesized_capability"})
-        # dedupe
-        seen, out = set(), []
-        for l in links:
-            key = (l["from"], l["to"], l["via"])
-            if key not in seen:
-                seen.add(key)
-                out.append(l)
+                out["capability_id"] = cap
+        else:
+            out["experience"].append(
+                {"id": oid, "source": o.source,
+                 "summary": (o.content or "")[:200]})
+    return out
+
+
+def trace_capability(epistemic: Any, capabilities: Any,
+                     capability_id: str) -> Dict[str, Any]:
+    """Everything the loop knows about one capability: its record,
+    mentioning experience records, and history."""
+    out = {"capability_id": capability_id, "record": None,
+           "experience": [], "history": []}
+    try:
+        rec = capabilities.get(capability_id)
+    except Exception:
+        rec = None
+    if rec is not None:
+        out["record"] = {
+            "id": getattr(rec, "capability_id", capability_id),
+            "name": getattr(rec, "name", "?"),
+            "status": getattr(rec, "status", "?"),
+            "description": (getattr(rec, "description", "") or "")[:200]}
+    try:
+        observations = epistemic.all_observations()
+    except Exception:
+        observations = []
+    for o in observations:
+        blob = _json_norm(o.raw or {}) + " " + (o.content or "")
+        if capability_id and capability_id in blob:
+            out["experience"].append(
+                {"id": o.observation_id, "source": o.source,
+                 "summary": (o.content or "")[:200]})
+    try:
+        hist = capabilities.history(capability_id) or []
+    except Exception:
+        hist = []
+    out["history"] = [
+        {"status": getattr(h, "status", "?"), "at": getattr(h, "at", None)}
+        for h in hist[:10]]
+    return out
+
+
+def prior_attempts(epistemic: Any, objective: str) -> List[Dict[str, Any]]:
+    """Z-check attempts the loop has made on this objective."""
+    out = []
+    try:
+        observations = epistemic.all_observations()
+    except Exception:
         return out
+    for o in observations:
+        if getattr(o, "source", "") != "z-check":
+            continue
+        if (o.raw or {}).get("objective") == objective:
+            out.append({"id": o.observation_id,
+                        "classification": (o.raw or {}).get("classification"),
+                        "reached": (o.raw or {}).get("reached"),
+                        "at": o.at})
+    return out
 
-    def _raw_of(self, observation_id: Optional[str]) -> Optional[Dict[str, Any]]:
-        if not observation_id:
-            return None
-        try:
-            for o in self.epistemic.all_observations():
-                if o.observation_id == observation_id:
-                    return o.raw or {}
-        except Exception:
-            pass
-        return None
 
-    # -- traces -----------------------------------------------------------
-    def trace_delta(self, delta_id: str) -> Dict[str, Any]:
-        """Everything the loop knows about one delta: the delta record,
-        its experience records, and any synthesized capability."""
-        out = {"delta_id": delta_id, "delta": None, "experience": [],
-               "capability_id": None}
-        try:
-            observations = self.epistemic.all_observations()
-        except Exception:
-            observations = []
-        for o in observations:
-            raw = o.raw or {}
-            oid = o.observation_id
-            did = self._delta_id_of(raw)
-            if oid != delta_id and did != delta_id:
-                continue
-            is_delta_record = (
-                oid == delta_id
-                or getattr(o, "source", "") == "technique_delta"
-                or isinstance(raw.get("delta"), dict))
-            if is_delta_record:
-                out["delta"] = {"id": oid, "source": o.source,
-                                "summary": (o.content or "")[:200],
-                                "raw": raw}
-                inner = raw.get("delta") if isinstance(
-                    raw.get("delta"), dict) else {}
-                cap = (raw.get("synthesized_capability_id")
-                       or raw.get("capability_id")
-                       or inner.get("C"))
-                if cap and isinstance(cap, str):
-                    out["capability_id"] = cap
-            else:
-                out["experience"].append(
-                    {"id": oid, "source": o.source,
-                     "summary": (o.content or "")[:200]})
-        return out
+def similar_experiences(epistemic: Any, objective: str,
+                        top_k: int = 3) -> List[Dict[str, Any]]:
+    """Prior distillation-loop experiences whose recorded objective
+    overlaps this one. Retrieved through the unified layer and attached
+    to the Z-check's detail."""
+    scored = []
+    try:
+        observations = epistemic.all_observations()
+    except Exception:
+        return []
+    for o in observations:
+        if getattr(o, "source", "") != "distillation-loop":
+            continue
+        score = _overlap_score(_tokens(objective), o.content or "")
+        if score > 0:
+            scored.append({"id": o.observation_id,
+                           "summary": (o.content or "")[:200],
+                           "score": round(score, 3),
+                           "delta_id": _delta_id_of(o.raw or {})})
+    scored.sort(key=lambda h: -h["score"])
+    return scored[:top_k]
 
-    def trace_capability(self, capability_id: str) -> Dict[str, Any]:
-        """Everything the loop knows about one capability: its record,
-        mentioning experience records, and history."""
-        out = {"capability_id": capability_id, "record": None,
-               "experience": [], "history": []}
-        try:
-            rec = self.capabilities.get(capability_id)
-        except Exception:
-            rec = None
-        if rec is not None:
-            out["record"] = {
-                "id": getattr(rec, "capability_id", capability_id),
-                "name": getattr(rec, "name", "?"),
-                "status": getattr(rec, "status", "?"),
-                "description": (getattr(rec, "description", "") or "")[:200]}
-        try:
-            observations = self.epistemic.all_observations()
-        except Exception:
-            observations = []
-        for o in observations:
-            blob = _json_norm(o.raw or {}) + " " + (o.content or "")
-            if capability_id and capability_id in blob:
-                out["experience"].append(
-                    {"id": o.observation_id, "source": o.source,
-                     "summary": (o.content or "")[:200]})
-        try:
-            hist = self.capabilities.history(capability_id) or []
-        except Exception:
-            hist = []
-        out["history"] = [
-            {"status": getattr(h, "status", "?"), "at": getattr(h, "at", None)}
-            for h in hist[:10]]
-        return out
 
-    def prior_attempts(self, objective: str) -> List[Dict[str, Any]]:
-        """Z-check attempts the loop has made on this objective."""
-        out = []
-        try:
-            observations = self.epistemic.all_observations()
-        except Exception:
-            return out
-        for o in observations:
-            if getattr(o, "source", "") != "z-check":
-                continue
-            if (o.raw or {}).get("objective") == objective:
-                out.append({"id": o.observation_id,
-                            "classification": (o.raw or {}).get("classification"),
-                            "reached": (o.raw or {}).get("reached"),
-                            "at": o.at})
-        return out
+def z_check_with_experience(
+        objective: str,
+        evidence: Optional[Sequence[Tuple[Dict[str, Any], Any]]] = None,
+        epistemic: Any = None,
+        registry: Any = None,
+        planner: Any = None) -> ZCheckResult:
+    """Planner-attempt Z-check with prior experience attached.
 
-    def similar_experiences(self, objective: str,
-                            top_k: int = 3) -> List[Dict[str, Any]]:
-        """Prior distillation-loop experiences whose recorded objective
-        overlaps this one. This is how a distilled technique influences a
-        later decision: the experience is retrieved through the unified
-        layer and attached to the Z-check's detail."""
-        scored = []
-        try:
-            observations = self.epistemic.all_observations()
-        except Exception:
-            return []
-        for o in observations:
-            if getattr(o, "source", "") != "distillation-loop":
-                continue
-            score = _overlap_score(_tokens(objective), o.content or "")
-            if score > 0:
-                scored.append({"id": o.observation_id,
-                               "summary": (o.content or "")[:200],
-                               "score": round(score, 3),
-                               "delta_id": self._delta_id_of(o.raw or {})})
-        scored.sort(key=lambda h: -h["score"])
-        return scored[:top_k]
+    Runs the standard attempt_z, then consults prior distillation
+    experiences through the unified layer (cross-store retrieval informing
+    the decision). The attempt itself is persisted as an epistemic observation.
+    """
+    res = attempt_z(objective, evidence=evidence, planner=planner,
+                    registry=registry, epistemic=epistemic)
+    if epistemic is not None:
+        res.detail["prior_experiences"] = similar_experiences(
+            epistemic, objective)
+    return res
 
-    # -- the Z-check through the unified layer -----------------------------
-    def z_check(self, objective: str,
-              evidence: Optional[Sequence[Tuple[Dict[str, Any], Any]]] = None,
-              ) -> ZCheckResult:
-        """Planner-attempt Z-check with the unified layer's stores.
-
-        Before attempting, consults prior experience through the same
-        layer (cross-store retrieval informing the decision); the attempt
-        itself is persisted as an epistemic observation.
-        """
-        res = attempt_z(objective, evidence=evidence, planner=self.planner,
-                        registry=self.registry, epistemic=self.epistemic)
-        res.detail["prior_experiences"] = self.similar_experiences(objective)
-        return res
 
 
 # ---------------------------------------------------------------------------
@@ -1315,87 +1337,3 @@ def run_census(engine_db_path: str,
                                 "(service boots it lazily)")
     result["intent_db"] = intent_entry
     return result
-
-
-# -- UnifiedMemory: the cutover surface -------------------------------------
-# (Methods are attached here, after the class definition above, so the
-# V10-P1 surface stays in one readable section with the write path and
-# the catalog it depends on.)
-
-def _um_record_experience(self: "UnifiedMemory",
-                          origin_loop: str,
-                          kind: str,
-                          content: str,
-                          raw: Optional[Dict[str, Any]] = None,
-                          causal_chain: Optional[Sequence[str]] = None,
-                          source: Optional[str] = None) -> str:
-    """Write an experience record through the unified write path."""
-    return record_experience(self.epistemic, origin_loop, kind, content,
-                             raw=raw, causal_chain=causal_chain,
-                             source=source)
-
-
-def _um_read_experiences(self: "UnifiedMemory",
-                         origin_loop: Optional[str] = None,
-                         kind: Optional[str] = None,
-                         limit: int = 100) -> List[Dict[str, Any]]:
-    """Read experience records back through the unified read path."""
-    return read_experiences(self.epistemic, origin_loop=origin_loop,
-                            kind=kind, limit=limit)
-
-
-def _um_record_evidence(self: "UnifiedMemory",
-                        origin_loop: str,
-                        kind: str,
-                        evidence: Any,
-                        causal_chain: Optional[Sequence[str]] = None) -> str:
-    """Write an evidence record through the unified write path."""
-    return record_evidence(self.epistemic, origin_loop, kind, evidence,
-                           causal_chain=causal_chain)
-
-
-def _um_record_hypothesis(self: "UnifiedMemory",
-                          origin_loop: str,
-                          kind: str,
-                          hypothesis: Any,
-                          causal_chain: Optional[Sequence[str]] = None) -> str:
-    """Write a hypothesis record through the unified write path."""
-    return record_hypothesis(self.epistemic, origin_loop, kind, hypothesis,
-                             causal_chain=causal_chain)
-
-
-def _um_record_experiment(self: "UnifiedMemory",
-                          origin_loop: str,
-                          kind: str,
-                          experiment: Any,
-                          causal_chain: Optional[Sequence[str]] = None) -> str:
-    """Write an experiment record through the unified write path."""
-    return record_experiment(self.epistemic, origin_loop, kind, experiment,
-                             causal_chain=causal_chain)
-
-
-def _um_census(self: "UnifiedMemory",
-               engine_db_path: Optional[str] = None,
-               intent_db_path: Optional[str] = None) -> _CensusResult:
-    """Run the store census against the engine DB behind this layer.
-
-    Pass intent_db_path (the IntentDispatchService's intent.db) to also
-    verify the intent service's engine-schema copy is bridged: every table
-    in it must fall within the engine schema, i.e. no private tables.
-    """
-    path = engine_db_path or getattr(self.epistemic, "db_path", None)
-    if not path:
-        raise ValueError("census needs an engine DB path: pass "
-                         "engine_db_path or bind an epistemic store with a "
-                         "db_path")
-    return run_census(path, intent_db_path=intent_db_path)
-
-
-UnifiedMemory.record_experience = _um_record_experience
-UnifiedMemory.read_experiences = _um_read_experiences
-UnifiedMemory.record_evidence = _um_record_evidence
-UnifiedMemory.record_hypothesis = _um_record_hypothesis
-UnifiedMemory.record_experiment = _um_record_experiment
-UnifiedMemory.census = _um_census
-del (_um_record_experience, _um_read_experiences, _um_record_evidence,
-     _um_record_hypothesis, _um_record_experiment, _um_census)

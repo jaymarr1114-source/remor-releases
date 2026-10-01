@@ -25,7 +25,6 @@ from runtime.intellect.delta_capture import (  # noqa: E402
     validate_delta,
 )
 from runtime.intellect.unified_memory import (  # noqa: E402
-    UnifiedMemory,
     record_experience,
     read_experiences,
 )
