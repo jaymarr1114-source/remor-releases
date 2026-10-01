@@ -1,0 +1,5 @@
+[b1] prompt='What is 2+2? Reply with just t' ok=True latency=124.8s provenance=borrowed:qwen3@7c414 text='4' -> PASS
+[b1] prompt='What is the capital of France?' ok=True latency=154.8s provenance=borrowed:qwen3@7c414 text='Paris' -> PASS
+[b1] prompt="Spell the word 'cat' backwards" ok=True latency=149.7s provenance=borrowed:qwen3@7c414 text='tac' -> PASS
+[b1] PASS=3 FAIL=0
+B1_EXIT=0

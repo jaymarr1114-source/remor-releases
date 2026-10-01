@@ -1835,6 +1835,18 @@ def build_services(base_dir: str) -> Dict[str, Any]:
     # contract table's exact 200/400/404/409 status mapping.
     contract_routes.update(routes_for_availability())
 
+    # [LLM-SERVE-PATH-1 / U-10] the LLM provider registry: named reasoning
+    # providers with open slots for user-supplied agents/bots. The
+    # built-in Qwen3 wiring registers through the public path (dogfooding).
+    # When weights or llama-cli are absent the registry stays empty and
+    # the chat handler falls back to its honest template "I don't know".
+    from swarm_engine.services.llm_providers import (
+        ProviderRegistry, register_builtin_provider)
+    llm_providers = ProviderRegistry()
+    try:
+        register_builtin_provider(llm_providers)
+    except (FileNotFoundError, RuntimeError):
+        pass
     services = {
         "scheduler": scheduler, "projects": projects,
         "files": files, "artifacts": artifacts,
@@ -1845,6 +1857,7 @@ def build_services(base_dir: str) -> Dict[str, Any]:
         "cognition_loop": cognition_loop,
         "agents": agents, "metering": metering, "intent": intent,
         "recurrence": recurrence,
+        "llm_providers": llm_providers,
         "contract_routes": contract_routes,
         # [Worker D / S10] the real bearer-token gate. _Handler._auth_denied
         # (top of every do_*) calls auth.check(method, path, headers):
