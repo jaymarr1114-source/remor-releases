@@ -711,7 +711,6 @@ def z_check_with_experience(
     return res
 
 
-
 # ---------------------------------------------------------------------------
 # V10-P1 unified memory cutover: the single read/write path for experience
 # records, the store adapter catalog, and the census.
@@ -1198,11 +1197,6 @@ STORE_CATALOG: Tuple[Dict[str, Any], ...] = (
              ("project",),
              "Per-project .remor_project.db + .remor_continuation/*.json."),
 )
-
-
-def store_catalog() -> List[Dict[str, Any]]:
-    """Return the registered store adapters (bridge registry)."""
-    return [dict(a) for a in STORE_CATALOG]
 
 
 def _sqlite_tables(db_path: str) -> List[str]:

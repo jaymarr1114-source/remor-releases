@@ -28,7 +28,7 @@ Because the listing itself is an available read, each entry carries the
                  for absent capabilities.
 
 Nothing here simulates. Every route-backed entry is verified by
-tests/test_coming_soon.py, which drives the real route and asserts the
+tests/contracts/test_coming_soon.py, which drives the real route and asserts the
 entry's code/reason/missing_substrate EXACTLY match the live handler
 output -- the test fails on drift, so the listing cannot go stale
 silently. Absent entries are verified by route-table scans plus the
@@ -38,7 +38,7 @@ stores returning honest emptiness).
 EXTENSION HOOK (sibling task: NL intent-dispatch): if POST
 /api/intent/dispatch lands HONESTLY-UNAVAILABLE outcomes, append their
 entries to EXTRA_ENTRIES below (same shape) before finalizing; the
-endpoint merges them into the listing and test_coming_soon.py verifies
+endpoint merges them into the listing and tests/contracts/test_coming_soon.py verifies
 them the same way. Do NOT invent entries here without a real backing
 route or a verified genuine absence.
 """
@@ -53,20 +53,6 @@ from typing import Any, Dict, List, Optional
 # NL outcomes land.
 # ----------------------------------------------------------------------
 EXTRA_ENTRIES: List[Dict[str, Any]] = []
-
-
-def register_extension_entries(
-        entries: List[Dict[str, Any]]) -> None:
-    """Append sibling-task entries to the coming-soon listing.
-
-    Each entry must use the same shape as ENTRIES (kind, feature, route,
-    probe, http_status, unavailable{...}). Entries are verified by
-    tests/test_coming_soon.py -- a code with no real backing fails the
-    suite, so only genuinely-unavailable capabilities belong here.
-    """
-    for entry in entries:
-        _validate_entry(entry)
-    EXTRA_ENTRIES.extend(entries)
 
 
 def _validate_entry(entry: Dict[str, Any]) -> None:
@@ -119,7 +105,7 @@ def _entry(kind: str, feature: str, code: str, reason: str,
 
 # ----------------------------------------------------------------------
 # The inventory. code/reason/missing_substrate are copied from the real
-# handler output (see the source pointers); tests/test_coming_soon.py
+# handler output (see the source pointers); tests/contracts/test_coming_soon.py
 # asserts exact equality against the live routes, so any drift in the
 # handlers fails the suite until the entry is updated to match.
 # ----------------------------------------------------------------------

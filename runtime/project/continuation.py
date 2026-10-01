@@ -220,14 +220,6 @@ def mine_summarize_examples(root: str) -> List[Tuple[Any, Dict[str, Any]]]:
     return out
 
 
-
-def candidate_library(available: Dict[str, Callable]) -> List[Tuple[str, str, Callable]]:
-    """Deprecated shim — body search goes through synthesize_body."""
-    # Keep a tiny set for any external callers; synthesis owns the real search.
-    from swarm_engine.project.body_synthesis import _chain_candidates
-    return [(a, b, c) for a, b, c in _chain_candidates(max_depth=1)]
-
-
 def select_body_by_examples(examples, available, root="", inventory=None,
                             param_name="text") -> Dict[str, Any]:
     return synthesize_body(

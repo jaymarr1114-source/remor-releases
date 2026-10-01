@@ -595,20 +595,6 @@ def external_record_to_neutral_evidence(rec: ExternalEvidenceRecord) -> Semantic
     )
 
 
-def attach_external_evidence_neutral(
-        admission: "SemanticAdmissionController",
-        semantic_id: str,
-        rec: ExternalEvidenceRecord,
-) -> Optional["SemanticCapability"]:
-    """Attach raw external evidence to an existing hypothesis as neutral evidence.
-
-    Preconditions: hypothesis already exists (manual control or prior step).
-    Postconditions: interpretation unchanged; supports is None on new item.
-    """
-    evidence = external_record_to_neutral_evidence(rec)
-    return admission.add_evidence(semantic_id, evidence)
-
-
 # ---------------------------------------------------------------------------
 # M+28.3 — Formal evidence evaluation (NOT natural-language interpretation)
 # ---------------------------------------------------------------------------
@@ -1036,25 +1022,6 @@ def probes_to_evidence_payload(probes: List[StructuredProbe],
     return payload
 
 
-def attach_extracted_probes_neutral(
-        admission: "SemanticAdmissionController",
-        semantic_id: str,
-        rec: ExternalEvidenceRecord,
-) -> Optional["SemanticCapability"]:
-    """Extract probes from ExternalEvidenceRecord, attach as neutral external evidence.
-
-    Extraction does not receive the hypothesis. Polarity remains None until evaluation.
-    """
-    probes = extract_structured_probes(rec)
-    se = external_record_to_neutral_evidence(rec)
-    payload = probes_to_evidence_payload(probes, se.payload)
-    se = SemanticEvidence(
-        kind=se.kind, source=se.source, payload=payload,
-        supports=None, strength=0.0, observed_at=se.observed_at,
-    )
-    return admission.add_evidence(semantic_id, se)
-
-
 # ---------------------------------------------------------------------------
 # M+28.6 — Structured semantic observation schema (explicit only; no NL)
 # ---------------------------------------------------------------------------
@@ -1108,94 +1075,6 @@ class StructuredSemanticObservation:
         return out
 
 
-def extract_structured_semantics(evidence: Any) -> List[StructuredSemanticObservation]:
-    """Extract explicit structured semantic observations. NO hypothesis argument.
-
-    Accepted formats (deterministic):
-      1) JSON object with schema==swarm.semantic_observation.v1 and family+parameter
-      2) Line-oriented:
-            schema: swarm.semantic_observation.v1
-            family: multiplicative
-            parameter: 7
-      3) Compact: family=multiplicative; parameter=7; schema=swarm.semantic_observation.v1
-
-    Prose without schema is ignored (returns []).
-    """
-    content, source, evidence_id = _evidence_text_parts(evidence)
-    if not content.strip():
-        return []
-    obs: List[StructuredSemanticObservation] = []
-
-    def _valid_family(f: str) -> bool:
-        return f in ("multiplicative", "additive")
-
-    def _add(family, param, fragment, offset, extra=None):
-        if not _valid_family(str(family)):
-            return
-        if param is None:
-            return
-        try:
-            if isinstance(param, str) and param.strip():
-                param = json.loads(param) if param.strip()[:1] in "[{" else (
-                    float(param) if "." in param else int(param))
-        except Exception:
-            return  # malformed parameter — no guess
-        o = StructuredSemanticObservation(
-            family=str(family),
-            parameter=param,
-            schema=_SEM_OBS_SCHEMA,
-            input_domain=(extra or {}).get("input_domain"),
-            output_relation=(extra or {}).get("output_relation"),
-            raw_fragment=(fragment or "").strip(),
-            source=source,
-            evidence_id=evidence_id,
-            offset=offset,
-            provenance={"extractor": "structured_semantic_extractor.v1"},
-        )
-        obs.append(o)
-
-    # JSON objects (whole content or line)
-    for m in re.finditer(r"\{[^{}]+\}", content):
-        try:
-            obj = json.loads(m.group(0))
-        except Exception:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        schema = obj.get("schema") or obj.get("$schema")
-        if schema != _SEM_OBS_SCHEMA:
-            continue
-        if "family" not in obj or "parameter" not in obj:
-            continue
-        _add(obj["family"], obj["parameter"], m.group(0), m.start(), obj)
-
-    # Line-oriented block: schema: ... family: ... parameter: ...
-    for m in re.finditer(
-        r"(?is)schema\s*:\s*" + re.escape(_SEM_OBS_SCHEMA)
-        + r".*?family\s*:\s*(\w+).*?parameter\s*:\s*([^\n]+)",
-        content,
-    ):
-        extra = {}
-        block = m.group(0)
-        dm = re.search(r"input_domain\s*:\s*(\S+)", block, re.I)
-        if dm:
-            extra["input_domain"] = dm.group(1).strip()
-        rm = re.search(r"output_relation\s*:\s*(.+)$", block, re.I | re.M)
-        if rm:
-            extra["output_relation"] = rm.group(1).strip()
-        _add(m.group(1), m.group(2).strip(), block, m.start(), extra)
-
-    # Compact semicolon form
-    for m in re.finditer(
-        r"family\s*=\s*(\w+)\s*;\s*parameter\s*=\s*([^;]+)\s*;\s*schema\s*=\s*"
-        + re.escape(_SEM_OBS_SCHEMA),
-        content, re.I,
-    ):
-        _add(m.group(1), m.group(2).strip(), m.group(0), m.start())
-
-    return obs
-
-
 def _evidence_text_parts(evidence: Any) -> Tuple[str, str, str]:
     if isinstance(evidence, ExternalEvidenceRecord):
         return evidence.content or "", evidence.source or "", evidence.evidence_id or ""
@@ -1211,16 +1090,3 @@ def _evidence_text_parts(evidence: Any) -> Tuple[str, str, str]:
     return "", "", ""
 
 
-def observation_to_neutral_evidence(
-        rec: ExternalEvidenceRecord,
-        observations: List[StructuredSemanticObservation],
-) -> SemanticEvidence:
-    """Attach structured observations as neutral external evidence for evaluation."""
-    se = external_record_to_neutral_evidence(rec)
-    payload = dict(se.payload or {})
-    payload["structured_observations"] = [o.as_dict() for o in observations]
-    payload["extraction_mechanism"] = "structured_semantic_extractor.v1"
-    return SemanticEvidence(
-        kind=se.kind, source=se.source, payload=payload,
-        supports=None, strength=0.0, observed_at=se.observed_at,
-    )

@@ -2967,21 +2967,3 @@ def _witness_size2(vec: Tuple[Any, ...], _t3n: str,
     return None
 
 
-def reorder_by_relevance(input_names: Sequence[str],
-                         examples: Sequence[Tuple[Dict[str, Any], Any]]
-                         ) -> List[str]:
-    """Return input_names ordered most-relevant-first (stable, value-based).
-
-    Convenience for synthesis paths that consume inputs positionally
-    (skeleton a0/a1 slots, leaf-bank order). Names not present in the
-    examples keep their relative order at the end.
-    """
-    names = list(input_names)
-    if not examples or len(names) < 2:
-        return names
-    known = [nm for nm in names
-             if any(nm in a for a, _ in examples)]
-    report = analyze(examples, known)
-    rank_pos = {nm: i for i, nm in enumerate(report.ranking)}
-    unknown = [nm for nm in names if nm not in rank_pos]
-    return sorted(known, key=lambda nm: rank_pos[nm]) + unknown

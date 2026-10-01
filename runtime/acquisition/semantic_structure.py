@@ -437,32 +437,6 @@ def derive_consequences(ss: SemanticStructure) -> List[SemanticConsequence]:
     return out
 
 
-def validate_consequence(ss: SemanticStructure, c: SemanticConsequence) -> Dict[str, Any]:
-    """Independent check: re-derive and see if this consequence still follows.
-
-    Does not trust c.payload as authoritative; recomputes from structure.
-    """
-    if c.source_structure_id != ss.structure_id:
-        # Allow fingerprint match for rehydrated copies with same structure
-        if c.source_structure_id and ss.structure_id and c.source_structure_id != ss.structure_id:
-            # still try validate against current graph content
-            pass
-    fresh = {x.consequence_id: x for x in derive_consequences(ss)}
-    # Match by kind+payload (identity independent of id hash if structure same)
-    matches = [
-        x for x in derive_consequences(ss)
-        if x.kind == c.kind and dict(x.payload) == dict(c.payload)
-    ]
-    ok = len(matches) > 0
-    return {
-        "ok": ok,
-        "consequence_id": c.consequence_id,
-        "kind": c.kind,
-        "rule_id": c.rule_id,
-        "reasons": [] if ok else ["consequence not entailed by structure"],
-    }
-
-
 # ---------------------------------------------------------------------------
 # M+28.14 — Semantic constraints for native search (no op naming)
 # ---------------------------------------------------------------------------
@@ -544,36 +518,6 @@ def constraints_from_structure(ss: SemanticStructure) -> SemanticSearchConstrain
         rejection_reason="",
         source_fingerprint=ss.fingerprint(),
         relation_types=tuple(ss.relations()),
-    )
-
-
-def search_with_semantic_constraints(
-        gs,
-        examples: Sequence[Tuple[Dict[str, Any], Any]],
-        constraint: SemanticSearchConstraint,
-):
-    """Invoke GeneralSynthesizer using constraint-derived params/literals.
-
-    examples remain an independent evidence oracle (not derived from structure
-    as a disguised operation). Returns (hypothesis, trace) like GS.search.
-    Rejects search when constraint.rejected (e.g. CONTRADICTION in graph).
-    """
-    if constraint.rejected:
-        return None, {"rejected": True, "reason": constraint.rejection_reason}
-    if not constraint.param_names:
-        return None, None
-    # Align example keys to param names if single-param
-    aligned = []
-    for inp, out in examples:
-        if len(constraint.param_names) == 1:
-            p = constraint.param_names[0]
-            if p not in inp and len(inp) == 1:
-                inp = {p: next(iter(inp.values()))}
-        aligned.append((inp, out))
-    return gs.search(
-        aligned,
-        list(constraint.param_names),
-        extra_literals=list(constraint.extra_literals),
     )
 
 
@@ -708,11 +652,6 @@ def observations_from_structure(ss: SemanticStructure) -> List[FormalObservation
             ),
         ))
     return out
-
-
-def examples_from_structure(ss: SemanticStructure) -> List[Tuple[Dict[str, Any], Any]]:
-    """Convenience: FormalObservation list → GS example list."""
-    return [o.as_example() for o in observations_from_structure(ss)]
 
 
 # ---------------------------------------------------------------------------
@@ -853,12 +792,6 @@ def compose_relations(ss: SemanticStructure) -> SemanticStructure:
             [SemanticEdge.from_dict(e) for e in all_edges],
         ),
     )
-
-
-def relation_consequences(ss: SemanticStructure) -> List[SemanticConsequence]:
-    """Consequences including composed relations (recompute via compose_relations)."""
-    composed = compose_relations(ss)
-    return derive_consequences(composed)
 
 
 # ---------------------------------------------------------------------------
@@ -1022,16 +955,3 @@ def evaluate_candidate_constraint(
     )
 
 
-def filter_candidates_by_constraint(
-        candidates: Sequence[Any],
-        constraint: SemanticSearchConstraint,
-) -> Tuple[List[Any], List[CandidateConstraintEvaluation]]:
-    """Retain candidates with satisfied != 'no'. Unknown kept (underdetermined)."""
-    kept = []
-    evals = []
-    for c in candidates:
-        ev = evaluate_candidate_constraint(c, constraint)
-        evals.append(ev)
-        if ev.satisfied != "no":
-            kept.append(c)
-    return kept, evals

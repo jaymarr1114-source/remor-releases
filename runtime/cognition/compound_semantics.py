@@ -117,27 +117,6 @@ def _clause_inputs(sentence: str, clause_probes
 # Interpretation
 # ---------------------------------------------------------------------------
 
-def interpret_each_clause(
-        lexicon: RelationalLexicon,
-        sentence: str,
-        candidate_entities: Sequence[str],
-        clause_probes: Optional[Sequence[Sequence[Probe]]],
-) -> Optional[List[Tuple[str, Optional[RelFact]]]]:
-    """Segment and interpret each clause independently.
-
-    Returns [(clause_text, fact_or_None), ...] -- the per-clause results
-    needed for failure attribution (which clause failed). Returns None
-    when the sentence is unsegmentable or probes misalign."""
-    inputs = _clause_inputs(sentence, clause_probes)
-    if inputs is None:
-        return None
-    clause_texts, probe_lists = inputs
-    out: List[Tuple[str, Optional[RelFact]]] = []
-    for text, probes in zip(clause_texts, probe_lists):
-        fact = lexicon.interpret(text, candidate_entities, list(probes))
-        out.append((text, fact))
-    return out
-
 
 def _build_compound_structure(clauses: Sequence[RelFact]) -> SemanticStructure:
     """Lift verified per-clause RelFacts into a native SemanticStructure.
@@ -199,37 +178,6 @@ def _derive_sub_tasks(structure: SemanticStructure,
             probes=tuple(probe_lists[k]),
         ))
     return tuple(tasks)
-
-
-def interpret_compound(
-        lexicon: RelationalLexicon,
-        sentence: str,
-        candidate_entities: Sequence[str],
-        clause_probes: Optional[Sequence[Sequence[Probe]]],
-) -> Optional[CompoundInterpretation]:
-    """Interpret a compound sentence into a structured decomposition.
-
-    Fail closed: unsegmentable sentence, probe/clause misalignment,
-    unknown clause pattern, ambiguous clause, or any probe failure in
-    any clause -> None."""
-    inputs = _clause_inputs(sentence, clause_probes)
-    if inputs is None:
-        return None
-    clause_texts, probe_lists = inputs
-    clauses: List[RelFact] = []
-    for text, probes in zip(clause_texts, probe_lists):
-        fact = lexicon.interpret(text, candidate_entities, list(probes))
-        if fact is None:
-            return None  # one bad clause kills the whole compound
-        clauses.append(fact)
-    structure = _build_compound_structure(clauses)
-    sub_tasks = _derive_sub_tasks(structure, clause_texts, probe_lists)
-    return CompoundInterpretation(
-        sentence=sentence,
-        clauses=tuple(clauses),
-        structure=structure,
-        sub_tasks=sub_tasks,
-    )
 
 
 # ---------------------------------------------------------------------------

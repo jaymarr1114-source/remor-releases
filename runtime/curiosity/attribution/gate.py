@@ -48,6 +48,11 @@ authority's fact); the LINK is void.
 If any check passes only by ledger-ID matching, the gate FAILS —
 the quantity-perturbation checks are designed so ID-echo cannot
 pass them.
+
+TEST-SUPPORT (DEAD-CODE-1, 2026-10-01): every class in this module
+(GateFailure, GateCheck, Counterfactual, CausalGate) has no production
+consumer; the module exists for proofs/cur_p1d_attribution_proof_2026-09-29.py
+(CUR-P1D crossed evidence). Do not mistake for live machinery.
 """
 from __future__ import annotations
 

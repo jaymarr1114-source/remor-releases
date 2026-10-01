@@ -125,46 +125,6 @@ def _collect_leaves(output: Any, path: Tuple,
         leaves.setdefault(path, []).append((inputs, output))
 
 
-def decompose_nested(examples: List[Tuple[Dict[str, Any], Any]],
-                     param_names: Tuple[str, ...]) -> Optional[NestedSplit]:
-    """Decompose examples with nested composite outputs into leaf subgoals.
-
-    Returns None (fail-closed) if the outputs are not uniformly nested.
-    """
-    if not examples or len(examples) < 2:
-        return None
-    # Check inputs are dicts with consistent keys
-    input_keys = [tuple(sorted(args.keys())) for args, _ in examples]
-    if len(set(input_keys)) != 1:
-        return None
-    shape = _uniform_shape(examples)
-    if shape is None:
-        return None
-
-    # Collect leaves by path
-    leaves_by_path: Dict[Tuple, List[Tuple[Dict, Any]]] = {}
-    for args, out in examples:
-        _collect_leaves(out, (), dict(args), leaves_by_path)
-
-    # Build LeafSubgoals
-    leaves = []
-    for path in sorted(leaves_by_path.keys()):
-        proj_examples = leaves_by_path[path]
-        leaves.append(LeafSubgoal(path=path, examples=proj_examples,
-                                  param_names=param_names))
-    # Build skeleton from the first output (structure with None at leaves)
-    def _skeleton(val):
-        if isinstance(val, dict):
-            return {k: _skeleton(val[k]) for k in sorted(val.keys())}
-        if isinstance(val, list):
-            return [_skeleton(v) for v in val]
-        if isinstance(val, tuple):
-            return tuple(_skeleton(v) for v in val)
-        return None
-    skeleton = _skeleton(examples[0][1])
-    return NestedSplit(leaves=leaves, skeleton=skeleton)
-
-
 def reassemble(split: NestedSplit,
                leaf_outputs: Dict[Tuple, Any]) -> Any:
     """Re-assemble the nested output from leaf outputs by path.

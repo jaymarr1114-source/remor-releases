@@ -203,7 +203,12 @@ class GovernedWeightFetch:
 
 def huggingface_index(name: str = "huggingface",
                       artifacts: Optional[dict] = None) -> TrustedIndex:
-    """A trusted index scoped to huggingface.co model file URLs."""
+    """A trusted index scoped to huggingface.co model file URLs.
+
+    TEST-SUPPORT (DEAD-CODE-1, 2026-10-01): no production caller; exercised
+    by proofs/qwen3_quarantine_proof.py (the QWEN3-ACQUIRE-1 quarantine
+    battery). Kept so the crossed proof keeps importing.
+    """
     return TrustedIndex(name=name,
                         base_url="https://huggingface.co/",
                         artifacts=artifacts or {})

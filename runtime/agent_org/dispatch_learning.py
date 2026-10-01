@@ -358,26 +358,6 @@ def _build_dependency_closure(
     return [entries[cid] for cid in sorted(entries)]
 
 
-def get_dependency_closure(evidence: "DispatchEvidence") -> List[Dict[str, Any]]:
-    """Return the recorded dependency closure of an evidence record.
-
-    A missing ``dependency_closure`` key (rows captured before the field
-    existed) yields an empty closure -- the review then refuses
-    acquired-composing plans exactly as the legacy behavior did, while
-    base-primitive-only plans still verify.
-    """
-    try:
-        doc = json.loads(evidence.evidence_json)
-    except (json.JSONDecodeError, TypeError):
-        raise ValueError("evidence document does not parse")
-    closure = doc.get("dependency_closure")
-    if closure is None:
-        return []
-    if not isinstance(closure, list):
-        raise ValueError("dependency_closure is not a list")
-    return closure
-
-
 def _operational_row(engine: Any, dispatch_id: str) -> Dict[str, Any]:
     """Read the engine-written operational dispatch row. This row is evidence
     of WHAT the dispatcher recorded, never trusted on its own."""

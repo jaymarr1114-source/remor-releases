@@ -1,5 +1,9 @@
 """swarm_engine/services/repair.py
 
+TEST-ONLY (DEAD-CODE-1, 2026-10-01): imported only by
+tests/phase4/test_repair_service.py; no production inlet wires this
+module. The service below is real but unwired.
+
 RepairService: the canonical product API for repair evidence and
 admission.
 

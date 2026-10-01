@@ -20,6 +20,10 @@ it against the real API.
 
 Test-only helpers (focus_field/blur) are LOCAL methods, not protocol
 commands: the real app derives focus from the real UI.
+
+TEST-SUPPORT (DEAD-CODE-1, 2026-10-01): HarnessBridge has no production
+consumer; it exists for proofs/dss_proof.py. Do not mistake for live
+machinery.
 """
 from __future__ import annotations
 

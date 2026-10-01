@@ -249,15 +249,3 @@ def match_to_capability_gap(
     )
 
 
-def bridge_ir_to_gap(ir: Any, registry: Any, hyps: Optional[Sequence[Any]] = None,
-                     goal: str = "") -> Dict[str, Any]:
-    """End-to-end bridge: IR → requirement → match → CapabilityGap."""
-    req = requirement_from_ir(ir, hyps)
-    match = match_requirement_to_inventory(req, registry)
-    gap = match_to_capability_gap(req, match, goal=goal)
-    return {
-        "requirement": req.as_dict(),
-        "match": match.as_dict(),
-        "gap": gap.as_dict(),
-        "has_gap": gap.has_gap,
-    }
