@@ -1,123 +1,67 @@
 #!/bin/bash
-# CREATIVITY-SLICE-1 gate: reproduces the mission's full evidence
-# battery in fresh sequential processes. Felix's independent re-run
-# is this one command from the worktree root:
-#
-#   ./gate_run.sh
+# PLUGIN-1 gate battery: every probe in a FRESH sequential process.
+# Exit 0 only when everything is green. Re-run by Felix = the gate.
 #
 # Batteries run SEQUENTIALLY (never in parallel): on the 2-core host
 # concurrent proofs contend and produce spurious failures that look
-# like regressions. Order matters: rd1_fresh_process re-opens the
-# DBs rd1_adversarial leaves behind, so it runs immediately after it.
-#
-# The mission battery is proofs/creativity_slice_proof.py (the D-5
-# stages + D-4 intent register). The six rd1_* batteries are carried
-# regressions from RD-TARGET-REMOTE-1 (base 08fad24): the new
-# runtime/creativity/ package is additive, but the tree must stay
-# green as one integrated system.
-#
-# Exit 0 only if every battery passes. Per-battery logs are kept
-# under /tmp/rd1_gate_logs/.
+# like regressions.
 set -u
+WT="$(cd "$(dirname "$0")" && pwd)"
+PROOF="$WT/proofs/plugin1"
+export PYTHONPATH="$WT/pylib"
+SCRATCH="$PROOF/scratch"
+rm -rf "$SCRATCH"
+mkdir -p "$SCRATCH"
+export PLUGIN1_SCRATCH="$SCRATCH"
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-LOGDIR="/tmp/rd1_gate_logs"
-mkdir -p "$LOGDIR"
-export DISPLAY=":99"
-
-XVFB_PID=""
-cleanup_xvfb() {
-    if [ -n "$XVFB_PID" ] && kill -0 "$XVFB_PID" 2>/dev/null; then
-        kill "$XVFB_PID" 2>/dev/null
-    fi
+fail=0
+step() {
+  name="$1"; shift
+  echo "=== $name $* ==="
+  ( cd "$PROOF" && python3 "$name" "$@" ) || { echo "FAIL: $name $*"; fail=1; }
 }
 
-# Display check via python3/Xlib (xdpyinfo is not installed on this
-# host). The pgrep patterns below can never match this script's own
-# command line (bracket trick), and we prefer the captured PID over
-# any pattern kill.
-display_up() {
-    python3 -c "from Xlib.display import Display
-d = Display(':99'); d.close()" 2>/dev/null
-}
-if display_up; then
-    echo "[gate] X display :99 already up"
+step make_fixtures.py
+step p1a_register.py
+step p1b_persistence.py
+step p2_happy_path.py
+step p3_unsigned_refused.py
+step p4_escape_probe.py
+step p567_resource_probes.py cpu
+step p567_resource_probes.py mem
+step p567_resource_probes.py fsize
+step p8_protocol_violation.py
+step p9_unknown.py
+step p10_http_seam.py
+step p11_timeout.py
+
+echo "=== canonical suites: seam behavior ==="
+( cd "$WT" && python3 -m pytest tests/backend/test_execute_api.py \
+    tests/contracts/test_execute_api.py -q ) || { echo "FAIL: execute_api suites"; fail=1; }
+( cd "$WT" && python3 -m pytest tests/backend/test_sandbox.py -q ) || { echo "FAIL: test_sandbox"; fail=1; }
+
+echo "=== shared inventory: retirement signal (expected, gate-time) ==="
+# The 8 non-route tests must still pass: availability.py and REPORT_CODES
+# are untouched (retirement happens at gate/landing time in main chat).
+( cd "$WT" && python3 -m pytest tests/contracts/test_coming_soon.py -q \
+    --deselect "tests/contracts/test_coming_soon.py::ComingSoonContractTest::test_route_backed_entries_match_live_handlers" ) \
+    || { echo "FAIL: test_coming_soon non-route tests"; fail=1; }
+# The route-backed test MUST now fail on exactly the external-bots entry:
+# the route is real, so the probe gets a typed honest refusal instead of
+# the 501. That failure IS the retirement signal for the gate.
+sig_out=$(cd "$WT" && python3 -m pytest \
+    "tests/contracts/test_coming_soon.py::ComingSoonContractTest::test_route_backed_entries_match_live_handlers" 2>&1)
+echo "$sig_out" | grep -q "1 failed" \
+    || { echo "FAIL: retirement signal absent (route may have regressed to 501)"; fail=1; }
+echo "$sig_out" | grep -q "external-bots: expected typed unavailability" \
+    || { echo "FAIL: retirement signal is not the external-bots entry"; fail=1; }
+echo "$sig_out" | grep -q "PLUGIN_UNKNOWN" \
+    || { echo "FAIL: retirement signal has the wrong refusal code"; fail=1; }
+echo "retirement signal confirmed: external-bots entry is stale, route is real"
+
+if [ "$fail" -eq 0 ]; then
+  echo "PLUGIN-1 GATE: ALL GREEN"
 else
-    echo "[gate] starting Xvfb :99"
-    Xvfb :99 -screen 0 1280x1024x24 >"$LOGDIR/xvfb.log" 2>&1 &
-    XVFB_PID=$!
-    trap cleanup_xvfb EXIT
-    for i in $(seq 1 20); do
-        display_up && break
-        sleep 0.5
-    done
-    display_up \
-        || { echo "[gate] FATAL: Xvfb :99 did not come up"; exit 2; }
+  echo "PLUGIN-1 GATE: RED"
+  exit 1
 fi
-
-declare -a BATTERIES=(
-    "proofs/creativity_slice_proof.py"
-    "proofs/rd1_endpoint_proof.py"
-    "proofs/rd1_proof.py"
-    "proofs/rd1_adversarial.py"
-    "proofs/rd1_fresh_process.py"
-    "proofs/rd1_remote_interop.py"
-    "proofs/rd1_inproc_product_path.py"
-)
-
-OVERALL=0
-cd "$ROOT"
-for b in "${BATTERIES[@]}"; do
-    name="$(basename "$b" .py)"
-    log="$LOGDIR/${name}.log"
-    echo "=== [gate] running $b ==="
-    if python3 -u "$b" >"$log" 2>&1; then
-        echo "[gate] $name: EXIT 0"
-    else
-        echo "[gate] $name: EXIT $?  <-- FAILED (see $log)"
-        OVERALL=1
-    fi
-    # Per-battery pass/fail summary line, whatever the battery prints.
-    grep -E "checks, .* passed|green$|/.*green" "$log" | tail -2
-    grep -E "^\[FAIL\]|FAILED" "$log" | head -5
-    echo
-done
-
-# The shared display must be clean: no battery may leave an indicator
-# window behind for the next one.
-LEFTOVER="$(python3 - "$DISPLAY" <<'EOF' 2>/dev/null
-import sys
-from Xlib.display import Display
-d = Display(sys.argv[1] if len(sys.argv) > 1 else ":99")
-found = []
-def walk(w):
-    try:
-        name = w.get_wm_name()
-    except Exception:
-        name = None
-    if name == "REMOR Remote Session LIVE":
-        found.append(name)
-    try:
-        kids = w.query_tree().children
-    except Exception:
-        return
-    for k in kids:
-        walk(k)
-walk(d.screen().root)
-d.close()
-print(len(found))
-EOF
-)"
-if [ "$LEFTOVER" != "0" ]; then
-    echo "[gate] DISPLAY POLLUTION: $LEFTOVER leftover indicator window(s) on :99"
-    OVERALL=1
-else
-    echo "[gate] display :99 clean (no leftover indicator windows)"
-fi
-
-if [ "$OVERALL" -eq 0 ]; then
-    echo "[gate] ALL BATTERIES GREEN"
-else
-    echo "[gate] GATE FAILED"
-fi
-exit "$OVERALL"

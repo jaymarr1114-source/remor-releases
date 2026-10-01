@@ -238,16 +238,19 @@ class TestRevertCausality(unittest.TestCase):
             td.cleanup()
 
 
-class TestPluginUnavailable(unittest.TestCase):
-    def test_execute_plugin_honestly_unavailable(self):
+class TestPluginExecution(unittest.TestCase):
+    def test_execute_plugin_unknown_is_typed_refusal(self):
+        # The registry substrate now exists: an unknown plugin is a
+        # typed honest refusal, never the old PLUGIN_REGISTRY_ABSENT
+        # unavailability and never a simulated success.
         td, store, svc, sandbox = _svc()
         try:
-            res = svc.execute_plugin("some-bot")
+            res = svc.execute_plugin("some-bot", {"goal": "demo"})
             self.assertFalse(res["ok"])
-            un = res["unavailable"]
-            self.assertEqual(un["code"], "PLUGIN_REGISTRY_ABSENT")
-            self.assertEqual(un["gui"], "coming_soon")
-            self.assertIn("plugin registry", un["missing_substrate"])
+            self.assertNotIn("unavailable", res)
+            err = res["error"]
+            self.assertEqual(err["code"], "PLUGIN_UNKNOWN")
+            self.assertIn("some-bot", err["reason"])
             json.dumps(res)
         finally:
             td.cleanup()
@@ -266,12 +269,11 @@ class TestRoutes(unittest.TestCase):
             self.assertIn("via-route", res["stdout"])
             self.assertEqual(res["revision"], 1)
             json.dumps(res)
-            # plugin route returns the typed unavailability over the wire
+            # plugin route returns the typed honest refusal over the wire
             res2 = dispatch(routes, "POST", "/api/execute/plugin",
-                            {"plugin": "x"})
+                            {"plugin": "x", "task": {"goal": "demo"}})
             self.assertFalse(res2["ok"])
-            self.assertEqual(res2["unavailable"]["code"],
-                             "PLUGIN_REGISTRY_ABSENT")
+            self.assertEqual(res2["error"]["code"], "PLUGIN_UNKNOWN")
             # unknown route is an honest 404 shape
             res3 = dispatch(routes, "GET", "/api/execute", {})
             self.assertFalse(res3["ok"])

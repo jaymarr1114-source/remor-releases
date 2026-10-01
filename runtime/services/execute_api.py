@@ -41,13 +41,18 @@ naming the active mode, the limits, and the residual. What is NOT here:
 no container, no mount-namespace, no network/syscall filtering; without
 the opt-in there is no UID isolation (same-user + rlimits only).
 
-Plugin / external-AI-bot execution (Contract 3's idea) is
-HONESTLY-UNAVAILABLE: no plugin registry substrate exists anywhere in the
-runtime. execute_plugin() returns the typed unavailability; it is not built.
+Plugin / external-AI-bot execution (Contract 3's idea) is REAL: a
+disk-persisted plugin registry (swarm_engine.plugin) with hash-pinned
+manifests, a versioned bot protocol, and sandboxed execution reusing the
+services sandbox (rlimits, optional privdrop). execute_plugin() resolves,
+loads (re-verifying hashes), runs, and returns the result with provenance;
+every failure is a typed honest refusal. The plugin registry lives in a
+stable sibling directory of the sandbox dir unless the caller names one.
 
-HTTP surface: routes_for_execute(artifact_store, sandbox_dir) returns
-{(method, path): handler} with handler(body_dict) -> JSON-serializable dict.
-http_adapter.py is NOT edited; the coordinator's HTTP layer merges these.
+HTTP surface: routes_for_execute(artifact_store, sandbox_dir,
+plugin_registry_dir=None) returns {(method, path): handler} with
+handler(body_dict) -> JSON-serializable dict. http_adapter.py is NOT
+edited; the coordinator's HTTP layer merges these.
 """
 from __future__ import annotations
 
@@ -58,6 +63,14 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from swarm_engine.services.contract_types import contract_unavailable, dispatch
+from swarm_engine.plugin.errors import (
+    PLUGIN_INVALID_TASK,
+    plugin_error as _plugin_error,
+)
+from swarm_engine.plugin.service import (
+    PluginService,
+    default_registry_dir,
+)
 
 _DEFAULT_TIMEOUT = 30.0
 _MAX_TIMEOUT = 600.0
@@ -87,9 +100,12 @@ def _default_name() -> str:
 class ExecuteService:
     """Contract 5: versioned execution over an ArtifactStore."""
 
-    def __init__(self, artifact_store, sandbox_dir: str) -> None:
+    def __init__(self, artifact_store, sandbox_dir: str,
+                 plugin_registry_dir: Optional[str] = None) -> None:
         self._store = artifact_store
         self._sandbox_dir = sandbox_dir
+        self._plugins = PluginService(
+            plugin_registry_dir or default_registry_dir(sandbox_dir))
 
     # -- main contract -------------------------------------------------
     def execute_code(
@@ -158,26 +174,32 @@ class ExecuteService:
             "sandbox": run.get("sandbox"),
         }
 
-    # -- honestly unavailable ------------------------------------------
-    def execute_plugin(self, plugin_name: str = "") -> Dict[str, Any]:
-        """Contract 3's plugin / external-AI-bot idea: NOT BUILT.
+    # -- plugin / external-bot execution (REAL) --------------------------
+    @property
+    def plugin_service(self) -> PluginService:
+        """The real plugin service (registry + loader + sandbox)."""
+        return self._plugins
 
-        No plugin registry substrate exists in this runtime, so there is
-        nothing to load, sandbox, or call. Returns the typed unavailability.
+    def execute_plugin(self, plugin_name: str = "",
+                       task: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Execute a registered plugin against the user-stated task.
+
+        The bot protocol: the user states the outcome (task), the plugin
+        does the work sandboxed, it reports back with provenance. Unknown
+        plugins, bad manifests, and sandbox breaches are typed honest
+        refusals — never simulated success.
         """
-        return contract_unavailable(
-            "PLUGIN_REGISTRY_ABSENT",
-            "plugin/external-bot execution was requested"
-            + (f" for {plugin_name!r}" if plugin_name else "")
-            + ", but no plugin registry exists in this runtime",
-            missing_substrate="plugin registry / external-bot execution "
-            "adapter (no registry, no loader, no bot protocol)",
-        )
+        return self._plugins.execute(plugin_name or "", task)
 
 
-def routes_for_execute(artifact_store, sandbox_dir: str):
-    """Route table for Contract 5. Handlers take body_dict -> JSON dict."""
-    svc = ExecuteService(artifact_store, sandbox_dir)
+def routes_for_execute(artifact_store, sandbox_dir: str,
+                       plugin_registry_dir: Optional[str] = None):
+    """Route table for Contract 5. Handlers take body_dict -> JSON dict.
+
+    plugin_registry_dir is optional: when omitted the registry lives in
+    a stable sibling directory of sandbox_dir (default_registry_dir).
+    """
+    svc = ExecuteService(artifact_store, sandbox_dir, plugin_registry_dir)
 
     def _post_execute(body: Dict[str, Any]) -> Dict[str, Any]:
         return svc.execute_code(
@@ -188,7 +210,16 @@ def routes_for_execute(artifact_store, sandbox_dir: str):
         )
 
     def _post_plugin(body: Dict[str, Any]) -> Dict[str, Any]:
-        return svc.execute_plugin(body.get("plugin") or body.get("name") or "")
+        task = body.get("task")
+        if task is None:
+            task = {}
+        if not isinstance(task, dict):
+            return _plugin_error(
+                PLUGIN_INVALID_TASK,
+                "task must be a JSON object (the user-stated outcome)",
+                {"task_type": type(task).__name__})
+        return svc.execute_plugin(body.get("plugin") or body.get("name") or "",
+                                  task)
 
     return {
         ("POST", "/api/execute"): _post_execute,
