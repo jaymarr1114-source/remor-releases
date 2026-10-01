@@ -101,22 +101,37 @@ class YRecord:
         return asdict(self)
 
 
-@dataclass
-class DeltaRecord:
-    """The persisted Y-Z delta. Frozen schema: V and C are filled by M2."""
-    delta_id: str
-    X: str  # objective
-    Y: Dict[str, Any]  # {y_id, action_count, source}
-    Z: Dict[str, Any]  # inventory summary
-    gap: str  # the Y-Z description
-    T: Dict[str, Any]  # {technique_name, required_tools}
-    E: List[str]  # evidence ids
-    D: List[str]  # dependencies (may be empty)
-    V: Dict[str, Any]  # {"status": "unverified", "method": None} — M2 fills
-    C: Optional[Any]  # None — M2 fills
+# DELTA-NAME-1 (2026-10-01): the M1 ingestion-side DeltaRecord dataclass is
+# gone. It was a second, incompatible DeltaRecord class shadowing M2's
+# canonical one (runtime/acquisition/delta.py) while being used exactly once
+# — immediately serialized via .as_dict(). The frozen M1 ingestion schema
+# (single-letter X/Y/Z/T/E/D/V/C dict) is preserved verbatim by
+# _m1_delta_dict() below; only the class-name collision was removed.
+# M2's DeltaRecord (with validate() and the causal discipline) is now the
+# single DeltaRecord class in the tree.
 
-    def as_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+
+def _m1_delta_dict(delta_id: str, X: str, Y: Dict[str, Any],
+                   Z: Dict[str, Any], gap: str, T: Dict[str, Any],
+                   E: List[str], D: List[str], V: Dict[str, Any],
+                   C: Optional[Any]) -> Dict[str, Any]:
+    """Build the frozen M1 ingestion-side delta dict.
+
+    Byte-identical to the old DeltaRecord(...).as_dict() output: the
+    persisted schema consumed by loop_driver._adapt_m1_to_m2 is unchanged.
+    """
+    return {
+        "delta_id": delta_id,
+        "X": X,
+        "Y": Y,
+        "Z": Z,
+        "gap": gap,
+        "T": T,
+        "E": E,
+        "D": D,
+        "V": V,
+        "C": C,
+    }
 
 
 @dataclass
@@ -315,7 +330,7 @@ def ingest_external_demonstration(demo: ExternalDemonstration,
     )
     delta_id = f"delta_{uuid4().hex[:12]}"
     evidence_id = f"ev_{uuid4().hex[:12]}"
-    delta = DeltaRecord(
+    delta = _m1_delta_dict(
         delta_id=delta_id,
         X=demo.objective,
         Y={"y_id": y.y_id, "action_count": len(demo.actions),
@@ -344,7 +359,7 @@ def ingest_external_demonstration(demo: ExternalDemonstration,
         origin_loop="acquisition",
         kind="technique_delta",
         content=f"technique delta (Y-Z): {delta_id} for {demo.objective}",
-        raw={"delta": delta.as_dict()},
+        raw={"delta": delta},
         causal_chain=[y.y_id],
         source="technique_delta",
     )
