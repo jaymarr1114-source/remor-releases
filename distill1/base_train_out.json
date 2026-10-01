@@ -1,0 +1,142 @@
+[
+ {
+  "turn_id": "t01",
+  "turn_class": "clarification",
+  "turn_text": "can you do math",
+  "response": "Response:\nSure! Let me know if you have any math problems or need help with calculations. \ud83d\ude0a",
+  "wall_s": 8.3
+ },
+ {
+  "turn_id": "t02",
+  "turn_class": "clarification",
+  "turn_text": "are you able to do calculations?",
+  "response": "Response:\nYes, I can do calculations. What would you like me to calculate?",
+  "wall_s": 2.7
+ },
+ {
+  "turn_id": "t03",
+  "turn_class": "clarification",
+  "turn_text": "hey can you help me with some arithmetic",
+  "response": "Response:\nSure! How can I assist you with arithmetic? Let me know the specific problem you need help with.",
+  "wall_s": 3.8
+ },
+ {
+  "turn_id": "t04",
+  "turn_class": "clarification",
+  "turn_text": "do you know how to multiply big numbers",
+  "response": "Response:\nYes, I can help you multiply big numbers. Let me know the numbers you want to multiply!",
+  "wall_s": 5.5
+ },
+ {
+  "turn_id": "t05",
+  "turn_class": "clarification",
+  "turn_text": "what can you actually do",
+  "response": "Response:\nI can help you with a variety of tasks and support. What would you like to do?",
+  "wall_s": 4.26
+ },
+ {
+  "turn_id": "t06",
+  "turn_class": "clarification",
+  "turn_text": "what are you capable of",
+  "response": "Response:\nI am capable of providing assistance in various areas such as general knowledge, answering questions, and offering help with specific tasks. If you have any questions or need support, feel free to ask!",
+  "wall_s": 14.63
+ },
+ {
+  "turn_id": "t07",
+  "turn_class": "clarification",
+  "turn_text": "can you write things for me",
+  "response": "Response:\nSure! What can I help you with right now?",
+  "wall_s": 5.17
+ },
+ {
+  "turn_id": "t08",
+  "turn_class": "clarification",
+  "turn_text": "are you able to remember what I tell you",
+  "response": "Response:\nYes, I can remember what you tell me. Let me know what you need!",
+  "wall_s": 4.86
+ },
+ {
+  "turn_id": "t09",
+  "turn_class": "conversational",
+  "turn_text": "hi there",
+  "response": "Response:\nHello! How can I assist you today?",
+  "wall_s": 2.04
+ },
+ {
+  "turn_id": "t10",
+  "turn_class": "conversational",
+  "turn_text": "how's it going",
+  "response": "Response:\nIt's going well! Let me know if there's anything else I can assist you with. \ud83d\ude0a",
+  "wall_s": 3.69
+ },
+ {
+  "turn_id": "t11",
+  "turn_class": "conversational",
+  "turn_text": "I'm bored, talk to me",
+  "response": "Response:\nSure! How can I help you today? Let me know what you're interested in!",
+  "wall_s": 3.1
+ },
+ {
+  "turn_id": "t12",
+  "turn_class": "conversational",
+  "turn_text": "what's the weather like",
+  "response": "Response:\nThe weather is currently sunny with a mild breeze. Let me know if you'd like more details!",
+  "wall_s": 5.42
+ },
+ {
+  "turn_id": "t13",
+  "turn_class": "conversational",
+  "turn_text": "tell me something interesting",
+  "response": "Response:\nSure! What's something interesting to you?",
+  "wall_s": 3.39
+ },
+ {
+  "turn_id": "t14",
+  "turn_class": "conversational",
+  "turn_text": "I had a rough day",
+  "response": "Response:\nI had a rough day. Let me know if you need help!",
+  "wall_s": 3.57
+ },
+ {
+  "turn_id": "t15",
+  "turn_class": "conversational",
+  "turn_text": "what do you think about hiking",
+  "response": "Response:\nHiking is a great way to connect with nature and enjoy the outdoors. It's a relaxing and healthy activity that can help you stay active and mentally stimulated. Whether you're looking to explore new trails",
+  "wall_s": 7.04
+ },
+ {
+  "turn_id": "t16",
+  "turn_class": "conversational",
+  "turn_text": "can you explain what a black hole is simply",
+  "response": "Response:\nA black hole is a region in space where gravity is so strong that nothing, not even light, can escape its pull. Imagine if you were to collapse a huge object, like a star, to",
+  "wall_s": 6.97
+ },
+ {
+  "turn_id": "t17",
+  "turn_class": "conversational",
+  "turn_text": "thanks, that helps",
+  "response": "Response:\nYou're welcome! If you have any questions or need help, feel free to ask. \ud83d\ude0a",
+  "wall_s": 2.5
+ },
+ {
+  "turn_id": "t18",
+  "turn_class": "conversational",
+  "turn_text": "wait, what did you just say",
+  "response": "Response:\nI'm sorry, but I can't help with that. Let me know if there's anything else I can assist you with!",
+  "wall_s": 4.93
+ },
+ {
+  "turn_id": "t19",
+  "turn_class": "conversational",
+  "turn_text": "hmm, not quite what I meant",
+  "response": "Response:\nI'm sorry, but I can't help with that. Let me know what you need!",
+  "wall_s": 7.05
+ },
+ {
+  "turn_id": "t20",
+  "turn_class": "conversational",
+  "turn_text": "okay bye for now",
+  "response": "Response:\nYou're welcome! Have a great day! \ud83d\ude0a",
+  "wall_s": 8.38
+ }
+]

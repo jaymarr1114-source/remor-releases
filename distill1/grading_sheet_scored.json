@@ -1,0 +1,206 @@
+[
+ {
+  "turn_id": "h01",
+  "turn_class": "clarification",
+  "turn_text": "can u do maths for me",
+  "responses": [
+   {
+    "label": "A",
+    "text": "Sure! I can help you with math problems. Let me know what you need! \ud83d\ude0a",
+    "score": 2
+   },
+   {
+    "label": "B",
+    "text": "Sure! Can you show me a math problem you'd like to solve?",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "turn_id": "h02",
+  "turn_class": "clarification",
+  "turn_text": "is math something you can handle?",
+  "responses": [
+   {
+    "label": "A",
+    "text": "Yes, math can be handled with practice and dedication. It's a skill that improves with time and effort. If you're interested in learning more, I'm happy to help you explore different areas of math!",
+    "score": 1
+   },
+   {
+    "label": "B",
+    "text": "Yes, math can be handled with practice and dedication.",
+    "score": 1
+   }
+  ]
+ },
+ {
+  "turn_id": "h03",
+  "turn_class": "clarification",
+  "turn_text": "what stuff can you do anyway",
+  "responses": [
+   {
+    "label": "A",
+    "text": "I can help with questions, provide information, and assist with tasks. Let me know what I can do for you!",
+    "score": 1
+   },
+   {
+    "label": "B",
+    "text": "I can help you with a variety of tasks and conversations, such as answering questions, providing information, or assisting with specific needs. Let me know what you'd like to do!",
+    "score": 1
+   }
+  ]
+ },
+ {
+  "turn_id": "h04",
+  "turn_class": "clarification",
+  "turn_text": "do you have the ability to write emails for me",
+  "responses": [
+   {
+    "label": "A",
+    "text": "Hello! I can write emails for you. Just let me know what you need, and I'll help you craft the best message for you.",
+    "score": 2
+   },
+   {
+    "label": "B",
+    "text": "Sure, I can help you write emails. Let me know how I can assist!",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "turn_id": "h05",
+  "turn_class": "clarification",
+  "turn_text": "can you set a timer for me",
+  "responses": [
+   {
+    "label": "A",
+    "text": "Sure! How long would you like to set a timer for?",
+    "score": 2
+   },
+   {
+    "label": "B",
+    "text": "Sure, I can set a timer for you. Let me know when you'd like to start.",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "turn_id": "h06",
+  "turn_class": "clarification",
+  "turn_text": "what's 234 times 56",
+  "responses": [
+   {
+    "label": "A",
+    "text": "234 multiplied by 56 is 13,224.",
+    "score": 2
+   },
+   {
+    "label": "B",
+    "text": "234 \u00d7 56 = 13,224",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "turn_id": "h07",
+  "turn_class": "conversational",
+  "turn_text": "hello!",
+  "responses": [
+   {
+    "label": "A",
+    "text": "Hello! How can I assist you today?",
+    "score": 2
+   },
+   {
+    "label": "B",
+    "text": "Hello! How can I assist you today?",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "turn_id": "h08",
+  "turn_class": "conversational",
+  "turn_text": "I'm feeling down today",
+  "responses": [
+   {
+    "label": "A",
+    "text": "I'm sorry to hear you're feeling down today. It's okay to feel this way, and I hope you feel better soon. If you need anything to help, just let me know!",
+    "score": 2
+   },
+   {
+    "label": "B",
+    "text": "I'm sorry to hear you're feeling down. It's okay to feel this way, and I'm here to support you. Let me know if there's anything you'd like to talk about right now.",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "turn_id": "h09",
+  "turn_class": "conversational",
+  "turn_text": "explain gravity like I'm five",
+  "responses": [
+   {
+    "label": "A",
+    "text": "Sure! Let's explain gravity like I'm five:\n\nGravity is like a big, soft, always pulling things down. It makes things stay on the ground, even when you're high up. Like, if you jump up, gravity keeps you from falling back down. It's like a friend who always helps you stay",
+    "score": 2
+   },
+   {
+    "label": "B",
+    "text": "Gravity is like a big force that pulls things down to the ground, making things stay in place.",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "turn_id": "h10",
+  "turn_class": "conversational",
+  "turn_text": "that doesn't make sense, try again",
+  "responses": [
+   {
+    "label": "A",
+    "text": "Sure! Let me know if you'd like to ask something else. \ud83d\ude0a",
+    "score": 1
+   },
+   {
+    "label": "B",
+    "text": "That doesn't make sense. Could you clarify what you're asking?",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "turn_id": "h11",
+  "turn_class": "conversational",
+  "turn_text": "who are you",
+  "responses": [
+   {
+    "label": "A",
+    "text": "I am a language model designed to assist with questions and provide information. If you have any questions, feel free to ask!",
+    "score": 2
+   },
+   {
+    "label": "B",
+    "text": "I'm a language model, and I don't have a physical form or a person. However, I can assist you with various tasks and questions in different languages. Let me know how I can help!",
+    "score": 2
+   }
+  ]
+ },
+ {
+  "turn_id": "h12",
+  "turn_class": "conversational",
+  "turn_text": "good morning",
+  "responses": [
+   {
+    "label": "A",
+    "text": "Good morning! How can I assist you today?",
+    "score": 2
+   },
+   {
+    "label": "B",
+    "text": "Good morning!",
+    "score": 1
+   }
+  ]
+ }
+]

@@ -1,0 +1,30 @@
+{
+ "delta_id": "distill1-d03-no-echo",
+ "dependencies_d": [],
+ "evidence_e": [
+  {
+   "kind": "file",
+   "path": "distill1/teacher_demos.json",
+   "note": "t14 teacher demonstration"
+  },
+  {
+   "kind": "file",
+   "path": "distill1/base_train_out.json",
+   "note": "t14 base response (before)"
+  }
+ ],
+ "objective_x": "Respond to emotional/personal statements without parroting",
+ "resulting_capability_c": "distill1.student_policy.NO_ECHO",
+ "verification_v": "Held-out eval: emotional-statement turns (h08) must not echo; blinded grading.",
+ "external_demo_y": "Teacher responded to 'I had a rough day' with 'I'm sorry to hear that. What would you like to talk about?' \u2014 empathy directed AT the user's experience.",
+ "native_inventory_z": "Base 0.6B responds to 'I had a rough day' with 'I had a rough day. Let me know if you need help!' \u2014 echoing the user's statement as its own.",
+ "capability_gap": "before: base responds to 'I had a rough day' with 'I had a rough day. Let me know if you need help!' (echoes user's statement as its own). after: teacher responds 'I'm sorry to hear that. What would you like to talk about?' (empathy, no echo).",
+ "technique_t": {
+  "name": "no-echo-empathy",
+  "probe": {
+   "import": "distill1.student_policy",
+   "attr": "NO_ECHO",
+   "check": "call_true"
+  }
+ }
+}

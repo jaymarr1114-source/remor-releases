@@ -1,0 +1,78 @@
+{
+ "ticket_id": "DISTILL-1",
+ "capability": "open conversational chat turns (clarification + general)",
+ "teacher": {
+  "model": "Qwen3-0.6B-Q8_0",
+  "source": "Qwen/Qwen3-0.6B-GGUF @ 23749fefcc72300e3a2ad315e1317431b06b590a",
+  "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+  "config": "expert-prompt (few-shot conversational techniques)",
+  "provenance": "teacher:qwen3-0.6b@expert-prompt",
+  "note": "Qwen3-8B was the designated teacher but environment-blocked (5GB model thrashes on ~1.5GB available RAM). Boundary named, not silently worked around."
+ },
+ "student_base": {
+  "model": "Qwen3-0.6B-Q8_0",
+  "source": "Qwen/Qwen3-0.6B-GGUF @ 23749fefcc72300e3a2ad315e1317431b06b590a",
+  "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+  "path": "/home/hatch/workspace/models/qwen3-0_6b/Qwen3-0.6B-Q8_0.gguf"
+ },
+ "train_set": {
+  "path": "distill1/turns_train.json",
+  "sha256": "d0fc34cc835298ed4902cb776fbff48e5415023cef2bccfd64200fd865fd7512",
+  "n": 20
+ },
+ "held_out_set": {
+  "path": "distill1/turns_heldout.json",
+  "sha256": "559f5617813908643611c943199ac8d7ec4c39369c4d00d3dcbdf3806b67ce98",
+  "n": 12
+ },
+ "delta_records": [
+  "distill1/delta_records/d01_directness.json",
+  "distill1/delta_records/d02_honesty.json",
+  "distill1/delta_records/d03_no_echo.json",
+  "distill1/delta_records/d04_repair.json"
+ ],
+ "exit_criteria": {
+  "native": "no borrowed cognition calls at student runtime",
+  "envelope": {
+   "max_size_mb": 650,
+   "max_ram_mb": 1500
+  },
+  "latency_budget_s": 2.0,
+  "held_out": {
+   "min_mean": 1.5,
+   "max_clarification_zeros": 0,
+   "must_beat_base": true
+  }
+ },
+ "result": {
+  "status": "FAIL",
+  "checks": {
+   "native_no_borrow_at_runtime": true,
+   "envelope": true,
+   "latency": false,
+   "held_out_mean": true,
+   "held_out_clarification_zeros": true,
+   "beats_base": true
+  },
+  "measurements": {
+   "native_no_borrow_proven": true,
+   "size_mb": 610,
+   "ram_mb": 800,
+   "max_turn_s": 42.9,
+   "steady_state_turn_s": 3.5,
+   "held_out_mean": 1.833,
+   "held_out_clarification_zeros": 0,
+   "base_mean": 1.667
+  },
+  "evidence": {
+   "teacher_demos": "distill1/teacher_demos.json (7 demos, provenance per demo)",
+   "delta_records": "distill1/delta_records/*.json (4, all validate_delta VALID)",
+   "technique_pack": "distill1/student_policy.py",
+   "base_heldout": "distill1/base_heldout_out.json",
+   "student_heldout": "distill1/student_heldout_out.json",
+   "grading_sheet": "distill1/grading_sheet_scored.json (blinded, rubric pre-registered)",
+   "latency_note": "Cold-start 35-43s (model load from disk). Steady-state warm 3-7s. The 2s budget requires a persistent model server (llama-server), not per-turn process spawn. This is an integration requirement, not a model capability gap."
+  },
+  "sealed_at": "2026-10-01T02:00:08.942812+00:00"
+ }
+}
