@@ -22,6 +22,7 @@ allocation decision and admission, never running work.
 from __future__ import annotations
 
 import uuid
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet
 
@@ -115,3 +116,34 @@ class FrmGrant:
         assert frozenset(d.keys()) == GRANT_KEYS, \
             f"grant shape drift: {sorted(d.keys())}"
         return d
+
+
+def issue_run_grant(*, domain: str, estimated_cost_s: float,
+                    margin_s: float = 120.0, epoch_s: float = 3600.0,
+                    max_concurrent: int = 1,
+                    note: str = "") -> "FrmGrant":
+    """Issue one per-run FrmGrant through the single shared issuance path.
+
+    This is the production issuance pattern for model-inference grants:
+    budgeted at the caller's cost estimate plus margin, one epoch, not
+    lent. Both the agent-org llm wiring and the chat inlet issue through
+    here -- there is exactly one per-run issuer, not one per caller.
+
+    Bound (disclosed, inherited): grants are issued per run, not by the
+    FRM epoch loop; FRM-epoch integration is future work.
+    """
+    now = time.time()
+    return FrmGrant.issue(
+        domain=domain,
+        epoch_id=int(now),
+        epoch_s=epoch_s,
+        budget_s=float(estimated_cost_s) + float(margin_s),
+        max_concurrent=max_concurrent,
+        primary_minimum_budget_s=0.0,
+        primary_minimum_concurrent=0,
+        lent=False,
+        lending=LendingRecord(0.0, 0),
+        enforcement_state_at_issue="RUNNING",
+        issued_at=now,
+        note=note or f"{domain}: per-run inference grant",
+    )
