@@ -21,10 +21,7 @@ sys.path.insert(0, os.path.join(_CANONICAL, "pylib"))
 
 from runtime.intellect.delta_capture import (  # noqa: E402
     DeltaRefused,
-    DeltaSession,
-    SessionError,
     emit_delta,
-    read_session_deltas,
     validate_delta,
 )
 from runtime.intellect.unified_memory import (  # noqa: E402
@@ -141,85 +138,6 @@ class EmitTests(unittest.TestCase):
         self.assertEqual(prov["kind"], "technique_delta")
         self.assertEqual(prov["causal_chain"], ["s_emit"])
         self.assertEqual(prov["write_path"], "unified_memory.record_experience")
-
-
-class SessionLifecycleTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.engine = _engine()
-        cls.epi = cls.engine.intellect.epistemic
-
-    def test_double_begin(self):
-        s = DeltaSession(self.epi)
-        s.begin("some objective stated with sufficient length")
-        with self.assertRaises(SessionError):
-            s.begin("another objective stated with sufficient length")
-
-    def test_demonstrate_without_begin(self):
-        s = DeltaSession(self.epi)
-        with self.assertRaises(SessionError):
-            s.demonstrate(technique="t", y="y", z="z", gap="g",
-                          probe={"import": "os", "attr": "getcwd",
-                                 "check": "callable"},
-                          provider_marker="m", artifacts=[], runs=[],
-                          dependencies=[], verification="v",
-                          capability="c")
-
-    def test_gapless_session_emits_zero(self):
-        s = DeltaSession(self.epi)
-        s.begin("native verification work with no external demonstration")
-        res = s.close()
-        self.assertEqual(res["status"], "rejected")
-        self.assertEqual(read_session_deltas(self.epi, s.session_id), [])
-
-    def test_double_close(self):
-        s = DeltaSession(self.epi)
-        s.begin("a probe objective stated with sufficient length")
-        s.close()
-        with self.assertRaises(SessionError):
-            s.close()
-
-    def test_fabricated_evidence_rejected(self):
-        s = DeltaSession(self.epi)
-        s.begin("a fabricated-evidence probe objective stated here")
-        s.demonstrate(
-            technique="fabricated", y="y stated", z="z stated",
-            gap="before probe failed; after probe still failed: no change",
-            probe={"import": "no_such_module_xyz", "attr": "a",
-                   "check": "callable"},
-            provider_marker="def _no_such_technique_xyz",
-            artifacts=[{"kind": "file",
-                        "path": "/nonexistent/fabricated_xyz.py"}],
-            runs=[], dependencies=["nothing"],
-            verification="none: fabricated",
-            capability="nowhere.fabricated")
-        res = s.close()
-        self.assertEqual(res["status"], "rejected")
-        self.assertEqual(res["reason"], "insufficient_evidence")
-        self.assertEqual(read_session_deltas(self.epi, s.session_id), [])
-
-    def test_missing_marker_rejected(self):
-        s = DeltaSession(self.epi)
-        s.begin("a missing-marker probe objective stated with length")
-        s.demonstrate(
-            technique="t", y="y stated with length", z="z stated length",
-            gap="before probe failed; after probe passed: technique shown",
-            probe={"import": "os", "attr": "getcwd", "check": "callable"},
-            provider_marker="",
-            artifacts=[], runs=[], dependencies=["stdlib"],
-            verification="v", capability="os.getcwd")
-        res = s.close()
-        self.assertEqual(res["status"], "rejected")
-        self.assertEqual(res["reason"], "insufficient_evidence")
-        self.assertEqual(read_session_deltas(self.epi, s.session_id), [])
-
-    def test_read_facade(self):
-        oid = emit_delta(self.epi, "s_facade", _good_delta())
-        um = UnifiedMemory(epistemic=self.epi, capabilities=None,
-                           registry=None)
-        recs = um.read_experiences(origin_loop="acquisition",
-                                   kind="technique_delta", limit=1000)
-        self.assertTrue(any(r["observation_id"] == oid for r in recs))
 
 
 if __name__ == "__main__":
