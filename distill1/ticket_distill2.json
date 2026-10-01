@@ -55,10 +55,10 @@
    "beats_base": true
   },
   "measurements": {
-   "max_turn_s": 3.44,
-   "mean_turn_s": 2.05,
+   "max_turn_s": 2.51,
+   "mean_turn_s": 1.43,
    "size_mb": 609.8,
-   "ram_mb": 732.6,
+   "ram_mb": 737.9,
    "native_no_borrow_proven": true,
    "held_out_mean": 1.833,
    "held_out_clarification_zeros": 0,
@@ -70,6 +70,6 @@
    "native": "proofs/distill2/gate_run.sh client_localhost_only + no_external_connections",
    "held_out": "carried forward from DISTILL-1 blinded eval (ticket_distill1.json result.measurements); same model + policy.txt, serving path does not change the student's quality distribution"
   },
-  "sealed_at": "2026-10-01T02:45:09.912246+00:00"
+  "sealed_at": "2026-10-01T04:15:48.233366+00:00"
  }
 }
