@@ -55,6 +55,35 @@ def validate(ticket):
     return errors
 
 
+def held_out_bar(ticket):
+    """Read the held-out pass bar from the ticket's sealed exit criteria.
+
+    Returns (min_mean, max_clarification_zeros, must_beat_base).
+    Raises ValueError on any schema violation — a ticket missing its bar
+    refuses to grade rather than falling back to a silent default.
+    """
+    errors = validate(ticket)
+    if errors:
+        raise ValueError(f"ticket fails validation, cannot grade: {errors}")
+    ho = ticket["exit_criteria"]["held_out"]
+    return (ho["min_mean"], ho["max_clarification_zeros"],
+            ho["must_beat_base"])
+
+
+def grade_held_out(ticket, stud_mean, clar_zeros, base_mean):
+    """The ticket's held-out pass predicate: the single source of truth
+    for the held-out bar. Returns (passes, detail_dict)."""
+    min_mean, max_clar_zeros, must_beat_base = held_out_bar(ticket)
+    detail = {
+        f"student_mean_ge_{min_mean}": stud_mean >= min_mean,
+        f"student_clarification_zeros_le_{max_clar_zeros}":
+            clar_zeros <= max_clar_zeros,
+        "student_mean_gt_base_mean":
+            (stud_mean > base_mean) if must_beat_base else True,
+    }
+    return all(detail.values()), detail
+
+
 def seal(ticket, measurements, evidence):
     """Attach results and seal. Status is computed from exit criteria,
     never hand-set."""
