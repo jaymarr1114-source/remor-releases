@@ -240,7 +240,9 @@ class TestRoutes(unittest.TestCase):
         td, store = _store()
         try:
             routes = routes_for_evidence(store)
-            self.assertEqual(len(routes), 5)
+            # 5 original + verify + substrate/get + substrate/list
+            # (EVIDENCE-WIRE-1).
+            self.assertEqual(len(routes), 8)
             a = routes[("POST", "/api/evidence/add")](
                 {"kind": "observation", "text": "saw a crash", "source": "t"})
             self.assertTrue(a["ok"])

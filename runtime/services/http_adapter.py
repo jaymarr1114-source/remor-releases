@@ -1760,10 +1760,14 @@ def build_services(base_dir: str) -> Dict[str, Any]:
         os.makedirs(d, exist_ok=True)
 
     scheduler = RunScheduler(db_path=sched_db, runtime_db_path=runtime_db)
+    # EVIDENCE-WIRE-1: hoist the lazy engine so the acquisition loop driver
+    # shares the same proxy (one engine per base_dir, thread-affinity kept:
+    # it boots on first attribute use, on the calling thread).
+    lazy_engine = _lazy_engine(os.path.join(base_dir, "projects_runtime.db"))
     projects = ProjectService(
         db_path=projects_db,
         projects_root=projects_root,
-        engine=_lazy_engine(os.path.join(base_dir, "projects_runtime.db")),
+        engine=lazy_engine,
     )
     files = ScopedFileService(root=browser_root, writable=True)
     artifacts = ArtifactStore(db_path=artifacts_db, sandbox_dir=sandbox_dir)
@@ -1786,6 +1790,12 @@ def build_services(base_dir: str) -> Dict[str, Any]:
     # Scratch capability DB: CapabilityStore creates its schema if missing.
     capabilities = CapabilityAPI(os.path.join(base_dir, "capabilities.db"))
     evidence = EvidenceStore(os.path.join(base_dir, "evidence.db"))
+    # EVIDENCE-WIRE-1: the production acquisition loop driver receives the
+    # real evidence store (not None). Ingested gaps now land as observations
+    # in the Evidence view's backend. The loop is constructed here but the
+    # engine stays lazy (CognitionLoop resolves epistemic on first use).
+    from swarm_engine.acquisition.loop_driver import CognitionLoop
+    cognition_loop = CognitionLoop(engine=lazy_engine, evidence_store=evidence)
     agents = build_agent_service(os.path.join(base_dir, "agents"))
     metering = build_metering_service(scheduler)
     # [A] intent dispatch: normalize -> classify -> (task: metering gate ->
@@ -1831,6 +1841,8 @@ def build_services(base_dir: str) -> Dict[str, Any]:
         "base_dir": base_dir, "service_anchor": service_anchor,
         "tasks": tasks, "router": router, "binary": binary,
         "capabilities": capabilities, "evidence": evidence,
+        # EVIDENCE-WIRE-1: the evidence-bound acquisition loop driver.
+        "cognition_loop": cognition_loop,
         "agents": agents, "metering": metering, "intent": intent,
         "recurrence": recurrence,
         "contract_routes": contract_routes,
