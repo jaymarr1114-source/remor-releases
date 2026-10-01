@@ -150,18 +150,6 @@ ENTRIES: List[Dict[str, Any]] = [
         route=None, probe=None, http_status=None,
     ),
     _entry(
-        kind="external-bots",
-        feature="Plugin / external-bot execution",
-        code="PLUGIN_REGISTRY_ABSENT",
-        reason=("plugin/external-bot execution was requested, but no plugin "
-                "registry exists in this runtime"),
-        missing_substrate=("plugin registry / external-bot execution adapter "
-                           "(no registry, no loader, no bot protocol)"),
-        route={"method": "POST", "path": "/api/execute/plugin"},
-        probe={},
-        http_status=501,
-    ),
-    _entry(
         kind="song-synthesis",
         feature="Audio pipeline (song synthesis)",
         code="AUDIO_PIPELINE_ABSENT",

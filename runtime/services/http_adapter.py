@@ -87,7 +87,7 @@ Backend-contract services (S1 — merged route table, dispatched FIRST):
              POST /api/routing/route, GET /api/routing/resolve?conversation_id=,
              POST /api/routing/auto -> 501 (no classifier substrate)
   Execute:   POST /api/execute {code, name?, language?, timeout?},
-             POST /api/execute/plugin -> 501 (no plugin registry)
+             POST /api/execute/plugin (real: runtime/plugin registry)
   Binary:    POST /api/artifacts/binary {name, bytes_b64, content_type?},
              GET /api/artifacts/binary/<id>, DELETE /api/artifacts/binary/<id>,
              GET /api/artifacts/all,
