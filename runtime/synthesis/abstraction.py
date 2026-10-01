@@ -30,17 +30,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass
-class ObservedComposition:
-    stage_a: str
-    stage_b: str
-    spec_name: str
-    succeeded: bool
-
-    def shape(self) -> str:
-        return f"{self.stage_a}->{self.stage_b}"
-
-
-@dataclass
 class GeneralizedSkeleton:
     shape: str
     template: str
@@ -130,20 +119,3 @@ class CompositionAbstractor:
         return any(s.shape == shape for s in self.promoted())
 
 
-def record_synthesis_outcome(abstractor: CompositionAbstractor,
-                             candidate_notes: str, spec_name: str,
-                             accepted: bool) -> Optional[GeneralizedSkeleton]:
-    """Feed a SynthesizingSource candidate's outcome into the abstractor.
-
-    Two-stage candidates carry their shape in `notes` (set by
-    SynthesizingSource as "composition {first} then {second}"); this parses
-    that back out rather than requiring the synthesizer to know about
-    abstraction, so the two modules stay independently testable.
-    """
-    if not candidate_notes.startswith("composition "):
-        return None
-    body = candidate_notes[len("composition "):]
-    if " then " not in body:
-        return None
-    stage_a, stage_b = body.split(" then ", 1)
-    return abstractor.observe(stage_a, stage_b, spec_name, accepted)

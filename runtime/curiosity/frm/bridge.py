@@ -39,6 +39,10 @@ from .policy import DomainDemand
 def build_domain_substrate() -> Any:
     """A microcontroller substrate with primary|curiosity domain pools.
 
+    TEST-SUPPORT (DEAD-CODE-1, 2026-10-01): no production caller; exercised
+    by proofs/seamwire4_frm_bridge_proof.py. Kept so the proof keeps
+    importing.
+
     The frozen MicrocontrollerSubstrate registers only the Primary's six
     loops; the CuriositySubstrate pattern (subclass overriding
     register_loop) is reused here for the two FRM domains. This is an

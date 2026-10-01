@@ -1,5 +1,10 @@
 """External-service / plugin integration front (§7).
 
+TEST-ONLY (DEAD-CODE-1, 2026-10-01): imported only by
+tests/track2_new/test_providers_fresh.py and
+tests/track2b/test_providers_fresh.py; no production inlet wires this
+module. The registry below is real but unwired.
+
 Classification: ABSENT as a product capability. This module provides the
 real, minimal seam -- a provider registry with explicit registration,
 credential hygiene (the registry never logs, persists, or inspects

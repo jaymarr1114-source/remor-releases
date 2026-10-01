@@ -228,6 +228,11 @@ class InquiryDriver:
 
 def make_substrate(model_provider: str,
                    declared_rate_per_cpu_s: float = 0.0) -> MeteredSubstrate:
-    """A metered substrate whose calls really spend."""
+    """A metered substrate whose calls really spend.
+
+    TEST-SUPPORT (DEAD-CODE-1, 2026-10-01): exercised only by
+    proofs/cur_p1d_attribution_proof_2026-09-29.py (CUR-P1D crossed
+    evidence). Not production machinery.
+    """
     return MeteredSubstrate(real_substrate_work, model_provider,
                             declared_rate_per_cpu_s)

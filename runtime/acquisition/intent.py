@@ -224,21 +224,3 @@ def evaluate_postconditions(postconditions: Sequence[Postcondition]
     return True, "; ".join(details)
 
 
-def enrich_pipeline_requirement(req: Any, goal: str,
-                                examples: Optional[Sequence[Any]] = None) -> Any:
-    """Fill required_effects / postconditions on a pipeline CapabilityRequirement."""
-    effects = list(getattr(req, "required_effects", None) or [])
-    for e in infer_required_effects(goal):
-        if e not in effects:
-            effects.append(e)
-    req.required_effects = effects
-    posts = infer_postconditions(goal, examples)
-    if hasattr(req, "postconditions"):
-        req.postconditions = posts
-    else:
-        # attach dynamically for older instances
-        try:
-            object.__setattr__(req, "postconditions", posts)
-        except Exception:
-            req.__dict__["postconditions"] = posts
-    return req

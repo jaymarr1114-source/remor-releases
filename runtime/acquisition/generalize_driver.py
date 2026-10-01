@@ -27,37 +27,6 @@ from typing import Any, Dict, List, Optional, Tuple
 GENERALIZATION_KIND = "technique_generalization"
 
 
-def find_distilled_techniques(epistemic: Any,
-                              limit: int = 1000) -> List[Dict[str, Any]]:
-    """Return refs to techniques the V10-P4 sweep distilled.
-
-    Each ref carries what ``DistillationLoop.generalize`` needs to recover
-    the source: ``promoted_name``, ``capability_id``, the consumption
-    record's observation id (provenance), and the source delta's id.
-    Only ``status == "distilled"`` outcomes are returned -- refused or
-    errored deltas never produced a technique.
-    """
-    from swarm_engine.intellect.unified_memory import read_experiences
-    from swarm_engine.acquisition.distill_driver import CONSUMPTION_KIND
-    refs: List[Dict[str, Any]] = []
-    for rec in read_experiences(epistemic, kind=CONSUMPTION_KIND,
-                                limit=limit):
-        raw = rec.get("raw") or {}
-        outcome = raw.get("outcome") or {}
-        if outcome.get("status") != "distilled":
-            continue
-        if not outcome.get("promoted_name") or not outcome.get("capability_id"):
-            continue
-        refs.append({
-            "consumption_id": rec.get("observation_id"),
-            "delta_observation_id": raw.get("delta_observation_id"),
-            "promoted_name": outcome["promoted_name"],
-            "capability_id": outcome["capability_id"],
-            "heldout": outcome.get("heldout", ""),
-        })
-    return refs
-
-
 def _source_stub(ref: Dict[str, Any]) -> Any:
     """Rebuild the minimal DistillationResult the generalize() call needs.
 
@@ -144,8 +113,3 @@ def generalize_for_task(engine: Any,
     return result
 
 
-def find_generalization_records(epistemic: Any,
-                                limit: int = 1000) -> List[Dict[str, Any]]:
-    """Read back this driver's records through the unified read path."""
-    from swarm_engine.intellect.unified_memory import read_experiences
-    return read_experiences(epistemic, kind=GENERALIZATION_KIND, limit=limit)

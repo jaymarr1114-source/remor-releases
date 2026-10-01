@@ -162,11 +162,6 @@ def _load() -> Optional[Tuple[str, Any]]:
     return None
 
 
-def substrate_available() -> bool:
-    """True when an acquired substrate loads. Never raises."""
-    return _load() is not None
-
-
 def substrate_kind() -> Optional[str]:
     """'spacy', 'nltk', or None. Introspection for proofs. Never raises."""
     loaded = _load()
@@ -324,9 +319,3 @@ def analyze_np(obj_text: str,
     return _analyze_spacy(obj_text, taxonomy, singular, impl)
 
 
-def reset_for_tests() -> None:
-    """Drop the cached substrate (tests only)."""
-    global _substrate, _load_attempted, last_error
-    _substrate = None
-    _load_attempted = False
-    last_error = ""

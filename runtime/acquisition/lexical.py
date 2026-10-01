@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from swarm_engine.acquisition.semantic_structure import (
-    SemanticStructure, SemanticNode, SemanticEdge, build_structure, compose,
+    SemanticStructure, SemanticNode, SemanticEdge, build_structure,
 )
 
 
@@ -211,71 +211,6 @@ def definition_to_structure(lexicon: Lexicon, concept: LexicalConcept) -> Semant
         },
         structure_id=_cid("ds_", concept.concept_id, concept.definition),
     )
-
-
-def expand_definition(
-        lexicon: Lexicon,
-        concept: LexicalConcept,
-        *,
-        max_depth: int = 2,
-) -> SemanticStructure:
-    """Compose definition structures recursively along MENTIONS links.
-
-    Bounded depth. Unknowns stay UNKNOWN. No executable interpretation.
-    """
-    root = definition_to_structure(lexicon, concept)
-    if max_depth <= 0:
-        return root
-
-    def _expand(ss: SemanticStructure, depth: int, visited: Set[str]) -> SemanticStructure:
-        if depth <= 0:
-            return ss
-        current = ss
-        for e in ss.edges:
-            if e.relation != "MENTIONS":
-                continue
-            # target node concept_id
-            tgt = next((n for n in ss.nodes if n.node_id == e.target), None)
-            if not tgt:
-                continue
-            attrs = dict(tgt.attributes)
-            cid = attrs.get("concept_id")
-            if not cid or cid in visited:
-                continue
-            child_concept = lexicon.get(str(cid))
-            if not child_concept:
-                continue
-            visited.add(str(cid))
-            child_ss = definition_to_structure(lexicon, child_concept)
-            # bridge: parent target aligns with child self via MENTIONS_EXPAND
-            try:
-                current = compose(
-                    current,
-                    child_ss,
-                    bridge=[{
-                        "source": e.target,
-                        "relation": "EXPANDS_TO",
-                        "target": "self",  # will be prefixed R:self by compose
-                    }],
-                    provenance={"depth": depth, "expanded": cid},
-                )
-            except ValueError:
-                # compose may fail if bridge endpoints mismatch after prefix;
-                # use explicit prefixed target
-                current = compose(
-                    current,
-                    child_ss,
-                    bridge=[{
-                        "source": e.target,
-                        "relation": "EXPANDS_TO",
-                        "target": "R:self",
-                    }],
-                    provenance={"depth": depth, "expanded": cid},
-                )
-            current = _expand(current, depth - 1, visited)
-        return current
-
-    return _expand(root, max_depth, {concept.concept_id})
 
 
 # ---------------------------------------------------------------------------

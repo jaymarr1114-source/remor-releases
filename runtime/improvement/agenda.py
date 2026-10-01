@@ -562,15 +562,6 @@ class AgendaLoop:
         return report
 
 
-class CycleRecord:
-    def __init__(self, cycle_id: int, data: Dict[str, Any]):
-        self.cycle_id = cycle_id
-        self.data = data
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {"cycle_id": self.cycle_id, **self.data}
-
-
 def _ensure_cycle_table(store: AgendaStore):
     with store._conn() as c:
         c.execute(

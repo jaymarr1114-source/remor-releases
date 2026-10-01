@@ -208,26 +208,6 @@ def claim_db_ownership(db_path, owner_obj, owner_desc="SwarmEngine"):
         return ticket
 
 
-def release_db_ownership(db_path):
-    """Explicitly release this process's claim on ``db_path`` (no-op if
-    unclaimed). Prefer ``engine.close()`` for engine-owned claims."""
-    key = _normalize(db_path)
-    with _REGISTRY_LOCK:
-        entry = _OWNERS.pop(key, None)
-        if entry is None:
-            return
-        entry["released"] = True
-        ticket = entry.get("ticket")
-        if ticket is not None:
-            ticket._released = True
-        fd = entry["fd"]
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-
-
 def db_owner(db_path):
     """Return the owner description for ``db_path``, or None if unclaimed."""
     key = _normalize(db_path)

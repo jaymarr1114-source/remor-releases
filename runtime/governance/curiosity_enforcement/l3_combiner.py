@@ -8,6 +8,14 @@ roll-call fact -- one issued outside the violation's active window -- cannot
 combine.
 
 Import-guarded like the engine: unreachable from the curiosity domain.
+
+Status (DEAD-CODE-1, 2026-10-01): ``evaluate_l3`` is the D-3 severe-violation
+combiner James decided (2026-09-29;
+architecture/exec2-enforcement-three-level-kill-policy_2026-09-29.md). It is
+NOT wired into the live enforcement path — the L3 branch exists on paper
+only. It is exercised by proofs/cur_p1b_enforcement_proof.py (crossed with
+CUR-P1B). Do not silently delete: wiring it into the live path or removing
+it is James's decision.
 """
 
 from __future__ import annotations

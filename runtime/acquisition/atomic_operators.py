@@ -648,50 +648,6 @@ def graph_to_run_function(graph: OperatorGraph) -> List[str]:
     return lines
 
 
-def build_inventory_graph() -> OperatorGraph:
-    """Inventory Analyzer as pure operator composition."""
-    nodes = [
-        OperatorNode("n0", "parse_fields", {
-            "fields": ["name", "category", "quantity", "unit_price"],
-            "numeric_fields": ["quantity", "unit_price"],
-        }),
-        OperatorNode("n1", "filter_ge", {"field": "quantity", "minimum": 0}, "n0"),
-        OperatorNode("n2", "filter_ge", {"field": "unit_price", "minimum": 0}, "n1"),
-        OperatorNode("n3", "map_mul", {
-            "out_field": "value", "field_a": "quantity", "field_b": "unit_price",
-        }, "n2"),
-        OperatorNode("n4", "group_by", {"key": "category"}, "n3"),
-        OperatorNode("n5", "reduce_sum", {"value_field": "value"}, "n4"),
-        OperatorNode("n6", "argmax_key", {"map_key": "totals"}, "n5"),
-        OperatorNode("n7", "format_report", {
-            "keys": ["total_records", "rejected", "totals", "top_key"],
-        }, "n6"),
-    ]
-    return OperatorGraph(nodes=nodes, output_id="n7", domain_hint="inventory")
-
-
-def build_grade_graph() -> OperatorGraph:
-    """Grade Analyzer as pure operator composition (held-out)."""
-    nodes = [
-        OperatorNode("n0", "parse_fields", {
-            "fields": ["name", "course", "score"],
-            "numeric_fields": ["score"],
-        }),
-        OperatorNode("n1", "filter_range", {
-            "field": "score", "minimum": 0, "maximum": 100,
-        }, "n0"),
-        OperatorNode("n2", "group_by", {"key": "course"}, "n1"),
-        OperatorNode("n3", "reduce_avg", {"value_field": "score"}, "n2"),
-        OperatorNode("n4", "argmax_key", {"map_key": "averages"}, "n3"),
-        OperatorNode("n5", "format_report", {
-            "keys": ["total_records", "rejected", "averages", "top_key"],
-        }, "n4"),
-    ]
-    return OperatorGraph(nodes=nodes, output_id="n5", domain_hint="grades")
-
-
-
-
 # ---------------------------------------------------------------------------
 # M+29.12 — Open operator-graph search
 # ---------------------------------------------------------------------------
@@ -717,7 +673,6 @@ class RequirementSketch:
     proc_op: Optional[str] = None
     proc_params: Optional[dict] = None
     examples: List[dict] = field(default_factory=list)  # {input, expect_contains, expect_rejects}
-
 
 
 def extract_lookup_from_text(text: str) -> dict:
@@ -761,8 +716,6 @@ def extract_lookup_from_text(text: str) -> dict:
     if conflicts:
         return {}  # any conflict → reject whole table (fail closed)
     return table
-
-
 
 
 def extract_io_examples(text: str) -> list:
@@ -1137,7 +1090,6 @@ def _induce_discrete_lookup(examples: list, arity: int) -> dict:
         "candidates": candidates,
         "source": "example_induced",
     }
-
 
 
 def extract_numeric_io_examples(text: str) -> list:
@@ -1525,7 +1477,6 @@ def induce_arithmetic_from_examples(examples: list) -> dict:
     }
 
 
-
 def _fit_unary_mode(pairs):
     """Fit identity/mul/add/const for (x,y) pairs. Returns (mode, arg) or None."""
     if not pairs:
@@ -1554,7 +1505,6 @@ def _fit_unary_mode(pairs):
     if all(abs(d - ds[0]) < 1e-4 for d in ds):
         return ("add", ds[0])
     return None
-
 
 
 def _eval_predicate(pred, fields: dict) -> bool:
@@ -1762,7 +1712,6 @@ def _induce_multifield_predicate(examples: list, field_names: list) -> dict:
         "matches": len(fits),
         "source": "proc_induced",
     }
-
 
 
 def induce_procedural_from_examples(examples: list) -> dict:
@@ -2300,7 +2249,6 @@ def extract_sketch(ir: SoftwareSpecIR) -> RequirementSketch:
             sk.lookup = None
 
 
-
     if derived_table:
         # Determine key field and base field structurally
         key_field = None
@@ -2647,9 +2595,6 @@ def _examples_for_sketch(sk: RequirementSketch) -> List[dict]:
     return ex
 
 
-
-
-
 def generate_candidate_graphs(sk: RequirementSketch) -> List[OperatorGraph]:
     """Generate multiple structurally different candidate graphs from a sketch."""
     candidates: List[OperatorGraph] = []
@@ -2937,7 +2882,6 @@ def search_operator_graph(ir: SoftwareSpecIR) -> Optional[tuple]:
     return best, trace
 
 
-
 def select_graph_from_ir(ir: SoftwareSpecIR) -> Optional[OperatorGraph]:
     """M+29.12: open search over candidate graphs; pattern tables are not used."""
     result = search_operator_graph(ir)
@@ -3181,7 +3125,6 @@ def tests_for_graph(graph: OperatorGraph, ir=None) -> str:
     )
 
 
-
 def synthesize_from_operator_graph(
     ir: SoftwareSpecIR, root,
 ) -> Optional["SynthesizedProject"]:
@@ -3266,63 +3209,3 @@ class _FilteredRegistryView:
         return self._base.get(name)
 
 
-def strategy_family_synthesis_bridge(numeric_examples: list, param_names: list,
-                                       goal_text: str, cognition, learner) -> Optional[dict]:
-    """M+29.31: chooses between two MATERIALLY different acquisition
-    strategies -- "with_reuse" (the real registry, including any
-    primitives wrapping previously-acquired capabilities per M+29.29)
-    and "fresh_only" (an identical search over a registry view that
-    excludes those wrappers, forcing rediscovery from base primitives)
-    -- using the SAME generalized AcquisitionLearner.prefer() machinery
-    M+29.30 already built, extended (not re-implemented) in M+29.31 to
-    handle any strategy-name list. Both strategies use the exact same,
-    unmodified GeneralSynthesizer engine; only the registry each one
-    searches over differs -- a real, observable, material difference in
-    what candidates are even reachable, not a relabeled duplicate.
-    """
-    if cognition is None or not numeric_examples or learner is None:
-        return symbolic_synthesis_bridge(numeric_examples, param_names, goal_text, cognition)
-
-    from swarm_engine.cognition.synthesis import GeneralSynthesizer
-    base_synth = cognition.reasoning.synthesizer
-    pairs = [({k: v for k, v in ex["fields"].items()}, ex["output"])
-             for ex in numeric_examples]
-
-    signature_base = f"params={len(param_names)}"
-    acquired_map = getattr(base_synth.reg, "_acquired_capability_ids", {})
-    has_match = False
-    for prim_name in acquired_map:
-        prim = base_synth.reg.get(prim_name)
-        if prim is None:
-            continue
-        try:
-            if all(prim.fn(**ex["fields"]) == ex["output"] for ex in numeric_examples):
-                has_match = True
-                break
-        except Exception:
-            continue
-    signature = f"{signature_base}+match" if has_match else f"{signature_base}+nomatch"
-
-    order = learner.prefer(["with_reuse", "fresh_only"], signature)
-
-    for strategy in order:
-        if strategy == "with_reuse":
-            synth = base_synth
-        else:
-            filtered = _FilteredRegistryView(base_synth.reg)
-            synth = GeneralSynthesizer(filtered, base_synth.bias,
-                                        max_candidates=base_synth.max_candidates,
-                                        wall_clock_limit_s=base_synth.wall_clock_limit_s)
-        try:
-            hyp, trace = synth.search(pairs, tuple(param_names))
-        except Exception:
-            hyp, trace = None, None
-        cost = trace.candidates_tried if trace is not None else 0
-        if hyp is not None and hyp.plan:
-            learner.record(signature, strategy, True, cost)
-            return {"plan": hyp.plan, "candidates_tried": cost,
-                    "examples": numeric_examples, "param_names": list(param_names),
-                    "strategy_used": strategy}
-        learner.record(signature, strategy, False, cost)
-
-    return None

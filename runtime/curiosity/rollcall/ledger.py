@@ -69,11 +69,6 @@ class RetentionRefused(Exception):
     floor. Refused by construction."""
 
 
-class ChainBroken(Exception):
-    """audit() found a tampered or reordered row. Carries the
-    attestation_id of the first broken link."""
-
-
 def _canonical(fields: Dict[str, Any]) -> str:
     return json.dumps(fields, sort_keys=True, separators=(",", ":"),
                       default=str)

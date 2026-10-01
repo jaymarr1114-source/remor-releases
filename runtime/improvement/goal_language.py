@@ -65,10 +65,6 @@ class LearnedRef:
 TaskNode = Union[TVar, TConst, Transform, Compose, Test, Construct, LearnedRef]
 
 
-def node_kind(n: Any) -> str:
-    return type(n).__name__
-
-
 def node_fingerprint(n: Any) -> str:
     """Structural fingerprint (ignores concrete constants for novelty of shape)."""
     if isinstance(n, TVar):
@@ -340,7 +336,6 @@ class DeferredOpportunity:
 def _utility(info, cap, rel, nov, fut, cost, risk) -> float:
     ev = 0.55 * info + 0.45 * cap
     return max(0.0, ev) * max(0.0, rel) * max(0.05, nov) * max(0.05, fut) / (1.0 + max(0.0, cost) + max(0.0, risk))
-
 
 
 # ----- Learned abstractions / macros ---------------------------------------
@@ -1067,7 +1062,6 @@ def _generalize_compose_pattern(structures: List[Dict[str, Any]]) -> Optional[Di
     }
 
 
-
 def _contract_rng(production_id: str) -> random.Random:
     """Stable RNG so induce and verify see the same instantiations."""
     h = 0
@@ -1688,7 +1682,6 @@ class GoalLanguageSynthesizer:
     def select(self, cands: List[GoalCandidate]) -> Optional[GoalCandidate]:
         viable = [c for c in cands if c.utility >= 0.02]
         return viable[0] if viable else None
-
 
 
 # ----- Planner-driven alternative strategy synthesis (strategy_failure) -----

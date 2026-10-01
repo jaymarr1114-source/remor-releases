@@ -59,64 +59,9 @@ class SequentialSplit:
                 else "stage2")
 
 
-def decompose_sequential(expr: Any) -> Optional[SequentialSplit]:
-    """Split a nested Expr into sequential stages.
-
-    Returns None if the Expr is not a clean sequential chain.
-    A clean chain: outer(inner(...)) where outer takes the inner's output
-    as one of its arguments (single-threaded dataflow).
-    """
-    if expr is None:
-        return None
-    try:
-        if expr.is_leaf():
-            return None
-        # The Expr must have at least one non-leaf child (the inner stage).
-        # For a clean sequential chain, we take the FIRST non-leaf child
-        # as the inner stage, and the outer is the Expr with that child
-        # replaced by an intermediate parameter.
-        children = list(expr.children)  # list of (name, child_expr)
-        inner_idx = None
-        inner_expr = None
-        for idx, (cname, child) in enumerate(children):
-            if not child.is_leaf():
-                inner_idx = idx
-                inner_expr = child
-                break
-        if inner_idx is None:
-            # No nested non-leaf child: check if there's a leaf pattern
-            # like outer(leaf_op(...))? Actually, for depth>=2 we need
-            # a non-leaf child. If all children are leaves, it's depth 1.
-            return None
-
-        # Build the outer Expr with the inner replaced by a param.
-        # We need to construct a new Expr. Use the Expr's own structure.
-        from swarm_engine.cognition.representations import Expr as ExprCls
-        inter_param = "__stage1_out__"
-        new_children = []
-        for idx, (cname, child) in enumerate(children):
-            if idx == inner_idx:
-                # Replace with intermediate param leaf
-                param_leaf = ExprCls.leaf_param(inter_param)
-                new_children.append((cname, param_leaf))
-            else:
-                new_children.append((cname, child))
-        # Reconstruct the outer Expr. We need the op and the arg mapping.
-        # Use Expr's constructor or a copy method.
-        outer_expr = _rebuild_expr(expr, new_children)
-        if outer_expr is None:
-            return None
-        return SequentialSplit(inner=inner_expr, outer=outer_expr,
-                               intermediate_param=inter_param,
-                               original=expr)
-    except Exception:
-        return None
-
-
 def _rebuild_expr(orig: Any, new_children: List[Tuple[str, Any]]) -> Optional[Any]:
     """Rebuild an Expr with replaced children, preserving op and metadata."""
     try:
-        from swarm_engine.cognition.representations import Expr as ExprCls
         # Expr is likely a dataclass or has a specific constructor.
         # Try to copy via __dict__ and replace children.
         import copy
@@ -135,27 +80,3 @@ def _rebuild_expr(orig: Any, new_children: List[Tuple[str, Any]]) -> Optional[An
         return None
 
 
-def verify_split(split: SequentialSplit, examples: List[Tuple[dict, Any]],
-                 registry) -> bool:
-    """Verify that stage1 -> stage2 reproduces the original on all examples.
-
-    Executes: out1 = inner(example_inputs); out2 = outer(out1, ...other args).
-    For simplicity, assumes the outer takes the intermediate as its FIRST
-    non-leaf-derived argument and other args come from the example inputs.
-    Returns True iff all examples match.
-    """
-    try:
-        from swarm_engine.cognition.representations import evaluate_expr
-        for args, expected in examples:
-            # Stage 1: evaluate inner on the example inputs
-            out1 = evaluate_expr(split.inner, dict(args), registry)
-            # Stage 2: evaluate outer with intermediate bound, plus
-            # original args for any other params the outer needs.
-            stage2_args = dict(args)
-            stage2_args[split.intermediate_param] = out1
-            out2 = evaluate_expr(split.outer, stage2_args, registry)
-            if out2 != expected:
-                return False
-        return True
-    except Exception:
-        return False
