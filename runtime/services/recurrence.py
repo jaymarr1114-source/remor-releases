@@ -43,11 +43,12 @@ the FIRST fire; without it the schedule is due immediately on creation.
 
 Tier flag / exposure decision (deliberately NOT decided here)
 --------------------------------------------------------------
-* ``REMOR_RECURRENCE_ENABLED`` — exposure gate. Values "1"/"true"/"yes"
-  (case-insensitive) -> the HTTP surface and the pumper are live.
-  Unset/anything else -> create/list/cancel return typed 501
-  ``recurring_disabled`` and the pumper never starts. Default: DISABLED
-  (fail closed).
+* ``REMOR_RECURRENCE_ENABLED`` — exposure gate. Unset (or "1"/"true"/"yes",
+  case-insensitive) -> the HTTP surface and the pumper are live.
+  RECURRENCE-1 default: ON (James wants the capability in the bundle; the
+  tier decision is his to restrict later, not ours to pre-gate).
+  Explicit "0"/"false"/"no"/"off" -> create/list/cancel return typed 501
+  ``recurring_disabled`` and the pumper never starts (kill switch).
 * ``REMOR_RECURRENCE_TIER`` — recorded per row in ``tier_flag`` at
   creation ("free" / "paid" / "unset" if the env var is absent). This is
   a RECORD, not an enforcement: the free-vs-paid decision is James's.
@@ -100,14 +101,18 @@ BAD_SPEC_CODE = "recurring_bad_spec"
 UNKNOWN_SCHEDULE_CODE = "recurring_unknown_schedule"
 
 
-def _env_flag(name: str) -> bool:
-    return (os.environ.get(name, "") or "").strip().lower() in (
-        "1", "true", "yes")
-
-
 def is_enabled() -> bool:
-    """Live exposure gate: REMOR_RECURRENCE_ENABLED=1/true/yes."""
-    return _env_flag(ENV_ENABLED)
+    """Live exposure gate (RECURRENCE-1: default ON).
+
+    REMOR_RECURRENCE_ENABLED unset (or truthy) -> the HTTP surface and
+    the pumper are live. Explicit "0"/"false"/"no"/"off" -> disabled
+    (kill switch). The free-vs-paid tier decision stays open and is
+    James's; this gate is exposure only, never a tier enforcement.
+    """
+    raw = (os.environ.get(ENV_ENABLED, "") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
 
 
 def _tier_flag() -> str:
@@ -215,9 +220,11 @@ class RecurrenceService:
         if not self.enabled:
             return contract_unavailable(
                 DISABLED_CODE,
-                "recurring schedules are disabled: set "
-                f"{ENV_ENABLED}=1 to expose the surface. The free-vs-paid "
-                "decision is open (see tier_decision in exposure()).",
+                "recurring schedules are disabled "
+                f"({ENV_ENABLED} is set to an explicit off value). Unset "
+                f"it (or set {ENV_ENABLED}=1) to expose the surface. The "
+                "free-vs-paid decision is open (see tier_decision in "
+                "exposure()).",
                 missing_substrate="recurrence exposure flag")
         return None
 
