@@ -150,21 +150,6 @@ ENTRIES: List[Dict[str, Any]] = [
         route=None, probe=None, http_status=None,
     ),
     _entry(
-        kind="song-synthesis",
-        feature="Audio pipeline (song synthesis)",
-        code="AUDIO_PIPELINE_ABSENT",
-        reason=("the audio pipeline (instrumental + voice audio -> full "
-                "song) cannot run here: voice synthesis is honestly "
-                "unavailable (no piper TTS engine), and the legacy mix "
-                "route is not wired to the media machinery -- no full "
-                "song can be assembled"),
-        missing_substrate=("voice synthesis engine (piper TTS); legacy "
-                           "audio-mix route wiring"),
-        route={"method": "POST", "path": "/api/artifacts/audio/mix"},
-        probe={},
-        http_status=501,
-    ),
-    _entry(
         kind="project-routing",
         feature="Automatic project routing",
         code="auto_route_conversation",

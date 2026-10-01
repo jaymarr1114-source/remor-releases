@@ -61,11 +61,11 @@ from swarm_engine.services.http_adapter import (  # noqa: E402
 
 # The 4 kinds registered in remor_gui_design/app/static/coming_soon.js
 # that are still coming-soon (external-bots retired by PLUGIN-1:
-# POST /api/execute/plugin is real).
+# POST /api/execute/plugin is real; song-synthesis retired by AUDIO-1:
+# POST /api/artifacts/audio/mix is real).
 DESIGN_KINDS = {
     "remote-dispatch",
     "evidence-docs",
-    "song-synthesis",
     "project-routing",
 }
 
@@ -85,7 +85,6 @@ REPORT_CODES = {
     "remote_dispatch",
     "auto_route_conversation",
     "EXECUTE_LANGUAGE_UNSUPPORTED",
-    "AUDIO_PIPELINE_ABSENT",
     "metering_token_balance",
     "chat_turn_metering",
 }
