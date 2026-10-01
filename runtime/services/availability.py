@@ -163,19 +163,6 @@ ENTRIES: List[Dict[str, Any]] = [
         http_status=501,
     ),
     _entry(
-        kind="recurring-schedules",
-        feature="Recurring schedules",
-        code="recurring_disabled",
-        reason=("recurring schedules are disabled: set "
-                "REMOR_RECURRENCE_ENABLED=1 to expose the surface. The "
-                "free-vs-paid decision is open (see tier_decision in "
-                "exposure())."),
-        missing_substrate="recurrence exposure flag",
-        route={"method": "POST", "path": "/api/tasks/recurring"},
-        probe={},
-        http_status=501,
-    ),
-    _entry(
         kind="purchase-permanent-agents",
         feature="Purchase permanent agents",
         code="purchase_permanent_agents",

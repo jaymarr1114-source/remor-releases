@@ -73,12 +73,11 @@ DESIGN_KINDS = {
 # sections 1/7/8 + 1 code for the design-batch kind "evidence-docs"
 # (genuinely absent; no route produces AI-authored evidence documents).
 # NOTE (canonical convergence): the report's "recurring_schedule" predates
-# the merged recurrence substrate (services/recurrence.py) -- the merged
-# contract table's POST /api/tasks/recurring is served by the real
-# RecurrenceService, exposure-gated, whose disabled payload is code
-# "recurring_disabled". The inventory tracks the live merged runtime.
+# the merged recurrence substrate (services/recurrence.py). Retired by
+# RECURRENCE-1: POST /api/tasks/recurring is served by the real
+# RecurrenceService, exposure default-ON. The inventory tracks the live
+# merged runtime.
 REPORT_CODES = {
-    "recurring_disabled",
     "purchase_permanent_agents",
     "template_token_balance",
     "agent_instantiation",
