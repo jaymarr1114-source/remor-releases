@@ -129,7 +129,9 @@ def seed_templates(registry: TemplateRegistry) -> List[AgentTemplate]:
 
     seeds = [
         ("tpl_llm_coder_v1", "coder", "1", "llm",
-         contracts("llm", "LLM reasoning interface (ABSENT: instantiation refused)")),
+         contracts("llm", "LLM reasoning interface (governed borrow via "
+                          "GrantedCognitionProvider; instantiable only when "
+                          "the service is constructed with llm wiring)")),
         ("tpl_symbolic_coder_v1", "coder", "1", "symbolic",
          contracts("symbolic", "ordered predicate->emitter rules; first match wins")),
         ("tpl_callable_coder_v1", "coder", "1", "callable",

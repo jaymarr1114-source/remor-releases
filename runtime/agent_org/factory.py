@@ -7,8 +7,11 @@ Replication safety is structural, not conventional:
 - NO grants are carried: grants are issued per-assignment only, by the
   AssignmentManager, scoped to the assignment id.
 
-A template of substrate_kind "llm" with no explicit substrate raises
-SubstrateUnavailable: the template exists, instantiation is honestly ABSENT.
+A template of substrate_kind "llm" resolves through the injected
+llm_wiring (a real GrantedCognitionProvider + grant issuer + charge mc).
+With no wiring the factory raises SubstrateUnavailable: the template
+exists, instantiation is honestly ABSENT -- refusing rather than
+simulating.
 """
 from __future__ import annotations
 
@@ -21,15 +24,21 @@ from swarm_engine.agent_org.discovery import (
 from swarm_engine.agent_org.exceptions import OrgError
 from swarm_engine.agent_org.identity import AgentRecord
 from swarm_engine.agent_org.registry import AgentRegistry
-from swarm_engine.agent_org.substrates import Substrate, SubstrateUnavailable
+from swarm_engine.agent_org.substrates import (
+    LLMSubstrateWiring,
+    Substrate,
+    SubstrateUnavailable,
+)
 from swarm_engine.agent_org.templates import AgentTemplate, TemplateRegistry
 
 
 class AgentFactory:
     def __init__(self, registry: AgentRegistry,
-                 templates: TemplateRegistry):
+                 templates: TemplateRegistry,
+                 llm_wiring: Optional[LLMSubstrateWiring] = None):
         self.registry = registry
         self.templates = templates
+        self._llm_wiring = llm_wiring
 
     def _default_substrate(self, template: AgentTemplate) -> Substrate:
         kind = template.substrate_kind
@@ -38,10 +47,14 @@ class AgentFactory:
         if kind == "callable":
             return make_discovery_callable()
         if kind == "llm":
-            raise SubstrateUnavailable(
-                f"template {template.template_id}: substrate_kind 'llm' "
-                f"has no instantiable substrate in this build (honest "
-                f"ABSENT). Refusing rather than simulating.")
+            if self._llm_wiring is None:
+                raise SubstrateUnavailable(
+                    f"template {template.template_id}: substrate_kind 'llm' "
+                    f"is not wired in this service (no provider / grant "
+                    f"source). Honest ABSENT: refusing rather than "
+                    f"simulating.")
+            return self._llm_wiring.build_substrate(
+                name=f"llm_{template.template_id}")
         raise OrgError(f"template {template.template_id}: unknown "
                        f"substrate_kind {kind!r}")
 
