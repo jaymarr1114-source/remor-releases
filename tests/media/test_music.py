@@ -10,6 +10,7 @@ Covers:
 """
 
 import os
+import sys
 import wave
 
 import numpy as np
@@ -17,9 +18,12 @@ import pytest
 from scipy import signal as spsig
 from scipy.io import wavfile
 
-from runtime.media import song as song_mod
-from runtime.media.music import SAMPLE_RATE, synthesize_instrumental
-from runtime.media.song import assemble_song
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "pylib")))
+
+from swarm_engine.media import song as song_mod  # noqa: E402
+from swarm_engine.media.music import SAMPLE_RATE, synthesize_instrumental  # noqa: E402
+from swarm_engine.media.song import assemble_song  # noqa: E402
 
 FIXTURE_NAME = "test_fixture_vocal_do_not_ship.wav"  # never presented as TTS
 

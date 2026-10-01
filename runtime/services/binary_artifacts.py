@@ -26,12 +26,16 @@ Model:
     guarded: there is no zip-bomb decompression surface in this service;
     the 200 MiB cap bounds what can be stored.
 
-Audio pipeline (GUI vision: 1 instrumental + 2 voice -> full song) is
-HONESTLY-UNAVAILABLE at this legacy route: the media-substrate modules
-(music/song/voice) exist in this runtime, but voice synthesis is honestly
-unavailable without piper, and this legacy mix route was never wired to
-the machinery. mix_audio() returns the typed unavailability; it is not
-stubbed.
+Audio pipeline (GUI vision: 1 instrumental + 2 voice -> full song) is REAL
+at this route (AUDIO-1): mix_audio() fetches the instrumental and voice
+stems as stored binary artifacts, decodes them as PCM WAV, mixes them
+through swarm_engine.media.song.mix_stems (voices forward, instrumental
+ducked under vocal activity, peak-normalized stereo WAV), and stores the
+result as a new binary artifact. Voice stems come from piper TTS
+(runtime/media/voice.py); the instrumental stem comes from the
+algorithmic synthesis engine (runtime/media/music.py) -- ACE-Step, the
+decided instrumental substrate, is not acquired (bounded gap, honestly
+labeled in the response, never substituted silently).
 
 HTTP surface: routes_for_binary_artifacts(binary_store) returns
 {(method, path): handler} with handler(body_dict) -> JSON-serializable dict.
@@ -261,25 +265,92 @@ class BinaryArtifactStore:
                 pass
         return {"ok": True, "artifact_id": artifact_id}
 
-    # -- honestly unavailable --------------------------------------------
+    # -- audio pipeline: REAL (AUDIO-1) ------------------------------------
     def mix_audio(self, instrumental_id: Any = None,
                   voice_ids: Any = None) -> Dict[str, Any]:
-        """Audio pipeline (instrumental + voice -> full song): NOT BUILT HERE.
+        """Audio pipeline (instrumental + voice -> full song): REAL.
 
-        The media-substrate modules (music/song/voice) exist in this
-        runtime, but voice synthesis is honestly unavailable without
-        piper, and this legacy mix route was never wired to the
-        machinery. Returns the typed unavailability instead of a stub.
+        Fetches the instrumental stem and voice stems as stored binary
+        artifacts, decodes them as PCM WAV audio, mixes them through the
+        media machinery (swarm_engine.media.song.mix_stems: voices summed
+        and forward, instrumental ducked under vocal activity,
+        peak-normalized stereo WAV), and stores the result as a new
+        binary artifact.
+
+        Engines (honest labels): voice stems are expected from piper TTS
+        (runtime/media/voice.py); the instrumental stem is expected from
+        the algorithmic synthesis engine (runtime/media/music.py) --
+        ACE-Step, James's decided instrumental substrate, is NOT acquired
+        (unrunnable on available hardware; named bounded gap, not a
+        silent substitution). Undecodable stems are refused cleanly;
+        silence passes through honestly (silent in -> silent stem out),
+        never faked.
         """
-        return contract_unavailable(
-            "AUDIO_PIPELINE_ABSENT",
-            "the audio pipeline (instrumental + voice audio -> full song) "
-            "cannot run here: voice synthesis is honestly unavailable "
-            "(no piper TTS engine), and the legacy mix route is not wired "
-            "to the media machinery -- no full song can be assembled",
-            missing_substrate="voice synthesis engine (piper TTS); legacy "
-            "audio-mix route wiring",
-        )
+        if isinstance(instrumental_id, bool) or not isinstance(
+                instrumental_id, int):
+            return {"ok": False,
+                    "error": "instrumental_id must be a stored artifact id"}
+        if not isinstance(voice_ids, (list, tuple)) or not voice_ids:
+            return {"ok": False,
+                    "error": "voice_ids must be a non-empty list of stored "
+                             "artifact ids"}
+        for vid in voice_ids:
+            if isinstance(vid, bool) or not isinstance(vid, int):
+                return {"ok": False,
+                        "error": "voice_ids must be a non-empty list of "
+                                 "stored artifact ids"}
+
+        def _fetch(aid: int, role: str) -> Dict[str, Any]:
+            res = self.get_file(aid)
+            if not res.get("ok"):
+                return {"ok": False,
+                        "error": "%s artifact %r not found: %s"
+                                 % (role, aid, res.get("error"))}
+            return {"ok": True, "data": res["data"]}
+
+        got = _fetch(instrumental_id, "instrumental")
+        if not got["ok"]:
+            return got
+        voice_data = []
+        for vid in voice_ids:
+            got_v = _fetch(vid, "voice")
+            if not got_v["ok"]:
+                return got_v
+            voice_data.append(got_v["data"])
+
+        try:
+            from swarm_engine.media.song import mix_stems
+        except Exception as exc:  # noqa: BLE001 - missing dep is a clean error
+            return {"ok": False,
+                    "error": "audio mix machinery unavailable: %s" % (exc,)}
+        mixed = mix_stems(got["data"], voice_data)
+        if not mixed.get("ok"):
+            return {"ok": False, "error": mixed.get("error")}
+
+        name = "song_%d.wav" % int(time.time())
+        stored = self.store_file(name, mixed["wav_bytes"], "audio/wav")
+        if not stored.get("ok"):
+            return {"ok": False,
+                    "error": "failed to store mixed song: %s"
+                             % stored.get("error")}
+        return {
+            "ok": True,
+            "kind": "binary",
+            "artifact_id": stored["artifact_id"],
+            "name": stored["name"],
+            "content_type": stored["content_type"],
+            "sha256": stored["sha256"],
+            "size_bytes": stored["size_bytes"],
+            "duration_s": mixed["duration_s"],
+            "n_voices": mixed["n_voices"],
+            "engines": {
+                "voice": "piper TTS (runtime/media/voice.py)",
+                "instrumental": "algorithmic oscillator-stack synthesis "
+                                "(runtime/media/music.py); ACE-Step NOT "
+                                "acquired (bounded gap)",
+                "mixer": "swarm_engine.media.song.mix_stems",
+            },
+        }
 
 
 def routes_for_binary_artifacts(binary_store: BinaryArtifactStore):
