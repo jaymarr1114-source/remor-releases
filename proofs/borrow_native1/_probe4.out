@@ -1,0 +1,5 @@
+engine built
+solved: True
+candidates: 0
+plan: {"name": "synthesized_general", "params": {"a": "any", "b": "any", "claimed": "any"}, "steps": [{"id": "s1", "op": "modulo", "args": {"a": {"$param": "claimed"}, "b": 2}}], "output": {"$step": "s1"}}
+EXIT:0

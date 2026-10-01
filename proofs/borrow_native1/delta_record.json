@@ -1,0 +1,113 @@
+{
+ "delta_id": "dlt_502c59f12f56cd8f",
+ "objective": "compute the sum of two integers",
+ "external_actions": "Qwen3-8B (borrowed teacher) demonstrated integer addition: for each presented pair (a, b) it computed a+b, showing its work. Demonstrated on 12 verified additions; every demonstration's result was checked against ground truth before recording.",
+ "prior_capability": "REMOR's native tier had no addition machinery: purpose 'compute_sum' raised NativeRefusal(no_sum_computation); the microcontroller could not answer 'what is a+b' natively.",
+ "capability_gap": "The teacher could compute sums; REMOR natively could not \u2014 integer addition was unowned as a task-class capability.",
+ "technique": "addition: given (a, b), compute a+b",
+ "evidence": [
+  {
+   "input": {
+    "a": 2,
+    "b": 3
+   },
+   "output": 5,
+   "teacher_text": "Compute: 2 + 3\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 2 + 3 = 5  \nresult: 5"
+  },
+  {
+   "input": {
+    "a": 5,
+    "b": 7
+   },
+   "output": 12,
+   "teacher_text": "Compute: 5 + 7\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 5 + 7 = 12  \nresult: 12"
+  },
+  {
+   "input": {
+    "a": 10,
+    "b": 20
+   },
+   "output": 30,
+   "teacher_text": "Compute: 10 + 20\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 10 + 20 = 30  \nresult: 30"
+  },
+  {
+   "input": {
+    "a": 1,
+    "b": 1
+   },
+   "output": 2,
+   "teacher_text": "Compute: 1 + 1\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 1 + 1 = 2  \nresult: 2"
+  },
+  {
+   "input": {
+    "a": 15,
+    "b": 25
+   },
+   "output": 40,
+   "teacher_text": "Compute: 15 + 25\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 15 + 25 = 40  \nresult: 40"
+  },
+  {
+   "input": {
+    "a": 3,
+    "b": 8
+   },
+   "output": 11,
+   "teacher_text": "Compute: 3 + 8\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 3 + 8 = 11  \nresult: 11"
+  },
+  {
+   "input": {
+    "a": 12,
+    "b": 4
+   },
+   "output": 16,
+   "teacher_text": "Compute: 12 + 4\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 12 + 4 = 16  \nresult: 16"
+  },
+  {
+   "input": {
+    "a": 9,
+    "b": 6
+   },
+   "output": 15,
+   "teacher_text": "Compute: 9 + 6\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 9 + 6 = 15  \nresult: 15"
+  },
+  {
+   "input": {
+    "a": 7,
+    "b": 13
+   },
+   "output": 20,
+   "teacher_text": "Compute: 7 + 13\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 7 + 13 = 20  \nresult: 20"
+  },
+  {
+   "input": {
+    "a": 25,
+    "b": 30
+   },
+   "output": 55,
+   "teacher_text": "Compute: 25 + 30\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 25 + 30 = 55  \nresult: 55"
+  },
+  {
+   "input": {
+    "a": 8,
+    "b": 12
+   },
+   "output": 20,
+   "teacher_text": "Compute: 8 + 12\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 8 + 12 = 20  \nresult: 20"
+  },
+  {
+   "input": {
+    "a": 40,
+    "b": 60
+   },
+   "output": 100,
+   "teacher_text": "Compute: 40 + 60\nReply in exactly this format:\nrecompute: <your work, e.g. 3 + 4 = 7>\nresult: <the sum as an integer>\nrecompute: 40 + 60 = 100  \nresult: 100"
+  }
+ ],
+ "dependencies": [],
+ "verification": {
+  "teacher_revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+  "ground_truth_checked": true,
+  "n_demonstrations": 12
+ },
+ "source": "borrow-native-1/b2"
+}
