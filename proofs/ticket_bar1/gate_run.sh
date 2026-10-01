@@ -100,7 +100,11 @@ check "original ticket restores PASS (both directions)" $([ $CODE -eq 0 ] && ech
 
 echo "=== 4. pre-fix contrast: old code contradicted the sealed ticket ==="
 mkdir -p "$SCRATCH/oldcode"
-git show HEAD:distill1/eval_grade.py > "$SCRATCH/oldcode/eval_grade.py"
+# Pre-fix code = the version on the lineage this worktree forked from
+# (73b38a1), NOT HEAD (which carries the fix after commit).
+PREFORK="$(git log -1 --format=%H 73b38a1 -- distill1/eval_grade.py)"
+[ -n "$PREFORK" ] || { echo "cannot locate pre-fix eval_grade.py"; exit 1; }
+git show "$PREFORK:distill1/eval_grade.py" > "$SCRATCH/oldcode/eval_grade.py"
 cp "$STRICT" "$SCRATCH/oldcode/ticket_distill1.json"  # old code only reads its default ticket
 (cd "$SCRATCH/oldcode" && python3 eval_grade.py --tally "$TREE/$SHEET" --key "$TREE/$KEY" > out.json 2>/dev/null)
 python3 - "$SCRATCH/oldcode/out.json" <<'PYEOF'

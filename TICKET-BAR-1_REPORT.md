@@ -109,5 +109,6 @@ That is outside this mission's "cheapest fix" mandate; named, not started.
 
 ## Commit
 Worktree `~/workspace/worktrees/ticket-bar-1`, branch `ticket-bar-1-work`.
-Commit `8c9f3a2` (this report + gate script + the two source fixes). Report,
-do not land.
+Branch `ticket-bar-1-work` in `~/workspace/worktrees/ticket-bar-1`
+(one commit on top of canonical `73b38a1`; exact hash in the handoff).
+Report, do not land.
