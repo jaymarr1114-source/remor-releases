@@ -232,6 +232,7 @@ class SwarmEngine:
         self.gap_reasoner = CapabilityGapReasoner(
             self.primitives, self.planner, self.composer, self.provenance,
             self.acquired_specs,
+            capabilities=self.capabilities,
             decomposer=BehavioralDecomposer(self.primitives))
         self.acquisition_orchestrator = AcquisitionOrchestrator(self)
         # Boundary 2: the strategy-experience learner is owned by the
