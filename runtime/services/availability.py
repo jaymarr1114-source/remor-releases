@@ -195,6 +195,12 @@ ENTRIES: List[Dict[str, Any]] = [
         reason=("template tpl_llm_coder_v1: substrate_kind 'llm' is not "
                 "wired in this service (no provider / grant source). "
                 "Honest ABSENT: refusing rather than simulating."),
+        # The reason must mirror the live factory output exactly
+        # (contract: test_route_backed_entries_match_live_handlers).
+        # LLM-SUBSTRATE-1 crossed with a real provider + build_llm_wiring,
+        # but no production service injects the wiring yet -- so the honest
+        # claim is "not wired in this service", not "no instantiable
+        # substrate". When a service wires it, this entry is retired.
         missing_substrate="instantiable substrate for substrate_kind 'llm'",
         route={"method": "POST", "path": "/api/agents"},
         probe={"template_id": "tpl_llm_coder_v1"},
