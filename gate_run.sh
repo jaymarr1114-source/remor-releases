@@ -21,6 +21,7 @@ run_gate() {
 }
 
 run_gate "proofs/plugin1/gate_run.sh"
+run_gate "proofs/rd_easypair1/gate_run.sh"
 
 if [ "$fail" -eq 0 ]; then
   echo "ROOT GATE: ALL GREEN"

@@ -61,6 +61,10 @@ public class TargetApiClient {
         return deviceId;
     }
 
+    public String controllerUrl() {
+        return baseUrl;
+    }
+
     // -- announce ------------------------------------------------------
 
     /**

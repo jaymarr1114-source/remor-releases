@@ -108,6 +108,20 @@ public final class TargetServer {
 
     private ScreenCapture liveCapture; // lazily created, like the Python target
 
+    /**
+     * Tap-to-pair handler (RD-EASYPAIR-1, may be null): when set, the
+     * pairing frame kinds ({@code pair_request}, {@code pair_confirm},
+     * {@code pair_abort}) are accepted as the first frame on a fresh TLS
+     * connection and routed to the pairing state machine instead of the
+     * hello path. Pairing never opens a control session.
+     */
+    private volatile PairingServer pairingServer;
+
+    /** Set the tap-to-pair handler; null disables pairing frames. */
+    public void setPairingServer(PairingServer pairingServer) {
+        this.pairingServer = pairingServer;
+    }
+
     public TargetServer(String deviceId, String agentId, String agentToken,
                         SessionRegistry registry, InputSink inputSink,
                         ScreenCapture capture, SessionIndicator indicator,
@@ -230,6 +244,17 @@ public final class TargetServer {
                     return;
                 }
                 if (!"hello".equals(hello.kind)) {
+                    // RD-EASYPAIR-1: tap-to-pair frames are accepted as
+                    // the first frame on a fresh TLS connection. They are
+                    // answered exactly once and never open a session.
+                    if (pairingServer != null
+                            && ("pair_request".equals(hello.kind)
+                                || "pair_confirm".equals(hello.kind)
+                                || "pair_abort".equals(hello.kind))) {
+                        pairingServer.handleFirstFrame(hello.kind,
+                                hello.body, out);
+                        return;
+                    }
                     throw new ChannelException("first message must be hello");
                 }
                 HelloResult hr = onHello(hello);

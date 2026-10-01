@@ -3,6 +3,7 @@ package com.remor.dispatchtarget;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -13,6 +14,8 @@ import android.os.IBinder;
 import android.util.Base64;
 
 import com.remor.dispatchtarget.proto.AnnounceClient;
+import com.remor.dispatchtarget.proto.DiscoveryBeacon;
+import com.remor.dispatchtarget.proto.PairingServer;
 import com.remor.dispatchtarget.proto.SessionRegistry;
 import com.remor.dispatchtarget.proto.TargetServer;
 import com.remor.dispatchtarget.proto.TlsUtil;
@@ -82,6 +85,11 @@ public class RemoteListener extends Service {
     private volatile SessionRegistry registry;
     private volatile int boundPort;
     private volatile String fingerprint = "";
+
+    /** Tap-to-pair (RD-EASYPAIR-1): pairing state machine + beacon. */
+    private volatile PairingServer pairingServer;
+    private volatile DiscoveryBeacon.BeaconHandle beaconHandle;
+    private static final int PAIR_NOTIF_ID = 4202;
 
     /** Causal kill from the on-device KILL button / overlay. */
     public static void killSession(String sessionId) {
@@ -161,6 +169,11 @@ public class RemoteListener extends Service {
                     ks, KEY_PASS, "0.0.0.0", port, false);
             server.start();
             boundPort = server.boundPort();
+            // RD-EASYPAIR-1: tap-to-pair handler + discovery beacon.
+            pairingServer = new PairingServer(pairingCallback);
+            server.setPairingServer(pairingServer);
+            beaconHandle = DiscoveryBeacon.start(deviceId, deviceId,
+                    boundPort, fingerprint);
             INSTANCE.set(this);
             startForeground(NOTIF_ID, buildNotification(
                     "listening on :" + boundPort));
@@ -175,6 +188,14 @@ public class RemoteListener extends Service {
     /** Idempotent stop. */
     public synchronized void stopListener() {
         INSTANCE.compareAndSet(this, null);
+        if (beaconHandle != null) {
+            try {
+                beaconHandle.stop();
+            } catch (Exception ignored) {}
+            beaconHandle = null;
+        }
+        pairingServer = null;
+        cancelPairNotification();
         if (server != null) {
             try {
                 server.stop();
@@ -217,6 +238,150 @@ public class RemoteListener extends Service {
         RemoteListener self = INSTANCE.get();
         return self != null && self.registerConsentedSession(
                 sessionId, tokenHash, scopeJson, consentExpiresAt);
+    }
+
+    // -- tap-to-pair (RD-EASYPAIR-1; called by PairConsentActivity) --------
+
+    /** Look up a pending pairing for the consent screen. */
+    public static PairingServer.PendingPairing pendingPairing(
+            String pairingId) {
+        RemoteListener self = INSTANCE.get();
+        if (self == null || self.pairingServer == null
+                || pairingId == null) {
+            return null;
+        }
+        // The pairing map lives in the PairingServer; expose a read
+        // through a fresh request is not possible, so the activity is
+        // launched with the id and the server is the source of truth.
+        // (PairingServer keeps pending private; approval/denial are the
+        // only mutations the UI needs.)
+        return self.pairingForUi(pairingId);
+    }
+
+    /** Tablet owner allowed the pairing (from PairConsentActivity). */
+    public static boolean approvePairing(String pairingId) {
+        RemoteListener self = INSTANCE.get();
+        return self != null && self.pairingServer != null
+                && self.pairingServer.approvePairing(pairingId);
+    }
+
+    /** Tablet owner denied the pairing (from PairConsentActivity). */
+    public static boolean denyPairing(String pairingId) {
+        RemoteListener self = INSTANCE.get();
+        return self != null && self.pairingServer != null
+                && self.pairingServer.denyPairing(pairingId);
+    }
+
+    /** Source of truth for the consent UI: the pairing server's map. */
+    private PairingServer.PendingPairing pairingForUi(String pairingId) {
+        PairingServer ps = pairingServer;
+        return ps == null ? null : ps.getPending(pairingId);
+    }
+
+    /** Tap-to-pair callback: show consent, persist on approval. */
+    private final PairingServer.PairingCallback pairingCallback =
+            new PairingServer.PairingCallback() {
+                @Override
+                public void onPairRequest(
+                        PairingServer.PendingPairing pairing) {
+                    showPairingRequest(pairing);
+                }
+
+                @Override
+                public void onPairSettled(
+                        PairingServer.PendingPairing pairing,
+                        boolean approved) {
+                    if (!approved) {
+                        cancelPairNotification();
+                        return;
+                    }
+                    // Persist the phone's credentials + API URL (the same
+                    // four fields the manual ceremony collects), then
+                    // restart the listener so the server picks up the new
+                    // identity. Done off the pairing connection thread.
+                    new Thread(() -> {
+                        try {
+                            SharedPreferences prefs =
+                                    getSharedPreferences(PREFS,
+                                            MODE_PRIVATE);
+                            prefs.edit()
+                                    .putString(PREF_CONTROLLER_URL,
+                                            pairing.phoneApiUrl)
+                                    .putString(PREF_DEVICE_ID,
+                                            pairing.deviceId)
+                                    .putString(PREF_AGENT_ID,
+                                            pairing.agentId)
+                                    .putString(PREF_AGENT_TOKEN,
+                                            pairing.agentToken)
+                                    .apply();
+                            cancelPairNotification();
+                            stopListener();
+                            startListener();
+                            android.util.Log.i(TAG,
+                                    "tap-to-pair settled: listener"
+                                            + " restarted with new pairing");
+                        } catch (Exception e) {
+                            android.util.Log.e(TAG,
+                                    "tap-to-pair settle failed", e);
+                        }
+                    }, "rd-pair-settle").start();
+                }
+            };
+
+    /** Show the pairing consent screen + a tappable notification. */
+    private void showPairingRequest(
+            PairingServer.PendingPairing pairing) {
+        try {
+            Intent i = new Intent(this, PairConsentActivity.class)
+                    .putExtra(PairConsentActivity.EXTRA_PAIRING_ID,
+                            pairing.pairingId)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            PendingIntent pi = PendingIntent.getActivity(
+                    this, pairing.pairingId.hashCode(), i,
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                            | PendingIntent.FLAG_IMMUTABLE);
+            Notification.Builder b =
+                    (Build.VERSION.SDK_INT >= 26)
+                            ? new Notification.Builder(this, CHANNEL_ID)
+                            : new Notification.Builder(this);
+            Notification n = b.setContentTitle("Pairing request")
+                    .setContentText("\"" + pairing.phoneName
+                            + "\" wants to pair -- tap to review")
+                    .setSmallIcon(
+                            android.R.drawable.stat_sys_data_bluetooth)
+                    .setContentIntent(pi)
+                    .setAutoCancel(true)
+                    .build();
+            NotificationManager nm =
+                    (NotificationManager) getSystemService(
+                            Context.NOTIFICATION_SERVICE);
+            if (Build.VERSION.SDK_INT >= 26) {
+                nm.createNotificationChannel(new NotificationChannel(
+                        CHANNEL_ID, "Dispatch target listener",
+                        NotificationManager.IMPORTANCE_HIGH));
+            }
+            nm.notify(PAIR_NOTIF_ID, n);
+            // Best effort: bring the consent screen forward directly.
+            // (Background-launch restrictions may block this; the
+            // notification above is the reliable path.)
+            try {
+                startActivity(i);
+            } catch (Exception e) {
+                android.util.Log.i(TAG,
+                        "direct consent launch blocked; using notification");
+            }
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "showPairingRequest failed", e);
+        }
+    }
+
+    private void cancelPairNotification() {
+        try {
+            NotificationManager nm =
+                    (NotificationManager) getSystemService(
+                            Context.NOTIFICATION_SERVICE);
+            nm.cancel(PAIR_NOTIF_ID);
+        } catch (Exception ignored) {}
     }
 
     /** Register a consented session (called by ConsentActivity). */
