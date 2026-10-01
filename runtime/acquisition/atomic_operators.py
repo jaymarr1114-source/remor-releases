@@ -2999,25 +2999,6 @@ def tests_for_graph(graph: OperatorGraph, ir=None) -> str:
 
     if "lookup_mul" in ops or "lookup_pct_apply" in ops or "format_scalar_field" in ops:
         lu = next((n for n in graph.nodes if n.op in ("lookup_pct_apply", "lookup_mul")), None)
-        if lu and lu.op == "lookup_value":
-            table = lu.params.get("table") or {}
-            kfs = lu.params.get("key_fields") or []
-            items = list(table.items())
-            if items:
-                k0, v0 = items[0]
-                parts = str(k0).split("|")
-                sample = " ".join(parts)
-                tests.append(
-                    "def test_lookup_value():\n"
-                    f"    out = run({sample!r} + '\\n')\n"
-                    f"    assert '{float(v0)}' in out or str({float(v0)}) in out\n"
-                )
-                bad = " ".join(["zzunknown"] * max(1, len(kfs)))
-                tests.append(
-                    "def test_lookup_unknown():\n"
-                    f"    out = run({bad!r} + '\\n')\n"
-                    "    assert 'rejected' in out.lower() or out.strip() == ''\n"
-                )
         if lu and lu.op in ("lookup_pct_apply", "lookup_pct_surcharge", "lookup_factor_apply", "lookup_add"):
             table = lu.params.get("table") or {}
             keys = list(table.keys())
