@@ -1,0 +1,47 @@
+{
+  "both_lookups": {
+    "compiles": true,
+    "len": 615,
+    "sha256": "e4fa52321410153f2e3d8db22cc9999632e6d565e5008edb092b76b3e1b4e8b1"
+  },
+  "empty_graph": {
+    "compiles": true,
+    "len": 328,
+    "sha256": "28b3ec5961643481e42aa492b3c2964ace0e255ac766b4669cd47bfa2966fcd2"
+  },
+  "format_scalar_field": {
+    "compiles": true,
+    "len": 436,
+    "sha256": "dfeb4af353d92240655d8fc8f66420bf5e398a769c38de237a33cabc8f916e05"
+  },
+  "lookup_mul_node": {
+    "compiles": true,
+    "len": 436,
+    "sha256": "dfeb4af353d92240655d8fc8f66420bf5e398a769c38de237a33cabc8f916e05"
+  },
+  "lookup_pct_apply_node": {
+    "compiles": true,
+    "len": 615,
+    "sha256": "e4fa52321410153f2e3d8db22cc9999632e6d565e5008edb092b76b3e1b4e8b1"
+  },
+  "lookup_value_node": {
+    "compiles": true,
+    "len": 328,
+    "sha256": "28b3ec5961643481e42aa492b3c2964ace0e255ac766b4669cd47bfa2966fcd2"
+  },
+  "lookup_value_node_with_ir": {
+    "compiles": true,
+    "len": 328,
+    "sha256": "28b3ec5961643481e42aa492b3c2964ace0e255ac766b4669cd47bfa2966fcd2"
+  },
+  "lookup_value_node_worked_examples": {
+    "compiles": true,
+    "len": 328,
+    "sha256": "28b3ec5961643481e42aa492b3c2964ace0e255ac766b4669cd47bfa2966fcd2"
+  },
+  "plain_graph": {
+    "compiles": true,
+    "len": 328,
+    "sha256": "28b3ec5961643481e42aa492b3c2964ace0e255ac766b4669cd47bfa2966fcd2"
+  }
+}
