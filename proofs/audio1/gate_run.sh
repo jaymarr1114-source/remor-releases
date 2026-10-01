@@ -29,15 +29,24 @@ cd "$WT"
 
 # ---- environment -------------------------------------------------------
 echo "--- env: mission venv"
+# pip needs room for large wheels (piper/onnxruntime ~200MB+). On hosts
+# where /tmp is a small tmpfs, point TMPDIR at the big disk instead.
+if [ -z "${TMPDIR:-}" ]; then
+  if [ "$(df -m /tmp 2>/dev/null | awk 'NR==2{print $4}')" -lt 1024 ]; then
+    export TMPDIR="$HOME/workspace/tmp"
+    mkdir -p "$TMPDIR"
+    echo "note: /tmp small, using TMPDIR=$TMPDIR for pip"
+  fi
+fi
 if [ ! -x "$VENV/bin/python" ]; then
   echo "creating mission venv at $VENV"
   python3 -m venv "$VENV" || { echo "FATAL: venv creation failed"; exit 1; }
-  "$VENV/bin/pip" install --quiet piper-tts==1.8.0 numpy scipy \
+  "$VENV/bin/pip" install --quiet piper-tts==1.8.0 numpy scipy pytest \
     || { echo "FATAL: dependency install failed"; exit 1; }
 fi
-"$VENV/bin/python" -c "import piper, numpy, scipy" 2>/dev/null \
-  && ok "venv has piper + numpy + scipy" \
-  || { bad "venv missing piper/numpy/scipy"; }
+"$VENV/bin/python" -c "import piper, numpy, scipy, pytest" 2>/dev/null \
+  && ok "venv has piper + numpy + scipy + pytest" \
+  || { bad "venv missing piper/numpy/scipy/pytest"; }
 
 # ---- B1: voice synthesis from text (real piper) -------------------------
 echo "--- B1: voice synthesis (governed piper TTS)"
