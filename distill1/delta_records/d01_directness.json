@@ -1,0 +1,30 @@
+{
+ "delta_id": "distill1-d01-directness",
+ "dependencies_d": [],
+ "evidence_e": [
+  {
+   "kind": "file",
+   "path": "distill1/teacher_demos.json",
+   "note": "t07 teacher demonstration"
+  },
+  {
+   "kind": "file",
+   "path": "distill1/base_train_out.json",
+   "note": "t07 base response (before)"
+  }
+ ],
+ "objective_x": "Handle open conversational capability/request questions without deflection",
+ "resulting_capability_c": "distill1.student_policy.DIRECTNESS",
+ "verification_v": "Held-out eval: clarification-class turns must score >=1 with zero 0s; base-vs-student blinded comparison.",
+ "external_demo_y": "Teacher answered 'can you write things for me' directly ('Sure! I can help you with that') then asked a specific follow-up ('What kind of things would you like me to write?').",
+ "native_inventory_z": "Base 0.6B (unpROMPTed) responds to 'can you write things for me' with 'Sure! What can I help you with right now?' \u2014 a deflection that never answers the question.",
+ "capability_gap": "before: base responds to 'can you write things for me' with 'Sure! What can I help you with right now?' (deflection, never answers). after: teacher responds 'Sure! I can help you with that. What kind of things would you like me to write?' (direct answer + specific follow-up).",
+ "technique_t": {
+  "name": "answer-first",
+  "probe": {
+   "import": "distill1.student_policy",
+   "attr": "DIRECTNESS",
+   "check": "call_true"
+  }
+ }
+}

@@ -1,0 +1,86 @@
+[
+ {
+  "turn_id": "h01",
+  "turn_class": "clarification",
+  "turn_text": "can u do maths for me",
+  "response": "Sure! Can you show me a math problem you'd like to solve?",
+  "wall_s": 3.4
+ },
+ {
+  "turn_id": "h02",
+  "turn_class": "clarification",
+  "turn_text": "is math something you can handle?",
+  "response": "Yes, math can be handled with practice and dedication.",
+  "wall_s": 2.83
+ },
+ {
+  "turn_id": "h03",
+  "turn_class": "clarification",
+  "turn_text": "what stuff can you do anyway",
+  "response": "I can help with questions, provide information, and assist with tasks. Let me know what I can do for you!",
+  "wall_s": 3.82
+ },
+ {
+  "turn_id": "h04",
+  "turn_class": "clarification",
+  "turn_text": "do you have the ability to write emails for me",
+  "response": "Sure, I can help you write emails. Let me know how I can assist!",
+  "wall_s": 3.35
+ },
+ {
+  "turn_id": "h05",
+  "turn_class": "clarification",
+  "turn_text": "can you set a timer for me",
+  "response": "Sure, I can set a timer for you. Let me know when you'd like to start.",
+  "wall_s": 4.24
+ },
+ {
+  "turn_id": "h06",
+  "turn_class": "clarification",
+  "turn_text": "what's 234 times 56",
+  "response": "234 multiplied by 56 is 13,224.",
+  "wall_s": 3.16
+ },
+ {
+  "turn_id": "h07",
+  "turn_class": "conversational",
+  "turn_text": "hello!",
+  "response": "Hello! How can I assist you today?",
+  "wall_s": 2.56
+ },
+ {
+  "turn_id": "h08",
+  "turn_class": "conversational",
+  "turn_text": "I'm feeling down today",
+  "response": "I'm sorry to hear you're feeling down. It's okay to feel this way, and I'm here to support you. Let me know if there's anything you'd like to talk about right now.",
+  "wall_s": 4.82
+ },
+ {
+  "turn_id": "h09",
+  "turn_class": "conversational",
+  "turn_text": "explain gravity like I'm five",
+  "response": "Gravity is like a big force that pulls things down to the ground, making things stay in place.",
+  "wall_s": 3.43
+ },
+ {
+  "turn_id": "h10",
+  "turn_class": "conversational",
+  "turn_text": "that doesn't make sense, try again",
+  "response": "That doesn't make sense. Could you clarify what you're asking?",
+  "wall_s": 3.54
+ },
+ {
+  "turn_id": "h11",
+  "turn_class": "conversational",
+  "turn_text": "who are you",
+  "response": "I am a language model designed to assist with questions and provide information. If you have any questions, feel free to ask!",
+  "wall_s": 6.42
+ },
+ {
+  "turn_id": "h12",
+  "turn_class": "conversational",
+  "turn_text": "good morning",
+  "response": "Good morning! How can I assist you today?",
+  "wall_s": 6.43
+ }
+]

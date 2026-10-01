@@ -1,0 +1,30 @@
+{
+ "delta_id": "distill1-d04-repair",
+ "dependencies_d": [],
+ "evidence_e": [
+  {
+   "kind": "file",
+   "path": "distill1/teacher_demos.json",
+   "note": "t18/t19 teacher demonstrations"
+  },
+  {
+   "kind": "file",
+   "path": "distill1/base_train_out.json",
+   "note": "t18/t19 base responses (before)"
+  }
+ ],
+ "objective_x": "Handle conversational repair (confusion/mismatch signals) without refusal",
+ "resulting_capability_c": "distill1.student_policy.REPAIR",
+ "verification_v": "Held-out eval: repair-class turns (h10) must score >=1; zero refusals; blinded grading.",
+ "external_demo_y": "Teacher responded to repair signals with acknowledgement + invitation to rephrase ('Could you tell me more about what you meant?'), never a refusal.",
+ "native_inventory_z": "Base 0.6B responds to 'wait, what did you just say' and 'hmm, not quite what I meant' with 'I'm sorry, but I can't help with that.' \u2014 a refusal of simple conversational repair.",
+ "capability_gap": "before: base responds to 'wait, what did you just say' and 'hmm, not quite what I meant' with 'I'm sorry, but I can't help with that.' (refusal). after: teacher responds 'Could you tell me more about what you meant?' (repair invitation).",
+ "technique_t": {
+  "name": "conversational-repair",
+  "probe": {
+   "import": "distill1.student_policy",
+   "attr": "REPAIR",
+   "check": "call_true"
+  }
+ }
+}

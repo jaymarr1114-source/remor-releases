@@ -1,0 +1,86 @@
+[
+ {
+  "turn_id": "h01",
+  "turn_class": "clarification",
+  "turn_text": "can u do maths for me",
+  "response": "Sure! I can help you with math problems. Let me know what you need! \ud83d\ude0a",
+  "wall_s": 2.95
+ },
+ {
+  "turn_id": "h02",
+  "turn_class": "clarification",
+  "turn_text": "is math something you can handle?",
+  "response": "Yes, math can be handled with practice and dedication. It's a skill that improves with time and effort. If you're interested in learning more, I'm happy to help you explore different areas of math!",
+  "wall_s": 3.97
+ },
+ {
+  "turn_id": "h03",
+  "turn_class": "clarification",
+  "turn_text": "what stuff can you do anyway",
+  "response": "I can help you with a variety of tasks and conversations, such as answering questions, providing information, or assisting with specific needs. Let me know what you'd like to do!",
+  "wall_s": 3.21
+ },
+ {
+  "turn_id": "h04",
+  "turn_class": "clarification",
+  "turn_text": "do you have the ability to write emails for me",
+  "response": "Hello! I can write emails for you. Just let me know what you need, and I'll help you craft the best message for you.",
+  "wall_s": 3.02
+ },
+ {
+  "turn_id": "h05",
+  "turn_class": "clarification",
+  "turn_text": "can you set a timer for me",
+  "response": "Sure! How long would you like to set a timer for?",
+  "wall_s": 3.3
+ },
+ {
+  "turn_id": "h06",
+  "turn_class": "clarification",
+  "turn_text": "what's 234 times 56",
+  "response": "234 \u00d7 56 = 13,224",
+  "wall_s": 2.23
+ },
+ {
+  "turn_id": "h07",
+  "turn_class": "conversational",
+  "turn_text": "hello!",
+  "response": "Hello! How can I assist you today?",
+  "wall_s": 2.02
+ },
+ {
+  "turn_id": "h08",
+  "turn_class": "conversational",
+  "turn_text": "I'm feeling down today",
+  "response": "I'm sorry to hear you're feeling down today. It's okay to feel this way, and I hope you feel better soon. If you need anything to help, just let me know!",
+  "wall_s": 3.36
+ },
+ {
+  "turn_id": "h09",
+  "turn_class": "conversational",
+  "turn_text": "explain gravity like I'm five",
+  "response": "Sure! Let's explain gravity like I'm five:\n\nGravity is like a big, soft, always pulling things down. It makes things stay on the ground, even when you're high up. Like, if you jump up, gravity keeps you from falling back down. It's like a friend who always helps you stay",
+  "wall_s": 4.56
+ },
+ {
+  "turn_id": "h10",
+  "turn_class": "conversational",
+  "turn_text": "that doesn't make sense, try again",
+  "response": "Sure! Let me know if you'd like to ask something else. \ud83d\ude0a",
+  "wall_s": 2.44
+ },
+ {
+  "turn_id": "h11",
+  "turn_class": "conversational",
+  "turn_text": "who are you",
+  "response": "I'm a language model, and I don't have a physical form or a person. However, I can assist you with various tasks and questions in different languages. Let me know how I can help!",
+  "wall_s": 5.36
+ },
+ {
+  "turn_id": "h12",
+  "turn_class": "conversational",
+  "turn_text": "good morning",
+  "response": "Good morning!",
+  "wall_s": 1.61
+ }
+]

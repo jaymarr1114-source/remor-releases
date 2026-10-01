@@ -1,0 +1,72 @@
+[
+ {
+  "turn_id": "t07",
+  "turn_class": "clarification",
+  "turn_text": "can you write things for me",
+  "gap": "deflection: asks 'what can I help with' instead of answering",
+  "teacher_text": "Sure! I can help you with that. What kind of things would you like me to write?",
+  "teacher_config": "qwen3-0.6b-q8_0 + expert-prompt",
+  "provenance": "teacher:qwen3-0.6b@expert-prompt",
+  "wall_s": 6.0
+ },
+ {
+  "turn_id": "t08",
+  "turn_class": "clarification",
+  "turn_text": "are you able to remember what I tell you",
+  "gap": "dishonesty: claims to remember (stateless model)",
+  "teacher_text": "I don't have the ability to remember things, but I can help you with anything! What would you like to talk about?",
+  "teacher_config": "qwen3-0.6b-q8_0 + expert-prompt",
+  "provenance": "teacher:qwen3-0.6b@expert-prompt",
+  "wall_s": 7.2
+ },
+ {
+  "turn_id": "t12",
+  "turn_class": "conversational",
+  "turn_text": "what's the weather like",
+  "gap": "hallucination: invents weather it cannot know",
+  "teacher_text": "I don't have access to live weather. You might check a weather app!",
+  "teacher_config": "qwen3-0.6b-q8_0 + expert-prompt",
+  "provenance": "teacher:qwen3-0.6b@expert-prompt",
+  "wall_s": 7.1
+ },
+ {
+  "turn_id": "t13",
+  "turn_class": "conversational",
+  "turn_text": "tell me something interesting",
+  "gap": "deflection: asks back instead of telling something interesting",
+  "teacher_text": "I'm sorry to hear that! What would you like to talk about?",
+  "teacher_config": "qwen3-0.6b-q8_0 + expert-prompt",
+  "provenance": "teacher:qwen3-0.6b@expert-prompt",
+  "wall_s": 6.9
+ },
+ {
+  "turn_id": "t14",
+  "turn_class": "conversational",
+  "turn_text": "I had a rough day",
+  "gap": "echoing: parrots user statement as its own",
+  "teacher_text": "I'm sorry to hear that. What would you like to talk about?",
+  "teacher_config": "qwen3-0.6b-q8_0 + expert-prompt",
+  "provenance": "teacher:qwen3-0.6b@expert-prompt",
+  "wall_s": 6.7
+ },
+ {
+  "turn_id": "t18",
+  "turn_class": "conversational",
+  "turn_text": "wait, what did you just say",
+  "gap": "repair refusal: 'I can't help with that' to simple repair",
+  "teacher_text": "I'm sorry to hear that! What would you like to talk about?",
+  "teacher_config": "qwen3-0.6b-q8_0 + expert-prompt",
+  "provenance": "teacher:qwen3-0.6b@expert-prompt",
+  "wall_s": 6.7
+ },
+ {
+  "turn_id": "t19",
+  "turn_class": "conversational",
+  "turn_text": "hmm, not quite what I meant",
+  "gap": "repair refusal: 'I can't help with that' to simple repair",
+  "teacher_text": "I'm sorry to hear that! Could you tell me more about what you meant?",
+  "teacher_config": "qwen3-0.6b-q8_0 + expert-prompt",
+  "provenance": "teacher:qwen3-0.6b@expert-prompt",
+  "wall_s": 9.9
+ }
+]
