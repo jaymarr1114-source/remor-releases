@@ -211,7 +211,7 @@ class CognitionLoop:
         mirroring DistillationLoop.distill's own contract).
         """
         from swarm_engine.acquisition.delta import (
-            DeltaRecord as M2Delta, DeltaValidationError)
+            DeltaRecord, DeltaValidationError)
         m1 = payload["delta"]
         delta_id = m1.get("delta_id", "?")
         outcome: Dict[str, Any] = {"delta_id": delta_id, "success": False,
@@ -262,13 +262,16 @@ class CognitionLoop:
                        actions: List[Any]) -> Any:
         """Adapt the M1 Y-Z-T-E-D-V-C record to M2's distillation schema.
 
-        The two DeltaRecord classes are distinct by design (M1 owns the
-        frozen ingestion schema; M2 owns the distillation schema). This
-        adapter is the documented seam between them — field-by-field,
-        nothing guessed: I/O evidence comes from the observed demo actions
-        via Q2's evidence_from_demo_actions convention.
+        DELTA-NAME-1 (2026-10-01): there is now exactly one DeltaRecord
+        class in the tree — M2's (swarm_engine.acquisition.delta), with
+        validate() and the causal discipline. The M1 side is a frozen
+        plain-dict ingestion schema (built by ingest._m1_delta_dict),
+        not a class; this adapter remains the documented seam between
+        the two — field-by-field, nothing guessed: I/O evidence comes
+        from the observed demo actions via Q2's evidence_from_demo_actions
+        convention.
         """
-        from swarm_engine.acquisition.delta import DeltaRecord as M2Delta
+        from swarm_engine.acquisition.delta import DeltaRecord
         from swarm_engine.intellect.unified_memory import (
             evidence_from_demo_actions)
         y = m1.get("Y") or {}
@@ -277,7 +280,7 @@ class CognitionLoop:
         pairs = evidence_from_demo_actions(actions)
         evidence = [{"input": dict(i), "output": o} for i, o in pairs]
         action_names = [getattr(a, "name", "?") for a in actions]
-        return M2Delta(
+        return DeltaRecord(
             objective=str(m1.get("X") or ""),
             external_actions=(
                 f"external agent ({y.get('source', '?')}) performed "

@@ -17,7 +17,6 @@ sys.path.insert(0, _CANONICAL)
 sys.path.insert(0, os.path.join(_CANONICAL, "pylib"))
 
 from runtime.acquisition.ingest import (  # noqa: E402
-    DeltaRecord,
     ExternalDemonstration,
     IngestResult,
     InventorySnapshot,
