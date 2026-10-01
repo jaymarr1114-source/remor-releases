@@ -29,6 +29,7 @@ run_gate "proofs/distill2/gate_run.sh"
 run_gate "proofs/llm_substrate1/gate_run.sh"
 run_gate "proofs/frm_student1/gate_run.sh"
 run_gate "proofs/auto_route1/gate_run.sh"
+run_gate "proofs/creativity_slice1/gate_run.sh"
 
 if [ "$fail" -eq 0 ]; then
   echo "ROOT GATE: ALL GREEN"

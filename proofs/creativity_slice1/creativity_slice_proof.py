@@ -25,7 +25,7 @@ itself, fresh process):
   S6  the package is pure Python: compiles clean, zero android imports
 
 Run in a fresh process from the tree root:
-    python3 proofs/creativity_slice_proof.py
+    python3 proofs/creativity_slice1/creativity_slice_proof.py
 Exit 0 iff every check passes.
 
 Sections of the paper cited: exec-creativity-controller_2026-09-29.md
@@ -37,7 +37,7 @@ import os
 import sys
 import traceback
 
-TREE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TREE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(TREE, "pylib"))
 
 from swarm_engine.creativity import (  # noqa: E402
