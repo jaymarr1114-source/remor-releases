@@ -40,7 +40,10 @@ from typing import Any, Dict, List, Optional
 from .chain import (AdmissionRecord, ChainLedger, Result, WorkUnit,
                     aggregate_attribution, recompute_attribution)
 from .grants import (Allocation, AllocationLedger, AllocationRefused,
-                     EnforcementStatusProvider, Grant)
+                     EnforcementStatusProvider)
+# Absolute swarm_engine import: see the load-bearing note in grants.py —
+# the FrmGrant class object must be identical across both namespaces.
+from swarm_engine.curiosity.frm.grant import FrmGrant
 from .spend import (Expenditure, ExpenditureLedger, MeteredSubstrate,
                     SpendReport, real_substrate_work)
 
@@ -165,7 +168,7 @@ class InquiryDriver:
         self._budget: Optional[CallerBudget] = None
         self._grant_id = ""
 
-    def allocate(self, grant: Grant, enforcement: EnforcementStatusProvider,
+    def allocate(self, grant: FrmGrant, enforcement: EnforcementStatusProvider,
                  domain: str = "curiosity") -> Allocation:
         self._alloc_ledger.record_grant(grant)
         self._allocation = self._alloc_ledger.allocate(

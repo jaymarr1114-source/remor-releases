@@ -13,14 +13,34 @@ apportions — Phase 2), A6 (loop controller enforces — Phase 2),
 A32 (the calling controller's budget pays). The allocation ledger
 here records grant → controller bindings; it is the first link of
 the attribution chain (resource allocation).
+
+U-7 grant-shape migration (GRANT-MIGRATE-1, 2026-10-01 — standing
+decision U-7, James 2026-09-30: "FrmGrant wins"):
+    The ledger records ``runtime.curiosity.frm.grant.FrmGrant`` directly.
+    The old mutable attribution ``Grant`` (epoch_id: str, falsely
+    documented as "the frozen FRM grant shape") was removed — it was a
+    competing canonical grant contract, an architectural contradiction.
+    Exactly one grant contract exists in the tree: FrmGrant (frozen,
+    epoch_id: int). ``swarm_engine.primitives.core.Grant``
+    (``PrimitiveGrant``) is a DIFFERENT concept — an effect permission
+    for the primitive governor (Effect + target pattern), not an FRM
+    resource grant — and is intentionally untouched.
 """
 from __future__ import annotations
 
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+# NOTE: absolute swarm_engine import is load-bearing. runtime/curiosity and
+# pylib/swarm_engine/curiosity are the same files (hardlinked); a relative
+# "..frm.grant" import would bind a DIFFERENT FrmGrant class object
+# depending on which namespace imported this module first, breaking the
+# isinstance gate below. Every FrmGrant consumer in the tree imports via
+# the swarm_engine namespace — this module must too.
+from swarm_engine.curiosity.frm.grant import FrmGrant, LendingRecord
 
 
 # ---------------------------------------------------------------------------
@@ -60,38 +80,45 @@ class AllocationRefused(Exception):
 
 
 # ---------------------------------------------------------------------------
-# records
+# grant validation (the single canonical contract is FrmGrant)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class Grant:
-    """The frozen FRM grant shape. Exactly the fields of the frozen
-    interface — nothing added, nothing renamed."""
-    grant_id: str
-    epoch_id: str
-    epoch_s: int = 300
-    dimensions: Dict[str, float] = field(default_factory=dict)   # {budget_s, max_concurrent}
-    primary_minimum: Dict[str, float] = field(default_factory=dict)
-    lent: bool = False
-    issued_at: float = field(default_factory=time.time)
+def validate_grant(grant: FrmGrant) -> FrmGrant:
+    """Enforce the allocation-time invariants on a canonical grant.
 
-    def validate(self) -> "Grant":
-        if not self.grant_id or not self.epoch_id:
-            raise AllocationRefused("grant requires grant_id and epoch_id")
-        if self.epoch_s <= 0:
-            raise AllocationRefused(f"grant {self.grant_id!r}: epoch_s must be positive")
-        for key in ("budget_s", "max_concurrent"):
-            if key not in self.dimensions:
-                raise AllocationRefused(
-                    f"grant {self.grant_id!r}: dimensions missing {key!r}")
-            if self.dimensions[key] < 0:
-                raise AllocationRefused(
-                    f"grant {self.grant_id!r}: dimensions[{key}] negative")
-        return self
+    ``FrmGrant.as_dict()`` asserts the frozen six-key shape; the checks
+    below are the allocation leg's own invariants (carried over from the
+    retired attribution ``Grant.validate``). Anything that is not an
+    ``FrmGrant`` is refused — never silently coerced.
+    """
+    if not isinstance(grant, FrmGrant):
+        raise AllocationRefused(
+            f"grant must be FrmGrant, got {type(grant).__name__}: fail closed")
+    shape = grant.as_dict()  # frozen-shape assertion lives here
+    if not grant.grant_id:
+        raise AllocationRefused("grant requires grant_id")
+    if not isinstance(grant.epoch_id, int):
+        raise AllocationRefused(
+            f"grant {grant.grant_id!r}: epoch_id must be int, "
+            f"got {type(grant.epoch_id).__name__}")
+    if grant.epoch_s <= 0:
+        raise AllocationRefused(
+            f"grant {grant.grant_id!r}: epoch_s must be positive")
+    for key in ("budget_s", "max_concurrent"):
+        if shape["dimensions"][key] < 0:
+            raise AllocationRefused(
+                f"grant {grant.grant_id!r}: dimensions[{key}] negative")
+    return grant
 
-    def expired(self, now: Optional[float] = None) -> bool:
-        return (now if now is not None else time.time()) - self.issued_at > self.epoch_s
 
+def grant_expired(grant: FrmGrant, now: Optional[float] = None) -> bool:
+    """True when the grant's epoch is over (lending is epoch-bounded)."""
+    return (now if now is not None else time.time()) - grant.issued_at > grant.epoch_s
+
+
+# ---------------------------------------------------------------------------
+# records
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Allocation:
@@ -99,7 +126,7 @@ class Allocation:
     controller (the caller whose budget pays, A32)."""
     allocation_id: str
     grant_id: str
-    epoch_id: str
+    epoch_id: int
     controller_id: str            # originating Run Controller (FRM §7)
     originating_executive: str    # originating executive (FRM §7)
     budget_s: float
@@ -115,17 +142,19 @@ class Allocation:
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS grants (
     grant_id TEXT PRIMARY KEY,
-    epoch_id TEXT NOT NULL,
-    epoch_s INTEGER NOT NULL,
+    epoch_id INTEGER NOT NULL,
+    epoch_s REAL NOT NULL,
     dimensions TEXT NOT NULL,
     primary_minimum TEXT NOT NULL,
     lent INTEGER NOT NULL,
-    issued_at REAL NOT NULL
+    issued_at REAL NOT NULL,
+    domain TEXT NOT NULL DEFAULT '',
+    lending_json TEXT
 );
 CREATE TABLE IF NOT EXISTS allocations (
     allocation_id TEXT PRIMARY KEY,
     grant_id TEXT NOT NULL,
-    epoch_id TEXT NOT NULL,
+    epoch_id INTEGER NOT NULL,
     controller_id TEXT NOT NULL,
     originating_executive TEXT NOT NULL,
     budget_s REAL NOT NULL,
@@ -135,6 +164,17 @@ CREATE TABLE IF NOT EXISTS allocations (
     FOREIGN KEY (grant_id) REFERENCES grants(grant_id)
 );
 """
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Bring pre-migration ledger DBs (mutable-Grant era) up to the
+    FrmGrant schema. New tables are created by _SCHEMA directly."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(grants)").fetchall()}
+    if "domain" not in cols:
+        conn.execute("ALTER TABLE grants ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
+    if "lending_json" not in cols:
+        conn.execute("ALTER TABLE grants ADD COLUMN lending_json TEXT")
+    conn.commit()
 
 
 class AllocationLedger:
@@ -147,21 +187,24 @@ class AllocationLedger:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        _migrate_schema(self._conn)
         self._conn.commit()
 
     # -- grants -----------------------------------------------------------
-    def record_grant(self, grant: Grant) -> Grant:
-        grant.validate()
+    def record_grant(self, grant: FrmGrant) -> FrmGrant:
+        validate_grant(grant)
+        shape = grant.as_dict()
         self._conn.execute(
-            "INSERT INTO grants VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO grants VALUES (?,?,?,?,?,?,?,?,?)",
             (grant.grant_id, grant.epoch_id, grant.epoch_s,
-             _json(grant.dimensions), _json(grant.primary_minimum),
-             int(grant.lent), grant.issued_at),
+             _json(shape["dimensions"]), _json(shape["primary_minimum"]),
+             int(grant.lent), grant.issued_at, grant.domain,
+             _json(grant.lending.as_dict())),
         )
         self._conn.commit()
         return grant
 
-    def get_grant(self, grant_id: str) -> Optional[Grant]:
+    def get_grant(self, grant_id: str) -> Optional[FrmGrant]:
         row = self._conn.execute(
             "SELECT * FROM grants WHERE grant_id=?", (grant_id,)).fetchone()
         return _grant_from_row(row) if row else None
@@ -185,7 +228,7 @@ class AllocationLedger:
         grant = self.get_grant(grant_id)
         if grant is None:
             raise AllocationRefused(f"unknown grant {grant_id!r}")
-        if grant.expired():
+        if grant_expired(grant):
             raise AllocationRefused(
                 f"grant {grant_id!r}: epoch {grant.epoch_id} over "
                 "(lending is epoch-bounded)")
@@ -195,8 +238,8 @@ class AllocationLedger:
             epoch_id=grant.epoch_id,
             controller_id=controller_id,
             originating_executive=originating_executive,
-            budget_s=float(grant.dimensions["budget_s"]),
-            max_concurrent=int(grant.dimensions["max_concurrent"]),
+            budget_s=float(grant.budget_s),
+            max_concurrent=int(grant.max_concurrent),
             lent=grant.lent,
         )
         self._conn.execute(
@@ -230,19 +273,44 @@ def _json(obj: Any) -> str:
     return _json_mod.dumps(obj, sort_keys=True)
 
 
-def _grant_from_row(row: sqlite3.Row) -> Grant:
-    return Grant(
-        grant_id=row["grant_id"], epoch_id=row["epoch_id"],
-        epoch_s=row["epoch_s"],
-        dimensions=_json_mod.loads(row["dimensions"]),
-        primary_minimum=_json_mod.loads(row["primary_minimum"]),
-        lent=bool(row["lent"]), issued_at=row["issued_at"])
+def _grant_from_row(row: sqlite3.Row) -> FrmGrant:
+    # enforcement_state_at_issue / note are round-record data, not ledger
+    # data (see FrmGrant.as_dict docstring); they reconstruct as defaults.
+    dims = _json_mod.loads(row["dimensions"])
+    pm = _json_mod.loads(row["primary_minimum"])
+    try:
+        epoch_id = int(row["epoch_id"])
+    except (TypeError, ValueError):
+        raise AllocationRefused(
+            f"grant {row['grant_id']!r}: legacy epoch_id {row['epoch_id']!r} "
+            "is not an integer — U-7 unified epoch_id to int; a row "
+            "predating the migration cannot be honestly converted")
+    lending_raw = row["lending_json"]
+    if lending_raw:
+        lj = _json_mod.loads(lending_raw)
+        lending = LendingRecord(
+            lent_budget_s=float(lj["lent_budget_s"]),
+            lent_concurrent=int(lj["lent_concurrent"]),
+            source=lj.get("source", "primary_unused_minimum"),
+            recalled=bool(lj.get("recalled", False)),
+        )
+    else:
+        lending = LendingRecord(0.0, 0)
+    return FrmGrant(
+        grant_id=row["grant_id"], epoch_id=epoch_id,
+        epoch_s=float(row["epoch_s"]), domain=row["domain"] or "",
+        budget_s=float(dims["budget_s"]),
+        max_concurrent=int(dims["max_concurrent"]),
+        primary_minimum_budget_s=float(pm["budget_s"]),
+        primary_minimum_concurrent=int(pm["max_concurrent"]),
+        lent=bool(row["lent"]), lending=lending,
+        issued_at=float(row["issued_at"]))
 
 
 def _alloc_from_row(row: sqlite3.Row) -> Allocation:
     return Allocation(
         allocation_id=row["allocation_id"], grant_id=row["grant_id"],
-        epoch_id=row["epoch_id"], controller_id=row["controller_id"],
+        epoch_id=int(row["epoch_id"]), controller_id=row["controller_id"],
         originating_executive=row["originating_executive"],
         budget_s=row["budget_s"], max_concurrent=row["max_concurrent"],
         lent=bool(row["lent"]), allocated_at=row["allocated_at"])

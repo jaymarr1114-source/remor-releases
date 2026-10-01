@@ -26,16 +26,22 @@ import sys
 import tempfile
 import time
 import traceback
+from dataclasses import replace as _replace
 
-WORKTREE = os.path.expanduser("~/workspace/worktrees/cur-p1d")
+# GRANT-MIGRATE-1: derive the tree from this file's location instead of a
+# hardcoded (now stale) worktree path, so the proof always tests the tree
+# it lives in. pylib/ is needed for the swarm_engine namespace.
+WORKTREE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, WORKTREE)
+sys.path.insert(0, os.path.join(WORKTREE, "pylib"))
 
 from runtime.curiosity.attribution.chain import (
     ChainLedger, aggregate_attribution, recompute_attribution)
 from runtime.curiosity.attribution.gate import (
     CausalGate, Counterfactual, GateFailure)
 from runtime.curiosity.attribution.grants import (
-    AllocationLedger, AllocationRefused, Grant)
+    AllocationLedger, AllocationRefused)
+from swarm_engine.curiosity.frm.grant import FrmGrant, LendingRecord
 from runtime.curiosity.attribution.spend import ExpenditureLedger
 from runtime.curiosity.attribution.testdoubles import (
     BudgetExceeded, EnforcementStub, InquiryDriver, TestAdmissionBoard,
@@ -57,11 +63,19 @@ def check(name):
     return deco
 
 
-def make_grant(gid, budget_s=60.0, max_concurrent=4):
-    return Grant(grant_id=gid, epoch_id="epoch-1", epoch_s=600,
-                 dimensions={"budget_s": budget_s, "max_concurrent": max_concurrent},
-                 primary_minimum={"budget_s": 1.0, "max_concurrent": 1},
-                 lent=False)
+def make_grant(gid, budget_s=60.0, max_concurrent=4, epoch_s=600.0,
+               issued_at=None):
+    # FrmGrant.issue mints grant_id; replace() pins the deterministic id
+    # the proof's assertions expect (frozen dataclass → replace, not mutate).
+    return _replace(
+        FrmGrant.issue(
+            domain="curiosity", epoch_id=1, epoch_s=epoch_s,
+            budget_s=budget_s, max_concurrent=max_concurrent,
+            primary_minimum_budget_s=1.0, primary_minimum_concurrent=1,
+            lent=False, lending=LendingRecord(0.0, 0),
+            enforcement_state_at_issue="RUNNING",
+            issued_at=time.time() if issued_at is None else issued_at),
+        grant_id=gid)
 
 
 def main():
@@ -142,11 +156,12 @@ def main():
 
     @check("S0e epoch-bounded lending: expired grant refused")
     def _():
-        import time as _t
-        old = make_grant("g-old", budget_s=60.0)
-        old.issued_at = _t.time() - 3600.0   # issued an hour ago
-        old.epoch_s = 600                    # 10-minute epochs
-        assert old.expired()
+        # Frozen grant: expiry is constructed at issue time, never by
+        # mutation (the old mutable Grant allowed post-issue edits).
+        from runtime.curiosity.attribution.grants import grant_expired
+        old = make_grant("g-old", budget_s=60.0, epoch_s=600.0,
+                         issued_at=time.time() - 3600.0)  # issued an hour ago
+        assert grant_expired(old)
         try:
             drvA.allocate(old, enforcement)
         except AllocationRefused as e:
