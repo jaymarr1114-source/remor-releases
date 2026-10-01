@@ -57,9 +57,10 @@ from swarm_engine.primitives.core import (  # noqa: E402
     Effect,
     Grant as PrimitiveGrant,
 )
-from swarm_engine.curiosity.attribution.grants import (  # noqa: E402
-    Grant as AttributionGrant,
-)
+# NOTE (GRANT-MIGRATE-1, U-7): the old attribution Grant was migrated into
+# FrmGrant — the single canonical grant contract. Two grant concepts
+# remain: FrmGrant (FRM resource grant) vs PrimitiveGrant (primitive
+# effect permission) — deliberately distinct.
 from swarm_engine.intellect.reasoner import (  # noqa: E402
     ExternalReasoner,
     NoExternalReasoner,
@@ -141,13 +142,10 @@ def b1_inventory():
     check("B1", "curiosity_native_tier",
           isinstance(gp._native, PrecisionCognitionProvider),
           f"got {type(gp._native).__name__}")
-    # Three grant concepts, three distinct classes; inlet takes FrmGrant.
+    # Two grant concepts, two distinct classes (U-7: the old attribution
+    # Grant was migrated INTO FrmGrant); the inlet takes FrmGrant.
     check("B1", "frmgrant_distinct_from_primitive",
           FrmGrant is not PrimitiveGrant)
-    check("B1", "frmgrant_distinct_from_attribution",
-          FrmGrant is not AttributionGrant)
-    check("B1", "primitive_distinct_from_attribution",
-          PrimitiveGrant is not AttributionGrant)
     # Stub teacher is honest, never plausible reasoning.
     t = StubTeacher()
     text, secs = t.complete("2+2=?", {})
@@ -215,10 +213,13 @@ def b4_wrong_grant_type():
     wrong = [
         ("primitives.Grant",
          PrimitiveGrant(effect=Effect.READ_FS, pattern="*")),
-        ("attribution.Grant",
-         AttributionGrant(grant_id="g1", epoch_id="e1",
-                          dimensions={"budget_s": 100.0,
-                                      "max_concurrent": 1})),
+        # U-7: the old mutable attribution Grant no longer exists as a
+        # distinct type. The adversarial slot is now held by a
+        # legacy-shaped impostor: a dict with the old grant's fields
+        # (str epoch_id included). It must be refused, never coerced.
+        ("legacy_grant_dict",
+         {"grant_id": "g1", "epoch_id": "e1",
+          "dimensions": {"budget_s": 100.0, "max_concurrent": 1}}),
     ]
     for label, g in wrong:
         res = prov.request_cognition(

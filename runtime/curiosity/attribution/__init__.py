@@ -66,8 +66,9 @@ Charter grounding:
       and prove causal NECESSITY. (gate.py + proof battery)
 
 Modules:
-    grants.py      — Grant record (frozen shape) + allocation-site
-                     metering (grant → controller) with the zero-
+    grants.py      — FrmGrant record (the single canonical grant
+                     contract, U-7) + allocation-site metering
+                     (grant → controller) with the zero-
                      allocation-under-enforcement rule.
     spend.py       — Expenditure-site metering per C-4.5: the metered
                      substrate interface, SpendReport, Expenditure
