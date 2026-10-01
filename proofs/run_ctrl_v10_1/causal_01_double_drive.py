@@ -147,5 +147,46 @@ check(obs_id_1 not in pending_oids and obs_id_2 not in pending_oids,
       "V10-P4's find_pending_deltas also sees neither delta "
       "(one shared consumption record)")
 
+# Step 6 (mandate 3, adversarial): drive the loop OUTSIDE the Controller,
+# then have the Controller's leg run -- the out-of-band drive must not
+# cause the Controller to double-drive. The unified consumption record is
+# the refusal mechanism: any driver that processes a delta marks it, and
+# every driver sees the mark.
+m1b = _m1_delta_dict(
+    delta_id="adversarial-delta-99",
+    X="adversarial out-of-band drive",
+    Y={"source": "external-demo", "action_count": 1,
+       "actions": [{"name": "type"}]},
+    Z={"capabilities": []},
+    gap="adversarial gap",
+    T={"technique_name": "adversarial-technique",
+       "required_tools": []},
+    E=[], D=[],
+    V={"status": "unverified", "method": None},
+    C=None,
+)
+obs_id_3 = record_experience(
+    ep, origin_loop="acquisition", kind="technique_delta",
+    content="technique delta (Y-Z): adversarial-delta-99",
+    raw={"delta": m1b},
+    source="technique_delta",
+)
+check(bool(obs_id_3), "seeded an adversarial out-of-band delta")
+# Out-of-band drive: a SEPARATE CognitionLoop, not the Controller's.
+rogue = CognitionLoop(eng)
+rogue_report = rogue.cycle(time_budget_s=30.0,
+                           run_quarantine_sweep=False)
+rogue_ids = [o.get("delta_id")
+             for o in rogue_report.get("distilled", [])]
+check("adversarial-delta-99" in rogue_ids,
+      "out-of-band drive processed the adversarial delta")
+# The Controller's leg must NOT re-process it.
+leg2 = rc._acquisition_leg(budget_s=30.0)
+leg2_ids = ([o.get("delta_id") for o in leg2.get("distilled", [])]
+            + [e.get("delta_id") for e in leg2.get("distill_errors", [])])
+check("adversarial-delta-99" not in leg2_ids,
+      "Controller's leg refused to re-drive the out-of-band delta "
+      "(unified consumption is the refusal)")
+
 print(f"\nCAUSAL-01 REPAIR VERIFIED: one driver, one cadence, unified "
-      f"consumption, no orphaned generation ({PASSED}/9 checks).")
+      f"consumption, no orphaned generation ({PASSED}/12 checks).")

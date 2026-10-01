@@ -235,4 +235,34 @@ res = rc5.run()
 check(res.get("budget_exhausted") is True and ckpt_cycles(os.path.join(td, "ckpt5.db")) == 0,
       "run_budget_s=0 refuses before any cycle (fail-closed)")
 
+# ------------------------------------------------------- 6: acceptance inlet
+# Q8's present() is an inlet into the acceptance mechanism, not a loop:
+# calling it performs a synchronous state transition (CANDIDATE awaiting
+# verdict) and starts no thread, no scheduler, no second loop. The
+# duplicate-present guard refuses a re-drive loudly.
+import threading as _threading
+from swarm_engine.services.acceptance import (
+    AcceptanceLoop, AcceptanceStore, Attempt, AuthReport)
+eng6 = fresh_engine(td, "eng6")
+_loop = AcceptanceLoop(
+    AcceptanceStore(os.path.join(td, "acc6.db")),
+    eng6.intellect.epistemic, engine=eng6)
+_attempt = Attempt(approach_signature=["test"],
+                   plan={"op": "noop"}, args={},
+                   result_summary="ok", exec_ok=True)
+_auth = AuthReport(held_out={}, negative_controls={}, passed=True)
+_threads_before = len(_threading.enumerate())
+rec = _loop.present("inlet-run-1", "test goal", _attempt, _auth)
+check(getattr(rec.state, "value", rec.state) == "candidate"
+      or "CANDIDATE" in str(rec.state),
+      f"present() transitions to CANDIDATE (state={rec.state})")
+check(len(_threading.enumerate()) == _threads_before,
+      "present() started no thread: it is an inlet, not a loop")
+try:
+    _loop.present("inlet-run-1", "test goal", _attempt, _auth)
+    _dup_ok = False
+except ValueError:
+    _dup_ok = True
+check(_dup_ok, "duplicate present() is refused loudly (no silent re-drive)")
+
 print(f"\nLIGHT FUNCTIONAL PROOFS GREEN ({PASSED} checks).")
