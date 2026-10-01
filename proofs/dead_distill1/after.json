@@ -1,0 +1,34 @@
+{
+  "DistillationLoop_methods": [
+    "distill",
+    "generalize"
+  ],
+  "distill_driver_functions": [
+    "NotDistillable",
+    "charter_to_delta_record",
+    "extract_io_examples",
+    "find_pending_deltas",
+    "mark_consumed",
+    "run_distillation_sweep"
+  ],
+  "sha256:pylib/swarm_engine/acquisition/distill.py": "7860c74306b74ac70a6870fb4a6aa44c6dd23259d604b33d5d8c98ab42043482",
+  "sha256:runtime/acquisition/distill.py": "7860c74306b74ac70a6870fb4a6aa44c6dd23259d604b33d5d8c98ab42043482",
+  "validate_empty": [
+    "missing field: objective_x",
+    "missing field: external_demo_y",
+    "missing field: native_inventory_z",
+    "missing field: capability_gap",
+    "missing field: technique_t",
+    "missing field: evidence_e",
+    "missing field: dependencies_d",
+    "missing field: verification_v",
+    "missing field: resulting_capability_c"
+  ],
+  "validate_good": [
+    "evidence_e[0].cmd must be a non-empty list",
+    "evidence_e[0].output_includes must be a list"
+  ],
+  "validate_non_dict": [
+    "record must be a dict"
+  ]
+}

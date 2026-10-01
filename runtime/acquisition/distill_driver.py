@@ -16,8 +16,11 @@ Everything else already exists and is reused through frozen interfaces:
   - DeltaRecord (swarm_engine/acquisition/delta.py, M2): validate /
     split_evidence / mark_synthesized. Its causal discipline (minimum
     I/O examples, input-dict shape) is enforced, never bypassed.
-  - DeltaSession capture + causal adjudication (V10-P3's delta_capture.py):
-    the only source of technique_delta records. Called, never edited.
+  - Delta capture (V10-P3's delta_capture.py): validate_delta /
+    emit_delta + causal adjudication. The live capture path is
+    acquisition/ingest.py (ingest_external_demonstration,
+    ingest_subagent_trace, ingest_chat_turn, ingest_plugin_action).
+    Called, never edited.
   - record_experience / read_experiences (V10-P1's unified_memory.py):
     the single read/write path. Called, never edited.
 

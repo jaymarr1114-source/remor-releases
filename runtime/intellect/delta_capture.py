@@ -18,40 +18,11 @@ discipline. This module is the enforcement boundary:
 * ``emit_delta`` -- validate-then-write through V10-P1's
   ``record_experience`` (called, never reimplemented): provenance
   (origin loop, timestamp, causal chain) is intact from the first record.
-* ``DeltaSession`` -- the session boundary: begin / demonstrate / close.
-  At close, each demonstrated technique is adjudicated mechanically:
-    1. provider scan -- a real grep over runtime/ for the technique's
-       marker outside the session's own artifact files. Found elsewhere
-       -> no observable gap -> reject ``no_observable_gap``.
-    2. artifact existence -- every cited file artifact must exist, every
-       cited run must re-execute now with exit 0 and the expected output
-       markers. Otherwise -> reject ``insufficient_evidence``.
-    3. hide-and-probe -- the session's file artifacts are renamed aside
-       and the technique's probe is executed in a FRESH subprocess: it
-       must FAIL (the technique is absent without the session's work).
-       Artifacts restored, probe must PASS. Fail-hidden-but-pass-anyway
-       -> reject ``not_caused_by_session``; fail-restored ->
-       reject ``technique_not_working``.
-    4. schema validation -> ``DeltaRefused`` on any violation.
-  Only demonstrations surviving all four steps are emitted, as
-  kind="technique_delta" records with session_id and validated=true.
 
-A session with no demonstrated technique, or whose demonstrations are
-all rejected, emits ZERO deltas -- the mechanism discriminates, it does
-not spray records.
-
-Coverage (mandate 5 -- stated exactly):
-  COVERED: any work session driven through DeltaSession.begin /
-    demonstrate / close (this mission's engineering sessions, the proof
-    sessions, any future session whose runner opts in).
-  NOT COVERED: loop-owned direct writers -- DistillationLoop's
-    _log_experience/_log_experience_raw, loop_driver.py, ingest.py --
-    which write through the unified path (or bypass it) WITHOUT capture
-    validation or discipline. Migrating them needs cross-loop authority:
-    the named V10-P1 follow-up. Also not covered: work that never opens
-    a DeltaSession -- capture is opt-in at boundaries the session runner
-    controls, not ambient. This is an honest boundary, not a defect in
-    the mechanism.
+The live capture path is acquisition/ingest.py
+(ingest_external_demonstration, ingest_subagent_trace, ingest_chat_turn,
+ingest_plugin_action) -- this module provides the validation and
+adjudication machinery those paths use, not a session-boundary API.
 
 Ownership: this file is V10-P3's. runtime/intellect/unified_memory.py is
 V10-P1's -- called, never edited.
@@ -171,10 +142,6 @@ def validate_delta(record: Dict[str, Any]) -> List[str]:
 class DeltaRefused(Exception):
     """Raised when a delta is refused at write time. The record is never
     stored: refusal happens before any store access."""
-
-
-class SessionError(Exception):
-    """Misuse of the DeltaSession API (demonstrate/close out of order)."""
 
 
 def emit_delta(epistemic: Any, session_id: str, delta: Dict[str, Any],
@@ -426,112 +393,6 @@ def _adjudicate_demonstration(demo: Dict[str, Any], session_id: str
     return ("accept", "ok",
             f"gap holds (probe False hidden / True restored in fresh "
             f"processes); {len(demo.get('runs', []))} run(s) reproduced")
-
-
-# ---------------------------------------------------------------------------
-# Session boundary
-# ---------------------------------------------------------------------------
-
-class DeltaSession:
-    """A real work session's capture boundary.
-
-    begin(objective) -> demonstrate(...) [0..n] -> close().
-    close() adjudicates every demonstration and emits one validated delta
-    per accepted demonstration, or emits nothing.
-    """
-
-    def __init__(self, epistemic: Any):
-        self.epistemic = epistemic
-        self.session_id = f"sess_{uuid4().hex[:12]}"
-        self.started_at = time.time()
-        self.objective: Optional[str] = None
-        self._demonstrations: List[Dict[str, Any]] = []
-        self._closed = False
-
-    def begin(self, objective: str) -> "DeltaSession":
-        if self.objective is not None:
-            raise SessionError("begin() called twice")
-        if not isinstance(objective, str) or len(objective.strip()) < 10:
-            raise SessionError("objective must be a string of >=10 chars")
-        self.objective = objective.strip()
-        return self
-
-    def demonstrate(self, technique: str, y: str, z: str, gap: str,
-                    probe: Dict[str, str], provider_marker: str,
-                    artifacts: Sequence[Dict[str, Any]],
-                    runs: Sequence[Dict[str, Any]],
-                    dependencies: Sequence[str],
-                    verification: str, capability: str) -> "DeltaSession":
-        if self.objective is None:
-            raise SessionError("demonstrate() before begin()")
-        if self._closed:
-            raise SessionError("demonstrate() after close()")
-        self._demonstrations.append({
-            "technique": technique, "y": y, "z": z, "gap": gap,
-            "probe": probe, "provider_marker": provider_marker,
-            "artifacts": list(artifacts), "runs": list(runs),
-            "dependencies": list(dependencies),
-            "verification": verification, "capability": capability,
-        })
-        return self
-
-    def close(self) -> Dict[str, Any]:
-        if self.objective is None:
-            raise SessionError("close() before begin()")
-        if self._closed:
-            raise SessionError("close() called twice: refusing double-emit")
-        self._closed = True
-        if not self._demonstrations:
-            return {"status": "rejected", "reason": "no_observable_gap",
-                    "detail": "no external demonstration recorded: gapless "
-                              "session emits zero deltas",
-                    "session_id": self.session_id}
-        for demo in self._demonstrations:
-            verdict, reason, detail = _adjudicate_demonstration(
-                demo, self.session_id)
-            if verdict != "accept":
-                return {"status": "rejected", "reason": reason,
-                        "detail": detail, "session_id": self.session_id,
-                        "technique": demo.get("technique")}
-        observation_ids = []
-        for demo in self._demonstrations:
-            delta = {
-                "objective_x": self.objective,
-                "external_demo_y": demo["y"],
-                "native_inventory_z": demo["z"],
-                "capability_gap": demo["gap"],
-                "technique_t": {"name": demo["technique"],
-                                "probe": demo["probe"]},
-                "evidence_e": list(demo["artifacts"]) + [
-                    {"kind": "run", "cmd": r["cmd"],
-                     "output_includes": r["output_includes"]}
-                    for r in demo["runs"]],
-                "dependencies_d": list(demo["dependencies"]),
-                "verification_v": demo["verification"],
-                "resulting_capability_c": demo["capability"],
-            }
-            # validate_delta is enforced again inside emit_delta; the
-            # explicit call here names the refusing step in the detail.
-            errors = validate_delta(delta)
-            if errors:
-                raise DeltaRefused("; ".join(errors))
-            oid = emit_delta(self.epistemic, self.session_id, delta,
-                             provider_marker=demo["provider_marker"])
-            observation_ids.append(oid)
-        return {"status": "emitted", "observation_ids": observation_ids,
-                "deltas": len(observation_ids),
-                "session_id": self.session_id}
-
-
-def read_session_deltas(epistemic: Any, session_id: str
-                        ) -> List[Dict[str, Any]]:
-    """Read back the technique deltas one session emitted, through the
-    unified read path (the dispatch loop's facade)."""
-    from runtime.intellect.unified_memory import read_experiences
-    recs = read_experiences(epistemic, origin_loop="acquisition",
-                            kind="technique_delta", limit=1000)
-    return [r for r in recs
-            if (r.get("raw") or {}).get("session_id") == session_id]
 
 
 # ---------------------------------------------------------------------------
