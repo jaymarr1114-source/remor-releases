@@ -15,7 +15,7 @@ WT = "/home/hatch/workspace/worktrees/delta-name-1"
 
 # --- load OLD ingest.py from git HEAD -------------------------------------
 old_src = subprocess.run(
-    ["git", "-C", WT, "show", "HEAD:runtime/acquisition/ingest.py"],
+    ["git", "-C", WT, "show", "HEAD~1:runtime/acquisition/ingest.py"],
     capture_output=True, text=True, check=True).stdout
 old_mod = types.ModuleType("old_ingest")
 old_mod.__name__ = "old_ingest"
