@@ -50,11 +50,24 @@ class CognitionLoop:
     def __init__(self, engine: Any, *, evidence_store: Any = None,
                  cycle_budget_s: float = DEFAULT_CYCLE_BUDGET_S) -> None:
         self.engine = engine
-        self.epistemic = engine.intellect.epistemic
+        # EVIDENCE-WIRE-1: epistemic resolves lazily so the loop can be
+        # constructed at boot with a lazy engine proxy without forcing
+        # engine construction on the serving thread (thread-affinity).
+        self._epistemic = None
         self.evidence_store = evidence_store
         self.cycle_budget_s = float(cycle_budget_s)
         self._distill_loop = None  # lazy: DistillationLoop(engine, epistemic)
         self._registry = None   # lazy: primitive registry for inventory
+
+    @property
+    def epistemic(self) -> Any:
+        if self._epistemic is None:
+            self._epistemic = self.engine.intellect.epistemic
+        return self._epistemic
+
+    @epistemic.setter
+    def epistemic(self, value: Any) -> None:
+        self._epistemic = value
 
     # ------------------------------------------------------------------
     # Production ingestion inlet: attempt_z IS the live Z-check here

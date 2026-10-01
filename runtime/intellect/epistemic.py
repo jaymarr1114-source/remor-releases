@@ -29,6 +29,16 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 
+class QuarantinedSubstrateRefused(Exception):
+    """Raised when code attempts to consume an unverified (quarantined)
+    observation or hypothesis as factual substrate.
+
+    Quarantine is structural: unverified entries are visible and labeled
+    but can never flow through the substrate path. The refusal names the
+    entry and the reason — it is never a silent skip.
+    """
+
+
 class HypothesisState(Enum):
     PROPOSED = "proposed"
     UNDER_TEST = "under_test"
@@ -51,10 +61,18 @@ class Observation:
     source: str
     raw: Dict[str, Any] = field(default_factory=dict)
     at: float = field(default_factory=time.time)
+    # Verification status (EVIDENCE-WIRE-1): verified observations are
+    # usable substrate; unverified ones are quarantined — visible and
+    # labeled, but never consumable as fact until verified.
+    verified: bool = False
+    verified_by: Optional[str] = None
+    verified_at: Optional[float] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {"observation_id": self.observation_id, "content": self.content,
-                "source": self.source, "raw": self.raw, "at": self.at}
+                "source": self.source, "raw": self.raw, "at": self.at,
+                "verified": self.verified, "verified_by": self.verified_by,
+                "verified_at": self.verified_at}
 
 
 @dataclass
@@ -85,6 +103,11 @@ class Hypothesis:
     provenance: Dict[str, Any] = field(default_factory=dict)
     state: HypothesisState = HypothesisState.PROPOSED
     created_at: float = field(default_factory=time.time)
+    # Verification status (EVIDENCE-WIRE-1): same quarantine semantics
+    # as Observation — verified hypotheses are usable substrate.
+    verified: bool = False
+    verified_by: Optional[str] = None
+    verified_at: Optional[float] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {"hypothesis_id": self.hypothesis_id, "question_id": self.question_id,
@@ -93,7 +116,9 @@ class Hypothesis:
                 "contradicting_evidence": self.contradicting_evidence,
                 "confidence": self.confidence, "competing_with": self.competing_with,
                 "provenance": self.provenance, "state": self.state.value,
-                "created_at": self.created_at}
+                "created_at": self.created_at,
+                "verified": self.verified, "verified_by": self.verified_by,
+                "verified_at": self.verified_at}
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Hypothesis":
@@ -218,6 +243,63 @@ class EpistemicStore:
                 "SELECT data FROM hypotheses WHERE hypothesis_id=?",
                 (hypothesis_id,)).fetchone()
         return Hypothesis.from_dict(json.loads(row["data"])) if row else None
+
+    def get_observation(self, observation_id: str) -> Optional[Observation]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT data FROM observations WHERE observation_id=?",
+                (observation_id,)).fetchone()
+        return Observation(**json.loads(row["data"])) if row else None
+
+    # -- verification & quarantine (EVIDENCE-WIRE-1) -----------------------
+    def verify_observation(self, observation_id: str,
+                           verified_by: str) -> Observation:
+        """Mark an observation verified. The verifier is named (a gate, a
+        loop, or James) — verification is an attested act, not a flag flip."""
+        obs = self.get_observation(observation_id)
+        if obs is None:
+            raise KeyError(f"observation {observation_id!r} not found")
+        obs.verified = True
+        obs.verified_by = verified_by
+        obs.verified_at = time.time()
+        return self.save_observation(obs)
+
+    def verify_hypothesis(self, hypothesis_id: str,
+                          verified_by: str) -> Hypothesis:
+        hyp = self.get_hypothesis(hypothesis_id)
+        if hyp is None:
+            raise KeyError(f"hypothesis {hypothesis_id!r} not found")
+        hyp.verified = True
+        hyp.verified_by = verified_by
+        hyp.verified_at = time.time()
+        return self.save_hypothesis(hyp)
+
+    def substrate_observation(self, observation_id: str) -> Observation:
+        """The ONLY path by which an observation may be consumed as factual
+        substrate. Returns the observation iff verified; raises
+        QuarantinedSubstrateRefused otherwise. Display paths
+        (all_observations, the GUI) bypass this gate deliberately — they
+        show quarantined entries labeled, never as fact."""
+        obs = self.get_observation(observation_id)
+        if obs is None:
+            raise KeyError(f"observation {observation_id!r} not found")
+        if not obs.verified:
+            raise QuarantinedSubstrateRefused(
+                f"QUARANTINED_SUBSTRATE_REFUSED: observation {observation_id!r} "
+                f"is unverified (source: {obs.source}); quarantined entries "
+                f"cannot be consumed as factual substrate. Verify it first.")
+        return obs
+
+    def substrate_hypothesis(self, hypothesis_id: str) -> Hypothesis:
+        hyp = self.get_hypothesis(hypothesis_id)
+        if hyp is None:
+            raise KeyError(f"hypothesis {hypothesis_id!r} not found")
+        if not hyp.verified:
+            raise QuarantinedSubstrateRefused(
+                f"QUARANTINED_SUBSTRATE_REFUSED: hypothesis {hypothesis_id!r} "
+                f"is unverified; quarantined entries cannot be consumed as "
+                f"factual substrate. Verify it first.")
+        return hyp
 
     def hypotheses_for(self, question_id: str) -> List[Hypothesis]:
         with self._conn() as conn:
