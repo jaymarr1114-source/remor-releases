@@ -55,5 +55,10 @@
             android:name=".ConsentActivity"
             android:exported="false" />
 
+        <!-- RD-EASYPAIR-1: tap-to-pair consent screen. -->
+        <activity
+            android:name=".PairConsentActivity"
+            android:exported="false" />
+
     </application>
 </manifest>

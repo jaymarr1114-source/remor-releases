@@ -49,6 +49,7 @@ public class MainActivity extends Activity {
     private EditText listenerPortField;
     private TextView fingerprintView;
     private TextView listenerStatusView;
+    private TextView pairStatusView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -166,6 +167,12 @@ public class MainActivity extends Activity {
         listenerStatusView = new TextView(this);
         listenerStatusView.setPadding(0, pad / 2, 0, pad / 2);
         layout.addView(listenerStatusView);
+
+        // RD-EASYPAIR-1: tap-to-pair status line.
+        pairStatusView = new TextView(this);
+        pairStatusView.setPadding(0, 0, 0, pad / 2);
+        layout.addView(pairStatusView);
+        refreshPairStatus();
 
         fingerprintView = new TextView(this);
         fingerprintView.setPadding(0, 0, 0, pad / 2);
@@ -336,6 +343,28 @@ public class MainActivity extends Activity {
         return f;
     }
 
+    /** RD-EASYPAIR-1: honest tap-to-pair status line. */
+    private void refreshPairStatus() {
+        if (pairStatusView == null) {
+            return;
+        }
+        boolean paired =
+                new TargetApiClient(this).configured();
+        boolean listening = RemoteListener.isRunning();
+        StringBuilder sb = new StringBuilder("Tap-to-pair: ");
+        if (listening) {
+            sb.append("broadcasting on this Wi-Fi -- open Dispatch on"
+                    + " your phone and tap this tablet.");
+        } else {
+            sb.append("start the listener to broadcast for nearby phones.");
+        }
+        if (paired) {
+            sb.append(" (Currently paired with "
+                    + new TargetApiClient(this).controllerUrl() + ".)");
+        }
+        pairStatusView.setText(sb.toString());
+    }
+
     /** Announce this target's endpoint to the configured controller. */
     private void onAnnounce() {
         TargetApiClient api = new TargetApiClient(this);
@@ -424,6 +453,7 @@ public class MainActivity extends Activity {
     }
 
     private void refreshStatus() {
+        refreshPairStatus();
         boolean a11y = isAccessibilityEnabled();
         boolean overlay = Build.VERSION.SDK_INT < 23
                 || Settings.canDrawOverlays(this);
