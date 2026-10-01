@@ -5,7 +5,10 @@ Replaces the PLUGIN_REGISTRY_ABSENT unavailability with working machinery:
   * registry.py — disk-persisted plugin registry (register/list/get/remove)
   * protocol.py  — the versioned bot protocol + hash-pinned manifest validation
   * loader.py    — loading with re-verified hashes (no unsigned code, ever)
-  * sandbox.py   — sandboxed execution reusing services.sandbox.SandboxContext
+  * sandbox.py   — sandboxed execution reusing services.sandbox.SandboxContext,
+                   plus a real jail: fresh mount/network namespaces and
+                   pivot_root into the per-run dir (PLUGIN-FIX-1); a
+                   plugin never runs uncontained
   * service.py   — PluginService: the orchestration behind POST /api/execute/plugin
   * errors.py    — typed honest error codes
 

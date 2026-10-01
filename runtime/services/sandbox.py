@@ -221,8 +221,15 @@ class SandboxContext:
         if self.drop is not None:
             os.chmod(path, 0o644)
 
-    def make_preexec(self) -> Callable[[], None]:
-        """Build the preexec_fn: rlimits first, then the uid drop."""
+    def make_preexec(self, between_hook: Optional[Callable[[], None]] = None
+                     ) -> Callable[[], None]:
+        """Build the preexec_fn: rlimits first, then the uid drop.
+
+        between_hook (optional) runs in the child after rlimits are
+        applied and before the uid drop. The plugin substrate uses it
+        to establish mount/network/user namespaces + pivot_root; the
+        default None leaves the execute path's behavior unchanged.
+        """
         limits = self.limits
         drop = self.drop
 
@@ -240,6 +247,8 @@ class SandboxContext:
                 _resource.setrlimit(
                     _resource.RLIMIT_NPROC,
                     (limits.nproc, limits.nproc))
+            if between_hook is not None:
+                between_hook()
             if drop is not None:
                 _, uid, gid = drop
                 try:

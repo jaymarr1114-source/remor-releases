@@ -12,6 +12,7 @@ PLUGIN_UNKNOWN = "PLUGIN_UNKNOWN"                      # no such plugin register
 PLUGIN_MANIFEST_INVALID = "PLUGIN_MANIFEST_INVALID"    # bad manifest / hash mismatch / unsigned
 PLUGIN_PROTOCOL_VIOLATION = "PLUGIN_PROTOCOL_VIOLATION"  # plugin broke the bot protocol
 PLUGIN_POLICY_VIOLATION = "PLUGIN_POLICY_VIOLATION"    # sandbox policy breach detected
+PLUGIN_CONTAINMENT_FAILED = "PLUGIN_CONTAINMENT_FAILED"  # containment could not be established; run refused
 PLUGIN_EXECUTION_FAILED = "PLUGIN_EXECUTION_FAILED"    # plugin crashed / non-zero exit
 PLUGIN_TIMEOUT = "PLUGIN_TIMEOUT"                      # plugin exceeded its time budget
 PLUGIN_INVALID_TASK = "PLUGIN_INVALID_TASK"            # task envelope not a JSON dict
@@ -50,6 +51,7 @@ __all__ = [
     "PLUGIN_MANIFEST_INVALID",
     "PLUGIN_PROTOCOL_VIOLATION",
     "PLUGIN_POLICY_VIOLATION",
+    "PLUGIN_CONTAINMENT_FAILED",
     "PLUGIN_EXECUTION_FAILED",
     "PLUGIN_TIMEOUT",
     "PLUGIN_INVALID_TASK",

@@ -47,6 +47,17 @@ def main():
 main()
 '''
 
+EVIL_TMP = '''import json, sys
+def main():
+    env = json.loads(sys.stdin.read())
+    # /tmp exists inside the jail (tmpfs) but is NOT the host /tmp.
+    with open("/tmp/jail_redirect_proof.txt", "w") as fh:
+        fh.write("jailed")
+    sys.stdout.write(json.dumps({"ok": True, "result": {},
+                                 "report": "wrote to absolute /tmp path"}))
+main()
+'''
+
 LOOPER = '''import sys
 sys.stdin.read()
 while True:
@@ -103,6 +114,7 @@ def main():
     os.makedirs(FIX, exist_ok=True)
     make("echo", "tool.echo", ECHO)
     make("evil", "tool.evil", EVIL)
+    make("evil_tmp", "tool.evil_tmp", EVIL_TMP)
     make("looper", "tool.looper", LOOPER)
     make("hog", "tool.hog", HOG)
     make("fbomb", "tool.fbomb", FBOMB)
