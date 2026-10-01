@@ -28,15 +28,18 @@ Honest absences (classified, not simulated):
   HONESTLY-UNAVAILABLE. The template's contracts dict is reported verbatim
   (including resource_requirements where genuinely present); numbers are
   never invented.
-* The llm template is a blueprint only: AgentFactory._default_substrate
-  raises SubstrateUnavailable for substrate_kind "llm", and register_agent
-  surfaces that as an unavailable payload rather than faking an instance.
+* The llm template instantiates only when the service is constructed with
+  llm wiring (build_llm_wiring): without it, AgentFactory raises
+  SubstrateUnavailable and register_agent surfaces that as an unavailable
+  payload rather than faking an instance.
 """
 from __future__ import annotations
 
+import glob
 import os
 import queue
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from swarm_engine.agent_org.exceptions import LifecycleError
@@ -44,12 +47,28 @@ from swarm_engine.agent_org.factory import AgentFactory
 from swarm_engine.agent_org.identity import AgentRecord
 from swarm_engine.agent_org.registry import AgentRegistry, TERMINAL
 from swarm_engine.agent_org.store import OrgStore
-from swarm_engine.agent_org.substrates import SubstrateUnavailable
+from swarm_engine.agent_org.substrates import (
+    LLMSubstrateWiring,
+    SubstrateUnavailable,
+)
 from swarm_engine.agent_org.templates import (
     AgentTemplate,
     TemplateRegistry,
     seed_templates,
 )
+from swarm_engine.core.microcontroller.granted_cognition import (
+    GrantedCognitionProvider,
+    NativeRefusal,
+)
+from swarm_engine.core.microcontroller.qwen3_teacher import (
+    QWEN3_GGUF_SHA256,
+    Qwen3Teacher,
+)
+from swarm_engine.core.microcontroller.substrate import (
+    CognitionProvider,
+    MicrocontrollerSubstrate,
+)
+from swarm_engine.curiosity.frm.grant import FrmGrant, LendingRecord
 from swarm_engine.governance.oracle_binding import OracleRegistry
 from swarm_engine.services.contract_types import (
     contract_limit,
@@ -131,13 +150,130 @@ def _template_to_dict(tpl: AgentTemplate, instantiable: bool) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------
+# llm wiring: the model in the path (LLM-SUBSTRATE-1)
+# ---------------------------------------------------------------------
+
+#: Default Qwen3 weight locations (acquired by QWEN3-ACQUIRE-1; override
+#: with REMOR_QWEN3_GGUF / REMOR_LLAMA_CLI or explicit arguments).
+_DEFAULT_GGUF_GLOB = os.path.expanduser(
+    "~/workspace/models/qwen3-8b/*.gguf")
+_DEFAULT_LLAMA_CLI = os.path.expanduser(
+    "~/workspace/tools/llama.cpp-b11284/llama-b11284/llama-cli")
+
+
+class _AgentOrgRefusingNative(CognitionProvider):
+    """agent-org has no native reasoning tier: every cognition call is a
+    named native refusal, which unlocks the provider's borrow path. This
+    preserves NATIVE FIRST architecturally (native tried, named refusal)
+    while being honest that the native tier does not exist here."""
+
+    def request_cognition(self, *, mc_id, prompt, context):
+        raise NativeRefusal(
+            "agent_org:no_native_reasoning_tier",
+            "agent-org has no native reasoning tier; llm substrate "
+            "cognition always borrows")
+
+
+def _resolve_gguf(gguf_path: Optional[str]) -> str:
+    if gguf_path:
+        cand = gguf_path
+    else:
+        cand = os.environ.get("REMOR_QWEN3_GGUF") or ""
+        if not cand:
+            hits = sorted(glob.glob(_DEFAULT_GGUF_GLOB))
+            if not hits:
+                raise FileNotFoundError(
+                    "no Qwen3 GGUF found under ~/workspace/models/qwen3-8b/: "
+                    "QWEN3-ACQUIRE-1 acquisition missing?")
+            cand = hits[0]
+    if not os.path.isfile(cand):
+        raise FileNotFoundError(f"Qwen3 GGUF not found: {cand}")
+    if QWEN3_GGUF_SHA256[:16] not in os.path.basename(cand):
+        raise ValueError(
+            f"Qwen3 GGUF filename does not carry the pinned sha prefix "
+            f"{QWEN3_GGUF_SHA256[:16]}: {cand} (weight swap?)")
+    return cand
+
+
+def _resolve_llama_cli(llama_cli: Optional[str]) -> str:
+    cand = (llama_cli or os.environ.get("REMOR_LLAMA_CLI")
+            or _DEFAULT_LLAMA_CLI)
+    if not os.path.isfile(cand) or not os.access(cand, os.X_OK):
+        raise FileNotFoundError(
+            f"llama-cli not found/executable: {cand}")
+    return cand
+
+
+def build_llm_wiring(
+        *, gguf_path: Optional[str] = None,
+        llama_cli: Optional[str] = None,
+        threads: int = 2, context_size: int = 512,
+        max_new_tokens: int = 64, timeout_s: float = 600.0,
+        grant_margin_s: float = 120.0) -> LLMSubstrateWiring:
+    """Build the llm substrate wiring: real provider + real grant issuer.
+
+    The GrantedCognitionProvider is consumed through its frozen
+    interface (never modified). The grant issuer mints a real FrmGrant
+    per run, budgeted at the teacher's cost estimate plus margin --
+    the explicit U-6 seam (the caller requests and receives the grant).
+    Bound (disclosed): grants are issued by this wiring's issuer, not
+    by the FRM epoch loop; FRM-epoch integration is future work.
+
+    Raises FileNotFoundError when the Qwen3 weights or llama-cli are
+    absent -- wiring is honest about missing substrate.
+    """
+    gguf = _resolve_gguf(gguf_path)
+    cli = _resolve_llama_cli(llama_cli)
+    teacher = Qwen3Teacher(
+        gguf_path=gguf, llama_cli=cli, threads=threads,
+        context_size=context_size, max_new_tokens=max_new_tokens,
+        timeout_s=timeout_s)
+    mc_sub = MicrocontrollerSubstrate()
+    mc_sub.register_loop("run", budget_s=7200.0)
+    spawned = mc_sub.spawn("run", purpose="agent-org-llm",
+                           budget_s=3600.0)
+    if not spawned.ok:
+        raise RuntimeError(
+            f"could not spawn charge mc for llm wiring: "
+            f"{spawned.refusal}")
+    provider = GrantedCognitionProvider(
+        substrate=mc_sub, native=_AgentOrgRefusingNative(),
+        teacher=teacher)
+
+    def _issue_grant(estimated_cost_s: float) -> FrmGrant:
+        now = time.time()
+        return FrmGrant.issue(
+            domain="agent_org",
+            epoch_id=int(now),
+            epoch_s=3600.0,
+            budget_s=float(estimated_cost_s) + grant_margin_s,
+            max_concurrent=1,
+            primary_minimum_budget_s=0.0,
+            primary_minimum_concurrent=0,
+            lent=False,
+            lending=LendingRecord(0.0, 0),
+            enforcement_state_at_issue="RUNNING",
+            issued_at=now,
+            note="agent-org llm substrate: per-run borrow grant")
+
+    return LLMSubstrateWiring(
+        provider=provider, grant_issuer=_issue_grant,
+        mc_id=spawned.mc.mc_id)
+
+
 class AgentService:
     """GUI-facing agents contract over real agent-org machinery."""
 
     def __init__(self, base_dir: str,
-                 max_agents: int = MAX_AGENTS_FREE) -> None:
+                 max_agents: int = MAX_AGENTS_FREE,
+                 llm_wiring: Optional[LLMSubstrateWiring] = None) -> None:
         self.base_dir = base_dir
         self.max_agents = max_agents
+        # None -> llm templates honestly uninstantiable (pre-wiring
+        # behavior). Provided -> substrate_kind 'llm' instantiates
+        # through the governed provider.
+        self._llm_wiring = llm_wiring
         os.makedirs(base_dir, exist_ok=True)
         # Serializes logical operations (check-and-register atomicity)
         # across caller threads.
@@ -155,7 +291,8 @@ class AgentService:
         seed_templates(self.templates)  # idempotent
         self.registry = AgentRegistry(
             store, oregistry, engine, os.path.join(self.base_dir, "agents"))
-        self.factory = AgentFactory(self.registry, self.templates)
+        self.factory = AgentFactory(
+            self.registry, self.templates, llm_wiring=self._llm_wiring)
 
     def _dbcall(self, fn: Callable[[], T]) -> T:
         """Run fn on the DB thread. Call with self._lock held."""
@@ -193,17 +330,19 @@ class AgentService:
     def list_templates(self) -> Dict[str, Any]:
         """Blueprints genuinely registered. substrate_kind is reported
         honestly: these are agent blueprints, not LLM model identities.
-        `instantiable` is False for llm-kind templates because no
-        instantiable LLM substrate exists in this build (the factory raises
-        SubstrateUnavailable rather than simulating one)."""
+        `instantiable` is False for llm-kind templates unless the service
+        was constructed with llm wiring (then the llm substrate is real,
+        via the governed provider)."""
         with self._lock:
             tpls = self._dbcall(lambda: self.templates.list())
             fams = sorted({t.family for t in tpls})
             kinds = sorted({t.substrate_kind for t in tpls})
+            wired = self._llm_wiring is not None
             return {
                 "ok": True,
                 "templates": [
-                    _template_to_dict(t, t.substrate_kind != "llm")
+                    _template_to_dict(
+                        t, (t.substrate_kind != "llm") or wired)
                     for t in tpls
                 ],
                 "families": fams,          # the types that genuinely exist
