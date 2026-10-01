@@ -17,10 +17,15 @@ sys.path.insert(0, _CANONICAL)
 sys.path.insert(0, os.path.join(_CANONICAL, "pylib"))
 
 from runtime.intellect.unified_memory import (  # noqa: E402
-    UnifiedMemory,
     ZCheckResult,
     attempt_z,
     evidence_from_demo_actions,
+    prior_attempts,
+    query_memory,
+    similar_experiences,
+    trace_capability,
+    trace_delta,
+    z_check_with_experience,
 )
 from runtime.intellect.epistemic import EpistemicStore  # noqa: E402
 from runtime.synthesis.capability_store import (  # noqa: E402
@@ -122,7 +127,12 @@ class ZCheckTests(unittest.TestCase):
         self.assertEqual(pairs, [({"a": 1}, 2)])
 
 
-class UnifiedMemoryTests(unittest.TestCase):
+class QueryHelperTests(unittest.TestCase):
+    """Tests for the cross-store query helpers (MEMORY-UNIFY-1).
+
+    These were methods on the un-adopted UnifiedMemory class; they are now
+    plain module functions. The tests exercise them through real stores.
+    """
     @classmethod
     def setUpClass(cls):
         cls.registry = build_registry()
@@ -151,12 +161,11 @@ class UnifiedMemoryTests(unittest.TestCase):
                                plan=plan, ops=["text.summarize"],
                                effects=["pure"])
         caps.store(rec)
-        um = UnifiedMemory(ep, caps, self.registry, self.planner)
-        return um, res.delta_id, rec.capability_id
+        return ep, caps, res.delta_id, rec.capability_id
 
     def test_query_reaches_all_three_stores(self):
-        um, _delta_id, _cap_id = self._seeded()
-        ans = um.query("quarterly revenue summary")
+        ep, caps, _delta_id, _cap_id = self._seeded()
+        ans = query_memory(ep, caps, self.registry, "quarterly revenue summary")
         kinds = {h["kind"] for h in (ans.epistemic_hits
                                      + ans.capability_hits
                                      + ans.primitive_hits)}
@@ -166,29 +175,34 @@ class UnifiedMemoryTests(unittest.TestCase):
         self.assertGreaterEqual(len(ans.primitive_hits), 1)
 
     def test_trace_delta_finds_ingested_delta(self):
-        um, delta_id, _cap_id = self._seeded()
-        tr = um.trace_delta(delta_id)
+        ep, caps, delta_id, _cap_id = self._seeded()
+        tr = trace_delta(ep, delta_id)
         self.assertIsNotNone(tr["delta"])
         self.assertEqual(tr["delta"]["source"], "technique_delta")
 
     def test_trace_capability_finds_record(self):
-        um, _delta_id, cap_id = self._seeded()
-        tr = um.trace_capability(cap_id)
+        ep, caps, _delta_id, cap_id = self._seeded()
+        tr = trace_capability(ep, caps, cap_id)
         self.assertIsNotNone(tr["record"])
         self.assertEqual(tr["record"]["name"], "revenue_summary")
 
     def test_attempt_history_informs_next_attempt(self):
         ep, caps = _stores()
-        um = UnifiedMemory(ep, caps, self.registry, self.planner)
-        first = um.z_check("double each number in the list",
-                           evidence=DBL_EVIDENCE)
+        first = z_check_with_experience("double each number in the list",
+                                        evidence=DBL_EVIDENCE,
+                                        epistemic=ep,
+                                        registry=self.registry,
+                                        planner=self.planner)
         self.assertEqual(len(first.detail.get("prior_attempts", [])), 0)
-        second = um.z_check("double each number in the list",
-                            evidence=DBL_EVIDENCE)
+        second = z_check_with_experience("double each number in the list",
+                                         evidence=DBL_EVIDENCE,
+                                         epistemic=ep,
+                                         registry=self.registry,
+                                         planner=self.planner)
         priors = second.detail.get("prior_attempts", [])
         self.assertGreaterEqual(len(priors), 1)
-        self.assertGreaterEqual(len(um.prior_attempts(
-            "double each number in the list")), 2)
+        self.assertGreaterEqual(len(prior_attempts(
+            ep, "double each number in the list")), 2)
 
 
     def test_distillation_experience_influences_later_decision(self):
@@ -198,7 +212,6 @@ class UnifiedMemoryTests(unittest.TestCase):
             record_distillation_experience,
         )
         ep, caps = _stores()
-        um = UnifiedMemory(ep, caps, self.registry, self.planner)
         record_distillation_experience(
             ep, objective="double each number in the list",
             delta_id="delta_dbl_001", Y={"action": "map x -> 2*x"},
@@ -208,8 +221,11 @@ class UnifiedMemoryTests(unittest.TestCase):
             D=[], V={"status": "verified", "held_out": True},
             C="cap_doubler_001")
         # A neighboring objective -- not the exact same string.
-        res = um.z_check("double the numbers in the collection",
-                         evidence=[({"values": [5]}, [10])])
+        res = z_check_with_experience("double the numbers in the collection",
+                                      evidence=[({"values": [5]}, [10])],
+                                      epistemic=ep,
+                                      registry=self.registry,
+                                      planner=self.planner)
         exps = res.detail.get("prior_experiences", [])
         self.assertGreaterEqual(len(exps), 1)
         self.assertEqual(exps[0]["delta_id"], "delta_dbl_001")
@@ -217,9 +233,11 @@ class UnifiedMemoryTests(unittest.TestCase):
 
     def test_no_experience_no_influence(self):
         ep, caps = _stores()
-        um = UnifiedMemory(ep, caps, self.registry, self.planner)
-        res = um.z_check("double each number in the list",
-                         evidence=DBL_EVIDENCE)
+        res = z_check_with_experience("double each number in the list",
+                                      evidence=DBL_EVIDENCE,
+                                      epistemic=ep,
+                                      registry=self.registry,
+                                      planner=self.planner)
         self.assertEqual(res.detail.get("prior_experiences", []), [])
 
 class ZCheckIngestionIntegrationTests(unittest.TestCase):

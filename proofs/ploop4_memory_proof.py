@@ -279,18 +279,19 @@ def _d1():
     assert exps[0].provenance == {}, "legacy row should get empty provenance"
 
 
-@check("B5 UnifiedMemory method attachments route through the facade")
+@check("B5 module-level write path functions are directly callable")
 def _b5():
-    mem = um.UnifiedMemory(store, capabilities=None, registry=None)
+    # MEMORY-UNIFY-1: the UnifiedMemory class is gone. The write path is
+    # module-level functions; this check verifies they are directly callable.
     ev = Evidence(evidence_id="ev_ploop4_m", target_id="hyp_ploop4",
                   supports=True, content={}, source="ploop4-proof")
-    mem.record_evidence("intellect", "ploop4_method", ev)
+    um.record_evidence(store, "intellect", "ploop4_method", ev)
     hyp = Hypothesis(hypothesis_id="hyp_ploop4_m", question_id="q_ploop4",
                      statement="method attachment probe")
-    mem.record_hypothesis("intellect", "ploop4_method", hyp)
+    um.record_hypothesis(store, "intellect", "ploop4_method", hyp)
     exp = Experiment(experiment_id="exp_ploop4_m", question_id="q_ploop4",
                      hypothesis_ids=[], design={})
-    mem.record_experiment("intellect", "ploop4_method", exp)
+    um.record_experiment(store, "intellect", "ploop4_method", exp)
     assert any(e.evidence_id == "ev_ploop4_m"
                for e in store.evidence_for("hyp_ploop4"))
     assert store.get_hypothesis("hyp_ploop4_m") is not None
