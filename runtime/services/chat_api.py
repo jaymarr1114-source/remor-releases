@@ -52,21 +52,20 @@ DEEP_GRANT_MARGIN_S = 120.0
 GRANT_DOMAIN = "chat"
 
 
+from swarm_engine.services.enforcement_core import (
+    make_enforcement_reader as _make_enforcement_reader)
+
+
 def _read_enforcement_state(state_dir: Optional[str]) -> str:
-    """Real enforcement state: the store's record, or RUNNING when the
-    authority has no record (its own bootstrap semantic)."""
-    if not state_dir:
-        return "RUNNING"
-    try:
-        from swarm_engine.governance.curiosity_enforcement.read_api import (
-            read_state)
-    except Exception:
-        return "RUNNING"
-    rec = read_state(state_dir)
-    if rec is None:
-        return "RUNNING"
-    state = rec.state.value if hasattr(rec.state, "value") else rec.state
-    return str(state)
+    """Real enforcement state — delegates to the shared core.
+
+    STUDENT-ENFORCE-1: one enforcement core for both paths. This is a
+    thin wrapper preserving the local name; the logic lives in
+    enforcement_core.read_enforcement_state.
+    """
+    from swarm_engine.services.enforcement_core import (
+        read_enforcement_state)
+    return read_enforcement_state(state_dir)
 
 
 def _entry_to_wiring(entry: Any) -> Any:
@@ -141,11 +140,9 @@ class ChatService:
             self._student_substrate, self._student_mc_id, clock=clock)
 
         # -- enforcement state: real store, overridable ------------------
-        if enforcement_state is not None:
-            self._enforcement_state = enforcement_state
-        else:
-            self._enforcement_state = lambda: _read_enforcement_state(
-                enforcement_state_dir)
+        # STUDENT-ENFORCE-1: shared enforcement core.
+        self._enforcement_state = _make_enforcement_reader(
+            enforcement_state_dir, override=enforcement_state)
 
         self._router = AutoRouter(
             self._student, self._llm.provider,
