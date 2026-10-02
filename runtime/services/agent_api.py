@@ -242,19 +242,13 @@ def build_llm_wiring(
         teacher=teacher)
 
     def _issue_grant(estimated_cost_s: float) -> FrmGrant:
-        now = time.time()
-        return FrmGrant.issue(
+        # Single shared issuance path (frm/grant.issue_run_grant): same
+        # domain, margin, and epoch shape as before the refactor.
+        from swarm_engine.curiosity.frm.grant import issue_run_grant
+        return issue_run_grant(
             domain="agent_org",
-            epoch_id=int(now),
-            epoch_s=3600.0,
-            budget_s=float(estimated_cost_s) + grant_margin_s,
-            max_concurrent=1,
-            primary_minimum_budget_s=0.0,
-            primary_minimum_concurrent=0,
-            lent=False,
-            lending=LendingRecord(0.0, 0),
-            enforcement_state_at_issue="RUNNING",
-            issued_at=now,
+            estimated_cost_s=estimated_cost_s,
+            margin_s=grant_margin_s,
             note="agent-org llm substrate: per-run borrow grant")
 
     return LLMSubstrateWiring(

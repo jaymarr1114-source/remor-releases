@@ -195,6 +195,10 @@ class AutoRouter:
                 "provenance": fast["provenance"],
                 "charged_s": fast["charged_s"],
                 "wall_s": fast["wall_s"],
+                # Budget-pool observability propagates: the inlet needs
+                # to see exhaustion, not just the charge amount.
+                "mc_exhausted": fast.get("mc_exhausted"),
+                "mc_charge_state": fast.get("mc_charge_state"),
             })
             # Anti-masquerade: the label is in the served text itself.
             fast_out["served_text"] = (
