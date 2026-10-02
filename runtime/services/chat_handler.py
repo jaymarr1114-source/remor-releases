@@ -212,8 +212,8 @@ def answer(text: Any, services: Optional[Dict[str, Any]],
     if kind == "name":
         return _answer_name()
     if kind == "chit_chat":
-        return _answer_chitchat(lowered)
-    return _answer_fallback()
+        return _escalate_or_chitchat(lowered, text, services)
+    return _escalate_or_fallback(text, services)
 
 
 def _classify(lowered: str) -> Tuple[str, Optional[re.Match]]:
@@ -635,6 +635,84 @@ def _answer_fallback() -> Dict[str, Any]:
                     "runs ('what have you been doing', 'status of run "
                     "<id>'), hosted documents ('what does theory.md say'), "
                     "and system status ('what is my tier', 'tasks today')."}
+
+
+# ---------------------------------------------------------------------------
+# LLM provider escalation (LLM-SERVE-PATH-1, U-10)
+#
+# When the template path cannot answer (chit_chat / unknown) and a provider
+# registry is present in the services dict, escalate to the default
+# provider under FRM governance. This is the "borrow after named native
+# refusal" pattern: the template handler IS the native tier, and its
+# inability to answer is the named refusal ("no_template_for_kind").
+#
+# The escalation never changes the honest fallback: no registry, no
+# default provider, grant failure, or provider failure all fall back to
+# the template "I don't know". A borrowed answer is labeled with its
+# provenance so callers can audit it.
+# ---------------------------------------------------------------------------
+
+#: Conservative cost estimate (seconds) for one chat-turn borrow. The
+#: measured Qwen3-8B completion on the reference host is ~140s; this
+#: covers it with margin. The grant issuer adds its own margin on top.
+_CHAT_BORROW_ESTIMATE_S = 300.0
+
+
+def _try_provider_escalation(text: str,
+                             services: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Attempt a governed borrow for text the template path can't answer.
+
+    Returns the answer dict on success, None when escalation is
+    unavailable or fails (caller falls back to the honest template).
+    """
+    registry = (services or {}).get("llm_providers")
+    if registry is None:
+        return None
+    try:
+        entry = registry.default()
+    except Exception:
+        return None
+    if entry is None:
+        return None
+    try:
+        grant = entry.grant_issuer(_CHAT_BORROW_ESTIMATE_S)
+    except Exception:
+        return None
+    try:
+        res = entry.provider.request_cognition(
+            mc_id=entry.mc_id,
+            prompt=text,
+            context={"frm_grant": grant,
+                     "purpose": "chat",
+                     "target_profile": "serving",
+                     "native_refusal": "no_template_for_kind"})
+    except Exception:
+        return None
+    if not res.ok:
+        return None
+    return {"mode": "answer", "kind": "borrowed",
+            "grounded": {"kind": "borrowed",
+                         "provider": entry.name,
+                         "provenance": res.provenance,
+                         "native_refusal": res.native_refusal},
+            "text": res.text}
+
+
+def _escalate_or_chitchat(lowered: str, text: str,
+                          services: Dict[str, Any]) -> Dict[str, Any]:
+    escalated = _try_provider_escalation(text, services or {})
+    if escalated is not None:
+        return escalated
+    return _answer_chitchat(lowered)
+
+
+def _escalate_or_fallback(text: str,
+                           services: Dict[str, Any]) -> Dict[str, Any]:
+    escalated = _try_provider_escalation(
+        text if isinstance(text, str) else "", services or {})
+    if escalated is not None:
+        return escalated
+    return _answer_fallback()
 
 
 def _unreadable(kind: str, store_name: str, why: str) -> Dict[str, Any]:
