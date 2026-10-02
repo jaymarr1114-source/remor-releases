@@ -48,16 +48,25 @@ class StreamingChatService(ChatService):
         then deeper (if escalation triggered and background completes).
 
         First-token latency is measured from call to first yielded event.
+
+        ARCHITECTURE (fixed 2026-10-02): The provisional MUST yield before
+        any blocking deep work. The old code called self.chat() (blocking)
+        before the first yield, which violated the "fast path never blocked"
+        mandate. The fast path runs the student synchronously (bounded,
+        fast); deep work goes to the background tier without blocking
+        the provisional yield.
         """
         t0 = self._clock()
-        # Fast path: synchronous student turn (never blocked by background).
-        result = self.chat(prompt, think_hard=think_hard)
+        # Fast path: synchronous student turn ONLY (never the deep path).
+        # self.chat() with think_hard=False runs student-only; the deep
+        # tier is handled explicitly below in background.
+        result = self.chat(prompt, think_hard=False)
         first_token_latency_s = self._clock() - t0
 
         served = result.get("served") or {}
-        escalation = result.get("escalation") or {}
 
-        # Provisional: what we have right now.
+        # Provisional yields IMMEDIATELY after fast path — before any
+        # background work is even submitted. This is the streaming guarantee.
         yield {
             "type": "provisional",
             "text": served.get("text", ""),
@@ -65,20 +74,42 @@ class StreamingChatService(ChatService):
             "first_token_latency_s": first_token_latency_s,
         }
 
-        # If escalation triggered, the deep result may already be in
-        # `result` (synchronous path) or we run it in background.
-        deep = result.get("deep") or {}
-        if escalation.get("triggered") and deep.get("attempted"):
-            # The synchronous chat() already ran deep; surface it.
-            deep_text = (deep.get("text")
-                         or served.get("text", ""))
-            yield {
-                "type": "deeper",
-                "text": deep_text,
-                "note": "background deep completion",
-            }
+        # Deep work goes to background tier WITHOUT blocking the yield above.
+        # If think_hard was requested, submit deep work now.
+        if think_hard:
+            # Backpressure: try to acquire a background slot without blocking.
+            if not self._background_sem.acquire(blocking=False):
+                yield {
+                    "type": "final",
+                    "text": served.get("text", ""),
+                    "label": served.get("label", ""),
+                    "note": ("background tier full: deep completion deferred; "
+                             "provisional stands as final"),
+                }
+                return
+            try:
+                deadline = (deadline_s if deadline_s is not None
+                            else self._background_deadline_s)
+                future = self._background.submit(
+                    self._run_deep_background, prompt, think_hard=True)
+                try:
+                    deep_result = future.result(timeout=deadline)
+                    yield {"type": "deeper",
+                           "text": deep_result.get("text", ""),
+                           "label": deep_result.get("label", "")}
+                except FutureTimeout:
+                    future.cancel()
+                    yield {
+                        "type": "final",
+                        "text": served.get("text", ""),
+                        "label": served.get("label", ""),
+                        "note": (f"background deep timed out after {deadline}s; "
+                                 "provisional stands as final"),
+                    }
+            finally:
+                self._background_sem.release()
         else:
-            # No escalation: provisional is final.
+            # No deep requested: provisional is final.
             yield {
                 "type": "final",
                 "text": served.get("text", ""),
@@ -91,58 +122,13 @@ class StreamingChatService(ChatService):
                                ) -> Generator[Dict[str, Any], None, None]:
         """True background deep tier: fast path returns immediately;
         deep work runs in the pool. Demonstrates non-blocking + backpressure.
+
+        DELEGATES to chat_stream (fixed 2026-10-02): the architecture is now
+        unified — provisional yields before any background work, with
+        backpressure and deadline handling.
         """
-        t0 = self._clock()
-        # Fast path first, always.
-        result = self.chat(prompt, think_hard=think_hard)
-        first_token_latency_s = self._clock() - t0
-        served = result.get("served") or {}
-        escalation = result.get("escalation") or {}
-
-        yield {
-            "type": "provisional",
-            "text": served.get("text", ""),
-            "label": served.get("label", ""),
-            "first_token_latency_s": first_token_latency_s,
-            "note": "here's what I have so far",
-        }
-
-        if not escalation.get("triggered"):
-            yield {"type": "final", "text": served.get("text", ""),
-                   "label": served.get("label", "")}
-            return
-
-        # Backpressure: try to acquire a background slot without blocking.
-        if not self._background_sem.acquire(blocking=False):
-            yield {
-                "type": "final",
-                "text": served.get("text", ""),
-                "label": served.get("label", ""),
-                "note": ("background tier full: deep completion deferred; "
-                         "provisional stands as final"),
-            }
-            return
-
-        # Submit deep work to background.
-        deadline = (deadline_s if deadline_s is not None
-                    else self._background_deadline_s)
-        future = self._background.submit(
-            self._run_deep_background, prompt, think_hard)
-        try:
-            deep_result = future.result(timeout=deadline)
-            yield {"type": "deeper", "text": deep_result.get("text", ""),
-                   "label": deep_result.get("label", "")}
-        except FutureTimeout:
-            future.cancel()
-            yield {
-                "type": "final",
-                "text": served.get("text", ""),
-                "label": served.get("label", ""),
-                "note": (f"background deep timed out after {deadline}s; "
-                         "provisional stands as final"),
-            }
-        finally:
-            self._background_sem.release()
+        yield from self.chat_stream(
+            prompt, think_hard=think_hard, deadline_s=deadline_s)
 
     def _run_deep_background(self, prompt: str,
                              think_hard: bool) -> Dict[str, Any]:
