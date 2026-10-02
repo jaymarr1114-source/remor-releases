@@ -146,7 +146,23 @@ class AutoRouter:
     def should_escalate(prompt: str,
                         think_hard: bool = False) -> Tuple[bool, List[str]]:
         """(escalate, reasons). Explicit invocation always escalates;
-        otherwise >=2 heuristic signals are required."""
+        otherwise >=2 heuristic signals are required.
+
+        LEARNED-ESCALATION-1: tries the learned signal first (frozen
+        interface in runtime/services/escalation_signals.py). Falls back
+        to the heuristic when no learned signal is available. The
+        heuristic is the fail-closed fallback, never removed.
+        """
+        # Try learned signal first.
+        try:
+            from swarm_engine.services.escalation_signals import (
+                decide_escalation)
+            escalate, signal, used_learned = decide_escalation(prompt)
+            if used_learned:
+                return escalate, [f"learned:{signal.reason}"]
+        except Exception:
+            pass
+        # Heuristic fallback (original behavior).
         signals = AutoRouter.escalation_signals(prompt)
         if think_hard or "explicit:deep-think-phrase" in signals:
             reasons = ["explicit deep-think invocation"]
