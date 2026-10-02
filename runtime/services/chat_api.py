@@ -69,11 +69,30 @@ def _read_enforcement_state(state_dir: Optional[str]) -> str:
     return str(state)
 
 
+def _entry_to_wiring(entry: Any) -> Any:
+    """Adapt a ProviderEntry to the wiring shape the router expects.
+
+    SERVE-WIRE-1: the router needs (provider, grant_issuer, mc_id).
+    The registry entry already bundles these three — this is a thin
+    namespace adapter, not a second wiring path.
+    """
+    class _Wiring:
+        pass
+    w = _Wiring()
+    w.provider = entry.provider
+    w.grant_issuer = entry.grant_issuer
+    w.mc_id = entry.mc_id
+    # The deep-grant path uses provider.teacher; the entry's provider
+    # is the full CognitionProvider with .teacher.
+    return w
+
+
 class ChatService:
     """The production chat inlet over the hidden execution hierarchy."""
 
     def __init__(self, base_dir: str, *,
                  llm_wiring: Any = None,
+                 provider_registry: Any = None,
                  enforcement_state_dir: Optional[str] = None,
                  enforcement_state: Optional[Callable[[], str]] = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
@@ -82,11 +101,31 @@ class ChatService:
         self._clock = clock
         self._lock = threading.RLock()
 
-        # -- deep path: reuse the landed llm wiring (provider + substrate)
+        # -- deep path: via the provider registry (SERVE-WIRE-1) --------
+        # The builtin provider registers through the public
+        # register_builtin_provider() path — the exact call a user
+        # provider's installer would make. No hardwired build_llm_wiring().
         if llm_wiring is None:
-            from swarm_engine.services.agent_api import build_llm_wiring
-            llm_wiring = build_llm_wiring()
+            if provider_registry is None:
+                from runtime.services.llm_providers import (
+                    ProviderRegistry, register_builtin_provider)
+                provider_registry = ProviderRegistry()
+                try:
+                    register_builtin_provider(provider_registry)
+                except FileNotFoundError:
+                    # Honest: no substrate, registry stays empty.
+                    # The serving path will refuse with the real reason.
+                    pass
+            entry = provider_registry.default()
+            if entry is None:
+                raise RuntimeError(
+                    "no LLM provider registered: the serving path "
+                    "requires a provider via the registry")
+            # Adapt the registry entry to the wiring shape the router
+            # expects (provider + grant_issuer + mc_id).
+            llm_wiring = _entry_to_wiring(entry)
         self._llm = llm_wiring
+        self._provider_registry = provider_registry
 
         # -- student path: its own budget pool on a real substrate ------
         self._student_substrate = MicrocontrollerSubstrate()

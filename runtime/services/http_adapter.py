@@ -1847,6 +1847,19 @@ def build_services(base_dir: str) -> Dict[str, Any]:
         register_builtin_provider(llm_providers)
     except (FileNotFoundError, RuntimeError):
         pass
+    # [SERVE-WIRE-1] the FRM-governed chat inlet, wired to the registry.
+    # The builtin provider reaches the inlet through the public
+    # registration path (dogfooded) — ChatService takes the registry,
+    # not a hardwired build_llm_wiring().
+    from swarm_engine.services.chat_api import ChatService
+    try:
+        chat_service = ChatService(
+            base_dir=os.path.join(base_dir, "chat_inlet"),
+            provider_registry=llm_providers)
+    except RuntimeError:
+        # No provider registered (no substrate): inlet unavailable,
+        # chat handler falls back to honest template.
+        chat_service = None
     services = {
         "scheduler": scheduler, "projects": projects,
         "files": files, "artifacts": artifacts,
@@ -1858,6 +1871,7 @@ def build_services(base_dir: str) -> Dict[str, Any]:
         "agents": agents, "metering": metering, "intent": intent,
         "recurrence": recurrence,
         "llm_providers": llm_providers,
+        "chat_service": chat_service,
         "contract_routes": contract_routes,
         # [Worker D / S10] the real bearer-token gate. _Handler._auth_denied
         # (top of every do_*) calls auth.check(method, path, headers):
