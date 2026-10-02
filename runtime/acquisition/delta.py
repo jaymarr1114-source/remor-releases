@@ -62,6 +62,12 @@ class DeltaRecord:
     dependencies: List[str] = field(default_factory=list)   # D
     verification: Dict[str, Any] = field(default_factory=dict)  # V
     synthesized_capability: Optional[Dict[str, Any]] = None     # C
+    # TRACE-GUIDED-SYNTH-1: optional per-evidence teacher demonstration
+    # traces (raw labeled-line work, e.g. "recompute: 3 + 4 = 7"), aligned
+    # by index with `evidence`. Empty = no traces; routes that do not need
+    # them are unaffected. Forward-compatible: structural-debt's pending
+    # SCHEMA CONVERGENCE subsumes this field.
+    demonstration_traces: List[str] = field(default_factory=list)
     delta_id: str = ""
     source: str = "external-ingestion"
     at: float = field(default_factory=time.time)

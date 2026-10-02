@@ -207,6 +207,13 @@ class DistillationLoop:
         if adapted is not None:
             return self._finish(delta, adapted)
 
+        # ---- Route C: trace-guided synthesis (multi-step via teacher traces) ----
+        # Selected by trace availability: a delta carrying demonstration
+        # traces takes this route; without traces it falls through to B.
+        traced = self._try_trace_guided(delta, build, heldout, result)
+        if traced is not None:
+            return self._finish(delta, traced)
+
         # ---- Route B: fresh synthesis + verify + promote ----
         fresh = self._try_fresh_synthesis(delta, build, heldout, result)
         return self._finish(delta, fresh)
@@ -582,63 +589,158 @@ class DistillationLoop:
         cap_id = syn.get("capability_id") or ""
         result.capability_id = str(cap_id)
 
-        # 2. Render the admitted plan to standalone code.
+        # 2-5. Shared trust path: render -> held-out in fresh processes ->
+        #    negative controls -> ReviewBoard re-verify of the exact bytes ->
+        #    frozen promotion.
         try:
             rec = engine.capabilities.get(cap_id)
-            # Second-order case: plan composes acquired primitives. Compose
-            # their verified stored code directly (codegen cannot embed
-            # verdict-promotion wrappers or lambda-based helpers).
-            _steps = rec.plan.get("steps") or []
+            effects = list(getattr(rec, "effects", None) or [])
+            plan = rec.plan
+        except Exception as exc:
+            result.reason = (f"fresh synthesis: plan lookup failed "
+                             f"{type(exc).__name__}: {exc}")
+            return result
+        return self._verify_and_promote_plan(
+            plan, delta, build, heldout, result,
+            route="fresh-synthesis", spec_prefix="distilled",
+            effects=effects)
+
+    # ------------------------------------------------------------------
+    # Route C: trace-guided synthesis
+    # ------------------------------------------------------------------
+    def _try_trace_guided(self, delta: DeltaRecord, build, heldout,
+                          result: DistillationResult) -> DistillationResult:
+        """Distill a multi-step technique from teacher demonstration traces.
+
+        The exact-fit search cannot find multi-step programs (the
+        distillation wall). When the delta carries the teacher's labeled
+        intermediate work, decompose into one single-step subproblem per
+        labeled line, solve each with the existing search, compose in trace
+        order, and run the composed program through the shared trust path.
+        Returns None when the delta carries no traces (fall through to
+        fresh synthesis); otherwise the result is terminal for this delta
+        (success or a named failure).
+        """
+        from swarm_engine.synthesis import trace_guided as tg
+        traces = list(getattr(delta, "demonstration_traces", None) or [])
+        if not traces:
+            return None
+        result.route = "trace-guided"
+        if len(traces) < len(build):
+            result.reason = (
+                f"trace-guided: {len(traces)} traces < {len(build)} "
+                "build examples: refusing (fail closed)")
+            return result
+        build_traces = traces[:len(build)]
+        # 1. Parse traces and form per-labeled-line subproblems.
+        try:
+            parsed = [tg.parse_labeled_trace(t) for t in build_traces]
+            subproblems = tg.form_subproblems(build, parsed)
+        except (tg.TraceParseError, tg.TraceShapeError) as exc:
+            result.reason = f"trace-guided: trace decomposition failed: {exc}"
+            return result
+        # 2. Solve each subproblem with the existing single-step-capable
+        #    exact-fit search. A failed subproblem fails the route by name.
+        sub_plans = []
+        try:
+            for i, sp in enumerate(subproblems):
+                res = self.engine.cognition.propose_multi(
+                    f"trace-guided substep {i + 1}/{len(subproblems)} "
+                    f"of {delta.technique}",
+                    sp.examples, tuple(sp.input_names))
+                if not res.solved or not res.plan:
+                    result.reason = (
+                        f"trace-guided: substep {i + 1}/{len(subproblems)} "
+                        f"({sp.label}) synthesis failed: "
+                        f"{getattr(res, 'reason', 'unsolved')}")
+                    return result
+                sub_plans.append(res.plan)
+        except Exception as exc:
+            result.reason = (
+                f"trace-guided: subproblem synthesis raised "
+                f"{type(exc).__name__}: {exc}")
+            return result
+        # 3. Compose the per-step programs in trace order.
+        try:
+            inter_labels = [sp.label for sp in subproblems
+                            if sp.kind == "intermediate"]
+            plan = tg.compose_plan(
+                sub_plans, list(build[0][0].keys()), inter_labels,
+                f"trace_guided_{delta.delta_id[:8]}")
+        except tg.TraceShapeError as exc:
+            result.reason = f"trace-guided: composition failed: {exc}"
+            return result
+        # 4-7. The shared trust path: render, held-out, negative
+        #    controls, ReviewBoard re-verify, frozen promotion.
+        return self._verify_and_promote_plan(
+            plan, delta, build, heldout, result,
+            route="trace-guided", spec_prefix="trace_guided", effects=[])
+
+    # ------------------------------------------------------------------
+    # Shared trust path for synthesized plans (Routes B and C)
+    # ------------------------------------------------------------------
+    def _verify_and_promote_plan(self, plan, delta: DeltaRecord, build,
+                                 heldout, result: DistillationResult,
+                                 route: str, spec_prefix: str,
+                                 effects) -> DistillationResult:
+        """Render -> held-out (fresh processes) -> negative controls ->
+        ReviewBoard re-verify of the exact bytes -> frozen promotion.
+        The same causal bar for every synthesized plan, whichever route
+        produced it. Returns the result (success or named failure)."""
+        engine = self.engine
+        param_names = tuple(build[0][0].keys()) if build else ("value",)
+        # Render the plan to standalone code.
+        try:
+            _steps = plan.get("steps") or []
             _all_acq = _steps and all(
                 isinstance(s.get("op"), str) and
                 s.get("op").startswith("acquired.")
                 for s in _steps)
             if _all_acq:
-                code = self._render_second_order(
-                    rec.plan, delta.delta_id)
-                _meta = {"second_order": True}
+                code = self._render_second_order(plan, delta.delta_id)
             else:
                 from swarm_engine.synthesis.codegen import (
                     render_plan_to_source)
                 code, _meta = render_plan_to_source(
-                    rec.plan, engine.primitives,
+                    plan, engine.primitives,
                     purpose=f"distillation of {delta.delta_id}")
         except Exception as exc:
-            result.reason = (f"fresh synthesis: render failed "
+            result.reason = (f"{route}: render failed "
                              f"{type(exc).__name__}: {exc}")
             return result
 
-        # 3. Held-out verification in fresh processes — the technique was
-        #    NOT built against these examples.
+        # Held-out verification in fresh processes — the technique was
+        # NOT built against these examples.
         ok, passed = self._verify_code_heldout(code, "run", heldout)
         result.heldout_passed = passed
         if not ok:
-            result.reason = ("fresh synthesis: held-out verification failed "
-                             f"({passed}/{len(heldout)}): refusing promotion")
+            result.reason = (
+                f"{route}: held-out verification failed "
+                f"({passed}/{len(heldout)}): refusing promotion")
             return result
 
-        # 4. Negative controls on the fresh code.
+        # Negative controls on the candidate code.
         neg_ok, neg_n = self._negative_controls_code(code, "run", build)
         result.negative_controls_passed = neg_n if neg_ok else 0
         if not neg_ok:
-            result.reason = "fresh synthesis: negative controls failed"
+            result.reason = f"{route}: negative controls failed"
             return result
 
-        # 5. Re-verify the exact bytes through ReviewBoard, then promote
-        #    through the frozen promotion API path.
+        # Re-verify the exact bytes through ReviewBoard, then promote
+        # through the frozen promotion API path.
         try:
             from swarm_engine.acquisition.strategies import CapabilitySpec
             from swarm_engine.acquisition.semantic import Case
             review = engine.ensure_review_board()
             if review is None:
-                result.reason = ("fresh synthesis: ReviewBoard unavailable "
+                result.reason = (f"{route}: ReviewBoard unavailable "
                                  "(fail closed)")
                 return result
             cases = [Case(args=dict(a), expect=e, kind="positive",
                           label=f"distill_{delta.delta_id}_{i}")
                      for i, (a, e) in enumerate(build)]
             spec = CapabilitySpec(
-                name=f"distilled_{delta.delta_id[:8]}",
+                name=f"{spec_prefix}_{delta.delta_id[:8]}",
                 description=delta.objective,
                 examples=list(build),
                 input_names=list(param_names))
@@ -648,28 +750,28 @@ class DistillationLoop:
             admitted = bool(getattr(verdict, "admitted", False))
             result.verdict_admitted = admitted
             if not admitted:
-                result.reason = ("fresh synthesis: ReviewBoard did not "
-                                 "admit: "
-                                 + str(getattr(verdict, "reasons", "")))
+                result.reason = (
+                    f"{route}: ReviewBoard did not admit: "
+                    + str(getattr(verdict, "reasons", "")))
                 return result
             candidate = SimpleNamespace(
                 code=code, entrypoint="run",
-                declared_effects=list(getattr(rec, "effects", None) or []),
+                declared_effects=list(effects or []),
                 source=f"distillation:{delta.delta_id}",
                 notes=(f"distilled from delta {delta.delta_id}: "
                        f"{delta.technique[:80]}"))
             promoted = engine._verdict_promote_acquired(
                 candidate, spec, list(build),
-                f"distilled_{delta.delta_id[:8]}")
+                f"{spec_prefix}_{delta.delta_id[:8]}")
         except Exception as exc:
-            result.reason = ("fresh synthesis: verify/promote raised "
+            result.reason = (f"{route}: verify/promote raised "
                              f"{type(exc).__name__}: {exc}")
             return result
         if not promoted:
-            result.reason = ("fresh synthesis: promotion refused "
+            result.reason = (f"{route}: promotion refused "
                              "(fail closed upstream)")
             return result
-        result.route = "fresh-synthesis"
+        result.route = route
         result.promoted_name = promoted
         result.success = True
         return result
