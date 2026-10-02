@@ -363,6 +363,9 @@ class GapRegistry:
         finally:
             con.close()
         # UNIFIED-MEMORY-1: flow through the unified write path.
+        # FIXED 2026-10-02: Failures are LOUD, not silent. The old
+        # `except Exception: pass` hid unified-write failures, violating
+        # the invariant. If the unified path fails, we must know.
         if self._epistemic is not None:
             try:
                 from swarm_engine.intellect.unified_memory import (
@@ -375,8 +378,13 @@ class GapRegistry:
                     raw={"gap_id": record.gap_id,
                          "status": record.status,
                          "route_name": record.route_name})
-            except Exception:
-                pass  # Unified write is visibility; local save already done.
+            except Exception as exc:
+                # Loud failure: the invariant requires visibility.
+                # Local save succeeded; unified visibility failed.
+                import logging
+                logging.getLogger(__name__).error(
+                    "GapRegistry unified-write failed for gap %s: %s: %s",
+                    record.gap_id, type(exc).__name__, exc)
 
     def _load_row(self, row: sqlite3.Row) -> GapRecord:
         payload = json.loads(row["record_json"])
@@ -642,8 +650,13 @@ class GapRegistry:
                     raw={"gap_id": record.gap_id,
                          "closing_evidence": closing_evidence},
                     source="gap-registry")
-        except Exception:
-            pass
+        except Exception as exc:
+            # FIXED 2026-10-02: Loud failure, not silent. The invariant
+            # requires unified visibility for gap closures too.
+            import logging
+            logging.getLogger(__name__).error(
+                "GapRegistry gap-close unified-write failed for gap %s: %s: %s",
+                record.gap_id, type(exc).__name__, exc)
 
     def _log_run(self, record: GapRecord, route_name: str, outcome: str,
                 detail: str) -> None:
