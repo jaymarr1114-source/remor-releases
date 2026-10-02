@@ -1297,6 +1297,38 @@ class PlanComposer:
         (cname, cspec), fn_name = coll[0], fn_name[0]
         static_lams = bank.for_element_kind(
             map_prim.output.args[0] if map_prim.output.args else None)
+        # GEN-SYNTH-6: sound pre-gate for the map(F, L) lookahead. For
+        # map(filter(S,pred),L) == goal, goal[0] must equal L(s) for
+        # some s in S[0] (F is a subsequence of S, so its first kept
+        # element is some S element) and some static L from the pool
+        # the lookahead actually tries. If no static lambda maps any
+        # first-example S element to the goal's first element, the
+        # lookahead cannot succeed -- skip the predicate loop soundly.
+        # Applied ONLY when the direct filter(M,pred)==goal path is
+        # impossible (direct_possible False); otherwise the direct
+        # path might succeed without any map head. Zero-eval probes
+        # only; fail open on probe errors.
+        if (first_goal_key is not None and mapafter_possible
+                and not direct_possible):
+            _head_plausible = False
+            try:
+                _s0 = map_vals[0] if map_vals else []
+                _s0_elems = (list(_s0) if isinstance(_s0, (list, tuple))
+                             else [])
+            except Exception:
+                _s0_elems = []
+            try:
+                for _s in _s0_elems:
+                    for _slam in static_lams:
+                        if self._probe_first(_slam, _s) == first_goal_key:
+                            _head_plausible = True
+                            break
+                    if _head_plausible:
+                        break
+            except Exception:
+                _head_plausible = True
+            if not _head_plausible:
+                return False
         for pred in preds:
             if res.candidates_evaluated >= objective.max_candidates:
                 res.search_exhausted = True
