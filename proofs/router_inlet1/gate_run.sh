@@ -8,8 +8,11 @@ TREE="$(cd "$HERE/../.." && pwd)"
 LC="$TREE/distill1/server_lifecycle.sh"
 
 # Refuse to run under foreign load: measurements must be uncontended.
-if pgrep -f "llama-cli" >/dev/null 2>&1; then
-  echo "REFUSE: a foreign llama-cli is active; gate needs a quiet host"
+# pgrep -x matches the process NAME only (the real binary's comm is
+# "llama-cli"); a -f full-cmdline match false-positives on shells whose
+# own command line merely mentions llama-cli (e.g. quiet-wait loops).
+if pgrep -x "llama-cli" >/dev/null 2>&1 || pgrep -x "llama-server" >/dev/null 2>&1; then
+  echo "REFUSE: a foreign llama inference process is active; gate needs a quiet host"
   exit 1
 fi
 
