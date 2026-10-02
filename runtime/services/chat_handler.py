@@ -664,7 +664,31 @@ def _try_provider_escalation(text: str,
 
     Returns the answer dict on success, None when escalation is
     unavailable or fails (caller falls back to the honest template).
+
+    SERVE-WIRE-1: routes through the FRM-governed ChatService (the
+    router inlet) when available — not direct provider calls. The
+    inlet issues real grants, runs the hidden execution hierarchy,
+    and returns labels (provisional/final/deeper).
     """
+    # Prefer the FRM-governed inlet when wired.
+    chat_service = (services or {}).get("chat_service")
+    if chat_service is not None:
+        try:
+            res = chat_service.chat(text)
+        except Exception:
+            return None
+        if not res.get("ok"):
+            return None
+        served = res.get("served", {})
+        # Labels survive: provisional/final/deeper from the inlet.
+        return {"mode": "answer", "kind": "borrowed",
+                "grounded": {"kind": "borrowed",
+                             "via": "chat_service",
+                             "label": served.get("label"),
+                             "provenance": res.get("provenance")},
+                "text": served.get("text"),
+                "label": served.get("label")}
+    # Fallback: direct provider borrow (no inlet wired).
     registry = (services or {}).get("llm_providers")
     if registry is None:
         return None
