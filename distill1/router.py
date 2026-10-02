@@ -234,13 +234,15 @@ class AutoRouter:
                     "served": served}
 
         # -- escalation: live enforcement check BEFORE the deep path ------
+        # STUDENT-ENFORCE-1: shared core — one grant-check location.
+        from swarm_engine.services.enforcement_core import check_running
         live_state = self._enforcement_state()
-        if live_state != "RUNNING":
+        refusal = check_running(live_state)
+        if refusal is not None:
             deep_out.update({
                 "ok": False,
-                "error": (f"route_refused:escalation_blocked: enforcement "
-                          f"state is {live_state!r} (was RUNNING at fast "
-                          f"answer); deep path not attempted, zero charge"),
+                "error": (f"route_refused:escalation_blocked: {refusal}; "
+                          f"deep path not attempted, zero charge"),
                 "charged_s": 0.0,
             })
             served = {"text": fast_out["served_text"],
