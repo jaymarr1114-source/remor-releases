@@ -315,8 +315,14 @@ class GapRegistry:
     """One registry for every gap. Owns its own tables; the engine is only
     ever CALLED (frozen APIs), never modified."""
 
-    def __init__(self, engine: Any, db_path: Optional[str] = None):
+    def __init__(self, engine: Any, db_path: Optional[str] = None,
+                 epistemic: Any = None):
         self._engine = engine
+        # UNIFIED-MEMORY-1: optional epistemic store for unified writes.
+        # When provided, every gap save also flows through the unified
+        # memory path (record_experience). The local sqlite remains the
+        # physical substrate; the unified path is the visibility facade.
+        self._epistemic = epistemic
         if db_path is None:
             base = getattr(engine, "db_path", None)
             if base:
@@ -356,6 +362,21 @@ class GapRegistry:
             con.commit()
         finally:
             con.close()
+        # UNIFIED-MEMORY-1: flow through the unified write path.
+        if self._epistemic is not None:
+            try:
+                from swarm_engine.intellect.unified_memory import (
+                    record_experience)
+                record_experience(
+                    self._epistemic,
+                    origin_loop="acquisition",
+                    kind="gap",
+                    content=f"gap {record.gap_id}: {record.summary}",
+                    raw={"gap_id": record.gap_id,
+                         "status": record.status,
+                         "route_name": record.route_name})
+            except Exception:
+                pass  # Unified write is visibility; local save already done.
 
     def _load_row(self, row: sqlite3.Row) -> GapRecord:
         payload = json.loads(row["record_json"])
