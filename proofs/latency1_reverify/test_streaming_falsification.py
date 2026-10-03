@@ -25,6 +25,8 @@ import tempfile
 import threading
 
 sys.path.insert(0, "/home/hatch/workspace/remor_convergence/canonical")
+sys.path.insert(0, "/home/hatch/workspace/remor_convergence/canonical/pylib")
+sys.path.insert(0, "/home/hatch/workspace/remor_convergence/canonical/distill1")
 
 from runtime.services.streaming import StreamingChatService
 
