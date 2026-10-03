@@ -15,13 +15,20 @@ import os
 import sys
 import time
 
-TREE = "/home/hatch/workspace/worktrees/borrow-native-1"
+# Never hardcode home paths — derive from the environment so the proofs
+# run on any machine. REMOR_* env vars override for nonstandard layouts.
+_HOME = os.environ.get("HOME", "/home/hatch")
+_WS = os.path.join(_HOME, "workspace")
+
+TREE = os.environ.get("REMOR_TEST_TREE",
+       os.path.join(_WS, "worktrees", "borrow-native-1"))
 sys.path.insert(0, os.path.join(TREE, "pylib"))
 sys.path.insert(0, TREE)
 
-MODELS_DIR = "/home/hatch/workspace/models/qwen3-8b"
-LLAMA_CLI = ("/home/hatch/workspace/tools/llama.cpp-b11284/"
-             "llama-b11284/llama-cli")
+MODELS_DIR = os.environ.get("REMOR_QWEN3_8B_DIR",
+             os.path.join(_WS, "models", "qwen3-8b"))
+LLAMA_CLI = (os.environ.get("REMOR_LLAMA_CLI") or os.path.join(
+             _WS, "tools", "llama.cpp-b11284", "llama-b11284", "llama-cli"))
 QWEN3_REV = "7c41481f57cb95916b40956ab2f0b139b296d974"
 
 PROOF_DIR = os.path.join(TREE, "proofs", "borrow_native1")

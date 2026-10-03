@@ -10,7 +10,11 @@
 
 set -u
 cd "$(dirname "$0")"
-WT="/home/hatch/workspace/worktrees/warm-v10-convergence"
+# Derive the tree under test from this script's location (canonical/proofs/run_ctrl_v10_1/),
+# never a hardcoded worktree path — the battery must run against whatever tree it's in.
+SCRIPT_DIR="$(pwd)"
+TREE="$(cd "$SCRIPT_DIR/../.." && pwd)"
+WT="${REMOR_TEST_TREE:-$TREE}"
 
 pass=0
 fail=0

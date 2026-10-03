@@ -35,7 +35,9 @@ import sqlite3
 import sys
 import tempfile
 
-CANON = "/home/hatch/workspace/ploop-10-work"
+_HOME = os.environ.get("HOME", "/home/hatch")
+CANON = os.environ.get("REMOR_TEST_TREE",
+        os.path.join(_HOME, "workspace", "ploop-10-work"))
 sys.path.insert(0, os.path.join(CANON, "pylib"))
 sys.path.insert(0, CANON)
 

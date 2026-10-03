@@ -70,8 +70,10 @@ check "ticket_valid" $?
 
 # 4. Weights on disk with pinned hash
 python3 - <<'PYEOF'
-import hashlib
-path = "/home/hatch/workspace/models/qwen3-0_6b/Qwen3-0.6B-Q8_0.gguf"
+import hashlib, os
+home = os.environ.get("HOME", "/home/hatch")
+models_dir = os.environ.get("REMOR_MODELS_DIR", os.path.join(home, "workspace", "models"))
+path = os.path.join(models_dir, "qwen3-0_6b", "Qwen3-0.6B-Q8_0.gguf")
 want = "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
 h = hashlib.sha256()
 with open(path, "rb") as fh:

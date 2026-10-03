@@ -19,8 +19,8 @@ PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "FAIL: $1 -- $2"; }
 
-SRV="/home/hatch/workspace/tools/llama.cpp-b11284/llama-b11284/llama-server"
-WEIGHTS="/home/hatch/workspace/models/qwen3-0_6b/Qwen3-0.6B-Q8_0.gguf"
+SRV="${REMOR_LLAMA_SERVER:-$HOME/workspace/tools/llama.cpp-b11284/llama-b11284/llama-server}"
+WEIGHTS="${REMOR_QWEN3_06B_GGUF:-$HOME/workspace/models/qwen3-0_6b/Qwen3-0.6B-Q8_0.gguf}"
 PIN="9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
 
 # 1. server binary
