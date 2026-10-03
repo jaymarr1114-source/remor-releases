@@ -342,33 +342,36 @@ def t09_store_roundtrip():
         check("t09 terminal-less finding refused", True, str(exc)[:60])
 
 
-def t10_frozen_gates():
-    print("T10: the integration boundary -- three frozen gates (demonstrated)")
-    # Gate 1: the executive names the absence instead of routing.
-    # (Constructor args are None: the LOOP_ABSENT refusal fires in
-    # _check_fit before any of them are touched.)
-    from swarm_engine.curiosity.executive.executive import CuriosityExecutive
-    ex = CuriosityExecutive(
-        frm=None, enforcement_state_dir=str(RUN_DIR / "t10_enforcement"),
-        gam=None, run_controller=None)
-    trig = _trigger(BOUNDARY_HYPOTHESIS_CANDIDATE, HYP_FALSIFIABLE)
-    try:
-        ex.request_activation(trig)
-        check("t10 executive refuses inquiry boundary", False, "approved?!")
-    except Exception as exc:
-        msg = str(exc)
-        check("t10 executive refuses inquiry boundary with LOOP_ABSENT",
-              "LOOP_ABSENT" in msg and "scientific_inquiry" in msg,
-              msg[:90])
-    # Gate 2: the substrate vocabulary is closed.
+def t10_authorized_admission():
+    print("T10: the James-authorized admission (U-1 class, CUR-P3A-INT)")
+    # The three gates T10 once demonstrated are now OPEN by James's
+    # explicit decision; the fence stays closed to unadmitted loops.
+    # Gate 1: the executive owns the inquiry boundary classes.
+    from swarm_engine.curiosity.executive.executive import (
+        LOOP_OWNERSHIP, ABSENT_OWNERSHIP)
+    check("t10 executive owns the inquiry boundary classes",
+          LOOP_OWNERSHIP.get(BOUNDARY_HYPOTHESIS_CANDIDATE)
+          == "scientific_inquiry"
+          and LOOP_OWNERSHIP.get(BOUNDARY_NOVEL_OBSERVATION)
+          == "scientific_inquiry"
+          and BOUNDARY_HYPOTHESIS_CANDIDATE not in ABSENT_OWNERSHIP
+          and BOUNDARY_NOVEL_OBSERVATION not in ABSENT_OWNERSHIP
+          and BOUNDARY_GENERATIVE_PROMPT in ABSENT_OWNERSHIP,
+          f"owned={sorted(LOOP_OWNERSHIP)}")
+    # Gate 2: the substrate vocabulary admits scientific_inquiry only.
     sub = CuriositySubstrate()
+    sub.register_loop("scientific_inquiry", budget_s=60.0)
     try:
-        sub.register_loop("scientific_inquiry", budget_s=60.0)
-        check("t10 substrate refuses registration", False, "registered?!")
+        sub.register_loop("creative_exploration", budget_s=60.0)
+        check("t10 fence still closed to unadmitted loops", False,
+              "registered?!")
     except ValueError as exc:
-        check("t10 substrate refuses registration (ValueError)",
-              "unknown curiosity loop" in str(exc), str(exc)[:80])
-    # Gate 3: the run controller hard-codes the questioning loop.
+        check("t10 fence still closed to unadmitted loops",
+              "unknown curiosity loop" in str(exc), str(exc)[:60])
+    check("t10 substrate admits scientific_inquiry",
+          sub.loop_view("scientific_inquiry").loop == "scientific_inquiry",
+          "registered + visible")
+    # Gate 3: the run controller dispatches by inq.loop from a registry.
     from swarm_engine.curiosity.run_controller.controller import (
         CuriosityRunController)
     rc = CuriosityRunController(
@@ -377,11 +380,15 @@ def t10_frozen_gates():
         ledger_db=str(RUN_DIR / "t10_ledger.db"),
         attribution_db=str(RUN_DIR / "t10_attribution.db"),
         payload_dir=str(RUN_DIR / "t10_payloads"), corpus_docs=[])
-    check("t10 run controller binds the questioning loop only",
-          rc._loop.loop_name == "questioning"
-          and type(rc._inlet).__name__ == "QuestioningLoopInlet",
-          f"loop={rc._loop.loop_name} "
-          f"inlet={type(rc._inlet).__name__}")
+    check("t10 run controller registry holds both loops",
+          rc._loops["questioning"].loop_name == "questioning"
+          and rc._loops["scientific_inquiry"].loop_name
+          == "scientific_inquiry"
+          and type(rc._inlets["questioning"]).__name__
+          == "QuestioningLoopInlet"
+          and type(rc._inlets["scientific_inquiry"]).__name__
+          == "ScientificInquiryLoopInlet",
+          f"loops={sorted(rc._loops)}")
 
 
 def t11_restore():
@@ -432,7 +439,7 @@ def main():
     tests = [t01_hypothesis_formation, t02_novel_observation, t03_prediction,
              t04_test_execution, t05_convergence, t06_inlet_refuses_foreign,
              t07_inquiry_admitted, t08_provenance, t09_store_roundtrip,
-             t10_frozen_gates, t11_restore, t12_pipeline_simulation]
+             t10_authorized_admission, t11_restore, t12_pipeline_simulation]
     for t in tests:
         try:
             t()

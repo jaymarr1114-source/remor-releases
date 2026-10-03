@@ -133,18 +133,22 @@ NODE_DEPENDENCIES = {
 
 #: Node goals, worded so the GraphController's relevance selection admits
 #: the inquiry chain for an inquiry objective (dependency closure pulls
-#: the whole chain once the head matches).
+#: the whole chain once the head matches). Each goal shares the
+#: objective's vocabulary ("scientific", not "scientifically" -- the
+#: controller's stemmer does not conflate them) at or above the
+#: controller's relevance floor (verified: all five >= 0.41 vs 0.34).
 NODE_GOALS = {
     NODE_OBSERVE: ("record the presented observation or hypothesis "
-                   "candidate to test scientifically"),
-    NODE_HYPOTHESIZE: ("form a falsifiable hypothesis from the "
-                       "observation to test scientifically"),
-    NODE_PREDICT: ("derive the testable observable prediction from the "
-                   "hypothesis to test scientifically"),
-    NODE_TEST: ("run the prediction against the presented evidence to "
-                "test scientifically"),
-    NODE_CONCLUDE: ("assess the test outcome and converge the inquiry "
-                    "to a terminal state to test scientifically"),
+                   "candidate for scientific testing"),
+    NODE_HYPOTHESIZE: ("form a falsifiable hypothesis candidate from "
+                       "the observation for the scientific test"),
+    NODE_PREDICT: ("derive the testable prediction from the hypothesis "
+                   "candidate for the scientific test of the observation"),
+    NODE_TEST: ("run the scientific test of the hypothesis candidate "
+                "prediction against the presented novel observation "
+                "evidence"),
+    NODE_CONCLUDE: ("assess the scientific test outcome and converge "
+                    "the hypothesis to a terminal state"),
 }
 
 INQUIRY_OBJECTIVE = ("test the hypothesis candidate or novel observation "
