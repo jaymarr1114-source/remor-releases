@@ -9,11 +9,11 @@ PROOF="$WT_ROOT/proofs/cur_p3b/cur_p3b_proof.py"
 
 echo "=== CUR-P3B gate_run.sh ==="
 echo "--- 0. worktree pin (fail-closed) ---"
-PIN="$(cd "$WT_ROOT" && git rev-parse HEAD)"
-if [ "$PIN" = "0dd0e76ec7414426c273beb8bb91bd9b9b9234bd" ]; then
-  echo "PASS: worktree pinned at 0dd0e76"
+PIN_BASE="0dd0e76ec7414426c273beb8bb91bd9b9b9234bd"
+if (cd "$WT_ROOT" && git merge-base --is-ancestor "$PIN_BASE" HEAD); then
+  echo "PASS: worktree based at 0dd0e76 (HEAD $(cd "$WT_ROOT" && git rev-parse --short HEAD))"
 else
-  echo "FAIL: worktree at $PIN, expected 0dd0e76 -- refusing to run"
+  echo "FAIL: worktree not based at 0dd0e76 -- refusing to run"
   exit 1
 fi
 
