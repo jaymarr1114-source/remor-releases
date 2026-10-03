@@ -280,22 +280,12 @@ class UniversalTaskInterface:
         if frame.intent in (Intent.CREATE_IMAGE, Intent.CREATE_VIDEO,
                             Intent.CREATE_SONG, Intent.CREATE_VOICE):
             return self._understand_create_media(frame, outcome, metadata)
-        if frame.intent == Intent.ANSWER_FACTUAL:
-            outcome.success = True
-            outcome.value = {
-                "answer": ("I don't know the answer to that -- I can only "
-                           "answer questions about my own capabilities and "
-                           "inventory, do exact arithmetic, create files, or "
-                           "generate media. Could you rephrase as one of "
-                           "those?"),
-                "intent": frame.intent.value,
-                "refusal": "factual_unanswerable",
-                "frame": frame.as_dict(),
-            }
-            self._trace(outcome, Stage.UNDERSTAND, True,
-                        "ANSWER_FACTUAL has no answering machinery; "
-                        "failing closed instead of misrouting into synthesis")
-            return outcome
+        # ANSWER_FACTUAL: James (2026-10-03) — route to synthesis, don't fail closed.
+        # Factual questions belong to the language substrate (synthesis/cognition
+        # path), which can escalate to the bench 8B when the phone has no local
+        # model. Failing closed here was a misroute; the downstream pipeline
+        # owns this intent.
+        # (Falls through to the existing pipeline below.)
         # EXECUTE / ROUTE / UNKNOWN / other frames: existing pipeline.
 
         # DECOMPOSE: real when the goal is composite (':' or ' then '); a
