@@ -19,20 +19,35 @@ def read_enforcement_state(state_dir: Optional[str] = None) -> str:
 
     From the store's record when a state dir is configured; RUNNING when
     the authority has no record (its own bootstrap semantic) or when no
-    dir is configured. Never raises — returns RUNNING on any read failure
-    (fail-open on the read, fail-closed on the check).
+    dir is configured.
+
+    FAIL-CLOSED on read errors: if the state dir is configured but the
+    read fails (import error, disk error, corrupt store), returns
+    "UNKNOWN" which fails the is_running check. We do NOT assume RUNNING
+    when we cannot verify the state — that would be fail-open.
+
+    Only the bootstrap cases return RUNNING:
+    - No state_dir configured (not yet set up)
+    - State dir configured but no record yet (authority's bootstrap)
     """
     if not state_dir:
         return RUNNING
+    # Fail closed if the configured dir doesn't exist: we cannot verify
+    # state, so we must not assume RUNNING.
+    import os
+    if not os.path.isdir(state_dir):
+        return "UNKNOWN:enforcement_state_dir_missing"
     try:
         from swarm_engine.governance.curiosity_enforcement.read_api import (
             read_state)
     except Exception:
-        return RUNNING
+        # Import failed: cannot verify state, fail closed
+        return "UNKNOWN:enforcement_read_api_unavailable"
     try:
         rec = read_state(state_dir)
     except Exception:
-        return RUNNING
+        # Read failed: cannot verify state, fail closed
+        return "UNKNOWN:enforcement_state_unreadable"
     if rec is None:
         return RUNNING
     state = rec.state.value if hasattr(rec.state, "value") else rec.state
