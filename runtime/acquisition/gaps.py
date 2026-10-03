@@ -346,6 +346,34 @@ class GapRegistry:
         return con
 
     def _save(self, record: GapRecord) -> None:
+        # UNIFIED-MEMORY-1: Authoritative unified write FIRST.
+        # The unified write must succeed before local success is accepted.
+        # If the unified path fails, the local write is NOT committed
+        # (fail closed). This prevents split-state where local succeeds
+        # but unified visibility is lost.
+        if self._epistemic is not None:
+            try:
+                from swarm_engine.intellect.unified_memory import (
+                    record_experience)
+                record_experience(
+                    self._epistemic,
+                    origin_loop="acquisition",
+                    kind="gap",
+                    content=f"gap {record.gap_id}: {record.summary}",
+                    raw={"gap_id": record.gap_id,
+                         "status": record.status,
+                         "route_name": record.route_name})
+            except Exception as exc:
+                # Fail closed: unified write failed, do NOT commit local.
+                # The caller sees the error; no split-state is created.
+                raise RuntimeError(
+                    f"GapRegistry unified-write failed for gap "
+                    f"{record.gap_id}: {type(exc).__name__}: {exc}; "
+                    f"local write NOT committed (fail closed)"
+                ) from exc
+
+        # Unified write succeeded (or no epistemic configured).
+        # Now commit the local sqlite.
         payload = asdict(record)
         con = self._conn()
         try:
@@ -362,29 +390,6 @@ class GapRegistry:
             con.commit()
         finally:
             con.close()
-        # UNIFIED-MEMORY-1: flow through the unified write path.
-        # FIXED 2026-10-02: Failures are LOUD, not silent. The old
-        # `except Exception: pass` hid unified-write failures, violating
-        # the invariant. If the unified path fails, we must know.
-        if self._epistemic is not None:
-            try:
-                from swarm_engine.intellect.unified_memory import (
-                    record_experience)
-                record_experience(
-                    self._epistemic,
-                    origin_loop="acquisition",
-                    kind="gap",
-                    content=f"gap {record.gap_id}: {record.summary}",
-                    raw={"gap_id": record.gap_id,
-                         "status": record.status,
-                         "route_name": record.route_name})
-            except Exception as exc:
-                # Loud failure: the invariant requires visibility.
-                # Local save succeeded; unified visibility failed.
-                import logging
-                logging.getLogger(__name__).error(
-                    "GapRegistry unified-write failed for gap %s: %s: %s",
-                    record.gap_id, type(exc).__name__, exc)
 
     def _load_row(self, row: sqlite3.Row) -> GapRecord:
         payload = json.loads(row["record_json"])
