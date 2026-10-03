@@ -96,6 +96,11 @@ _SENT_SPLIT = re.compile(r"[.!?]+")
 _WORD_SPLIT = re.compile(r"[a-z0-9']+")
 
 
+class _DeepUnreachable(Exception):
+    """Internal: deep provider health check failed, fail fast."""
+    pass
+
+
 class AutoRouter:
     """One chat interface over the fast and deep FRM-governed paths."""
 
@@ -291,15 +296,45 @@ class AutoRouter:
                     "served": served}
 
         # -- deep path under its own grant --------------------------------
+        # James (2026-10-03): fail fast on unreachable, wait patiently on slow.
+        # If the deep provider can't be reached at all (connection refused),
+        # refuse immediately. If it's reachable but slow (8B takes 150s+),
+        # allow the long wait. The distinction is: can we connect?
         deep_out["attempted"] = True
         mc = deep_mc_id or self._mc_id
         t0 = self._clock()
         try:
+            # Quick reachability check: if the deep provider's server is
+            # down, fail fast instead of hanging in request_cognition.
+            # This uses the standard llama-server health endpoint.
+            try:
+                from distill1.server_client import health as _check_health
+            except ImportError:
+                try:
+                    from server_client import health as _check_health
+                except ImportError:
+                    _check_health = None
+            if _check_health is not None:
+                if not _check_health(timeout=5):
+                    deep_out.update({
+                        "ok": False,
+                        "error": ("deep_unreachable: the deep provider's "
+                                  "model server is not responding on "
+                                  "127.0.0.1:18080; deep path not attempted, "
+                                  "zero charge"),
+                        "charged_s": 0.0,
+                        "wall_s": self._clock() - t0,
+                    })
+                    # Skip the deep call entirely — fail fast.
+                    raise _DeepUnreachable()
             res = self._deep.request_cognition(
                 mc_id=mc, prompt=prompt,
                 context={"frm_grant": deep_grant,
                          "purpose": "auto-route-deep",
                          "target_profile": "deep-reasoning"})
+        except _DeepUnreachable:
+            # Already recorded in deep_out above; skip to verdict.
+            pass
         except Exception as exc:  # noqa: BLE001 -- fail closed, zero charge
             deep_out.update({
                 "ok": False,
