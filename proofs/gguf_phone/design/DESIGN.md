@@ -46,7 +46,13 @@ class PhoneQwen:
 ```
 
 ## Model Delivery
-**Decision: Download on demand** (not bundled in APK)
+**Decision (v1.0.12, 2026-10-03): Bundled** (not download-on-demand)
+- v1.0.12 ships SmolLM2-360M Q8_0 (386MB) bundled in the update ZIP
+- Rationale: James approved offline-first; 386MB is acceptable in a 446MB bundle
+- The Qwen3-0.6B download-on-demand design below remains for a future version
+  (larger model, WiFi-only download, progress UI)
+
+**Original design (Qwen3-0.6B, deferred):** Download on demand (not bundled in APK)
 - 610MB is too large for APK bundling (would make app unusable)
 - Download from GitHub releases (same as update bundles) with SHA256 verification
 - Store in app's private files dir: `context.getFilesDir() / "models" / "qwen3-0.6b-q8_0.gguf"`

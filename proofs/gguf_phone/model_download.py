@@ -21,8 +21,19 @@ QWEN_06B_URL = (
     "https://github.com/jaymarr1114-source/remor-releases/releases/"
     "download/models/qwen3-0.6b-q8_0.gguf"
 )
-QWEN_06B_SHA256 = ""  # Set when published; empty = skip verification (dev)
+# Qwen 0.6B not yet published — download_model now FAILS CLOSED on empty
+# checksum (2026-10-03), so this must be set before use.
+QWEN_06B_SHA256 = ""  # MUST be set before download; empty = refuse
 QWEN_06B_SIZE = 610 * 1024 * 1024  # ~610MB
+
+# SmolLM2-360M Q8_0 (bundled in v1.0.12, verified 2026-10-03):
+# - Source: Felladrin/gguf-Q8_0-SmolLM2-360M-Instruct
+# - Base: HuggingFaceTB/SmolLM2-360M-Instruct (Apache 2.0)
+# - Verified: valid GGUF v3, 386MB, metadata license apache-2.0
+SMOLLM2_360M_SHA256 = (
+    "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201"
+)
+SMOLLM2_360M_SIZE = 386404992
 
 
 class ModelDownloadError(RuntimeError):
@@ -42,8 +53,16 @@ def download_model(
 
     Returns dest_path on success. Raises ModelDownloadError on failure.
     Fail-closed: partial/corrupt downloads are deleted, never used.
+    Fail-closed: empty expected_sha256 is REJECTED (2026-10-03) — a model
+    without a pinned checksum must never be downloaded.
     """
     import urllib.request
+
+    # FAIL-CLOSED (2026-10-03): empty checksum = refuse, never skip.
+    if not expected_sha256:
+        raise ModelDownloadError(
+            "Refusing download without pinned SHA256: %s" % url
+        )
 
     os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
 
@@ -106,15 +125,14 @@ def download_model(
             f"Size mismatch: got {downloaded}, expected {expected_size}"
         )
 
-    # Verify checksum
-    if expected_sha256:
-        actual = hasher.hexdigest()
-        if actual != expected_sha256.lower():
-            os.remove(dest_path)
-            raise ModelDownloadError(
-                f"SHA256 mismatch for {dest_path}: "
-                f"got {actual[:16]}..., expected {expected_sha256[:16]}..."
-            )
+    # Verify checksum (ALWAYS — empty was rejected at entry)
+    actual = hasher.hexdigest()
+    if actual != expected_sha256.lower():
+        os.remove(dest_path)
+        raise ModelDownloadError(
+            f"SHA256 mismatch for {dest_path}: "
+            f"got {actual[:16]}..., expected {expected_sha256[:16]}..."
+        )
 
     return dest_path
 
