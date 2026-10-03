@@ -1,0 +1,65 @@
+{
+  "exploration_id": "exp_t09",
+  "loop": "creative_exploration",
+  "epistemic_status": "hypothesis",
+  "terminal_state": "CANDIDATE_GENERATED",
+  "candidates": [
+    {
+      "candidate_id": "cand_00",
+      "verdict": "ADMIT",
+      "score": 1.0,
+      "reasons": [
+        "all checks pass (coverage 1.00)"
+      ],
+      "quarantined_primitives": []
+    },
+    {
+      "candidate_id": "cand_01",
+      "verdict": "ADMIT",
+      "score": 1.0,
+      "reasons": [
+        "all checks pass (coverage 1.00)"
+      ],
+      "quarantined_primitives": []
+    },
+    {
+      "candidate_id": "cand_02",
+      "verdict": "ADMIT",
+      "score": 1.0,
+      "reasons": [
+        "all checks pass (coverage 1.00)"
+      ],
+      "quarantined_primitives": []
+    },
+    {
+      "candidate_id": "cand_03",
+      "verdict": "ADMIT",
+      "score": 1.0,
+      "reasons": [
+        "all checks pass (coverage 1.00)"
+      ],
+      "quarantined_primitives": []
+    },
+    {
+      "candidate_id": "cand_04",
+      "verdict": "ADMIT",
+      "score": 1.0,
+      "reasons": [
+        "all checks pass (coverage 1.00)"
+      ],
+      "quarantined_primitives": []
+    },
+    {
+      "candidate_id": "cand_05",
+      "verdict": "ADMIT",
+      "score": 1.0,
+      "reasons": [
+        "all checks pass (coverage 1.00)"
+      ],
+      "quarantined_primitives": []
+    }
+  ],
+  "named_gaps": [],
+  "detail": "6 candidate(s) released to the Acceptance panel as hypotheses",
+  "admission_path": null
+}
