@@ -234,9 +234,9 @@ class UniversalTaskInterface:
         # misrouted one. CREATE_FILE goes to real codegen inside a
         # run-scoped governed directory; media intents (IMAGE/VIDEO/SONG/
         # VOICE) go to the real media substrate or an honest "unavailable".
-        # ANSWER_FACTUAL has no answering machinery downstream (the
-        # existing pipeline would misroute it into capability synthesis),
-        # so it fails closed here too.
+        # ANSWER_FACTUAL routes to synthesis (the language/cognition path),
+        # which can escalate to the bench when the phone has no local model.
+        # (James, 2026-10-03: the fail-closed was the misroute.)
         #
         # UNKNOWN is deliberately NOT completed here: "no reliable meaning
         # extracted" is not a verdict the NL layer owns. The legacy

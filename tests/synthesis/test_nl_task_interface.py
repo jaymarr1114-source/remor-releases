@@ -105,11 +105,13 @@ class TestDirectRouting(unittest.TestCase):
         self.assertEqual(out.value["refusal"], "underspecified_create_file")
         self.assertNotIn("path", out.value)
 
-    def test_unknown_completes_with_honest_refusal(self):
+    def test_unknown_goes_to_pipeline_not_factual_refusal(self):
+        # James (2026-10-03): UNKNOWN is not ANSWER_FACTUAL. It goes to the
+        # downstream pipeline and fails honestly at admission, not with a
+        # hardcoded "factual_unanswerable" refusal.
         out = _handle(self.ti, "do the thing", run_id="unk_run")
-        self.assertTrue(out.success, out.error)
-        self.assertIn("don't know", out.value["answer"].lower())
-        self.assertEqual(out.value["refusal"], "factual_unanswerable")
+        self.assertFalse(out.success, "UNKNOWN should not complete with a fake refusal")
+        self.assertIn("admission", out.error.lower(), f"Should fail at admission: {out.error}")
 
     def test_traversal_filename_contained(self):
         out = _handle(
