@@ -50,7 +50,18 @@ from swarm_engine.curiosity.evidence.writer import CuriosityWriter
 from swarm_engine.curiosity.loops.questioning.loop import (
     TERMINAL_BOUNDARY, TERMINAL_INSUFFICIENT, TERMINAL_RESOLVED,
     LoopContext, QuestioningLoop, QuestioningLoopInlet, SubstrateRefused)
-from swarm_engine.curiosity.substrate import LOOP_QUESTIONING
+from swarm_engine.curiosity.loops.scientific_inquiry.loop import (
+    MODEL_ID as INQUIRY_MODEL_ID,
+    TERMINAL_INCONCLUSIVE as INQUIRY_TERMINAL_INCONCLUSIVE,
+    TERMINAL_INSUFFICIENT as INQUIRY_TERMINAL_INSUFFICIENT,
+    TERMINAL_METHOD_BOUNDARY as INQUIRY_TERMINAL_METHOD_BOUNDARY,
+    TERMINAL_REFUTED as INQUIRY_TERMINAL_REFUTED,
+    TERMINAL_SUPPORTED as INQUIRY_TERMINAL_SUPPORTED,
+    LoopContext as InquiryLoopContext,
+    ScientificInquiryLoop, ScientificInquiryLoopInlet,
+    SubstrateRefused as InquirySubstrateRefused)
+from swarm_engine.curiosity.substrate import (
+    LOOP_QUESTIONING, LOOP_SCIENTIFIC_INQUIRY)
 
 # Inquiry states.
 ST_PENDING = "PENDING"
@@ -65,8 +76,23 @@ ST_TERMINATED = "TERMINATED"
 CKPT_KILL = "SUSPENDED_KILL"
 CKPT_RESOURCE = "SUSPENDED_RESOURCE"
 
-LOOP_MODEL = ("curiosity-questioning/v1 (mechanical refinement; no "
-              "external cognition provider)")
+#: Provenance model stamps, per loop (mechanical; no external provider).
+#: The questioning string is unchanged from Phase 2; the inquiry string
+#: is the loop's own MODEL_ID.
+LOOP_MODELS = {
+    LOOP_QUESTIONING: ("curiosity-questioning/v1 (mechanical refinement; "
+                       "no external cognition provider)"),
+    LOOP_SCIENTIFIC_INQUIRY: INQUIRY_MODEL_ID,
+}
+
+#: Terminal states that count as a decisive convergence for attribution.
+#: Mirrors the questioning division (resolved -> success, insufficient ->
+#: partial): the inquiry loop's decisive verdicts are SUPPORTED/REFUTED;
+#: INSUFFICIENT/INCONCLUSIVE converge but stay partial. BOUNDARY_ESTABLISHED
+#: is the same string for both loops (TERMINAL_BOUNDARY).
+SUCCESS_TERMINALS = frozenset({
+    TERMINAL_RESOLVED, TERMINAL_BOUNDARY,
+    INQUIRY_TERMINAL_SUPPORTED, INQUIRY_TERMINAL_REFUTED})
 
 D4_NOTE = ("relevance threshold 0.25 is provisional per D-4, never a "
            "universal constant; this score is ADVISORY ONLY. Primary "
@@ -162,8 +188,22 @@ class CuriosityRunController:
         self._payload_dir.mkdir(parents=True, exist_ok=True)
         self._corpus_docs = list(corpus_docs)
         self._clock = clock
-        self._loop = QuestioningLoop()
-        self._inlet = QuestioningLoopInlet(self._loop)
+        # Loop registry dispatched by inq.loop (CUR-P3A-INT). Questioning
+        # keeps its exact construction; scientific_inquiry is admitted by
+        # James's U-1-class decision 2026-10-01. Nothing else may be
+        # registered here without a James decision -- the vocabulary
+        # stays fenced (substrate.CURIOSITY_LOOPS is the authority).
+        self._loops = {
+            LOOP_QUESTIONING: QuestioningLoop(),
+            LOOP_SCIENTIFIC_INQUIRY: ScientificInquiryLoop(),
+        }
+        self._inlets = {
+            LOOP_QUESTIONING:
+                QuestioningLoopInlet(self._loops[LOOP_QUESTIONING]),
+            LOOP_SCIENTIFIC_INQUIRY:
+                ScientificInquiryLoopInlet(
+                    self._loops[LOOP_SCIENTIFIC_INQUIRY]),
+        }
         self._inquiries: Dict[str, InquiryRecord] = {}
         self._dispatch_seq = 0  # monotonic dispatch order for FIFO tiebreak
         # Durable inquiry -> latest-checkpoint index (the checkpoint store
@@ -206,6 +246,11 @@ class CuriosityRunController:
         inq.note("dispatched",
                  f"priority={inq.priority} slice={slice_s:.4f}s "
                  f"epoch={inq.epoch_id}")
+        if inq.loop not in self._loops:
+            raise AdmissionRefused(
+                f"no registered loop {inq.loop!r}: the curiosity loop "
+                "registry is fenced (vocabulary admission is James's "
+                "U-1-class decision)")
         self._inquiries[inquiry_id] = inq
         self._admit_pending()
         return inquiry_id
@@ -236,15 +281,28 @@ class CuriosityRunController:
         except ValueError:
             self._substrate.register_loop(
                 inq.loop, budget_s=inq.grant.budget_s, max_concurrent=64)
-        from swarm_engine.curiosity.loops.questioning.loop import CorpusIndex
-        corpus = CorpusIndex(self._corpus_docs)
-        inq.ctx = LoopContext(
-            substrate=self._substrate, inquiry_id=inq.inquiry_id,
-            budget_slice_s=inq.budget_slice_s, corpus=corpus)
+        inq.ctx = self._build_ctx(inq)
         inq.graph = GraphController()
-        inq.loop_state = self._inlet.enter(inq.trigger, inq.ctx)
+        inq.loop_state = self._inlets[inq.loop].enter(inq.trigger, inq.ctx)
         inq.state = ST_ACTIVE
         inq.note("admitted", f"loop={inq.loop}")
+
+    def _build_ctx(self, inq: InquiryRecord) -> Any:
+        """Per-loop LoopContext construction (CUR-P3A-INT). Questioning
+        probes the corpus index; the inquiry loop tests its predictions
+        against the presented evidence lines -- the corpus documents,
+        mechanically (its run_test treats empty evidence as
+        INSUFFICIENT, never as a crash)."""
+        if inq.loop == LOOP_SCIENTIFIC_INQUIRY:
+            return InquiryLoopContext(
+                substrate=self._substrate, inquiry_id=inq.inquiry_id,
+                budget_slice_s=inq.budget_slice_s,
+                evidence=list(self._corpus_docs))
+        from swarm_engine.curiosity.loops.questioning.loop import CorpusIndex
+        return LoopContext(
+            substrate=self._substrate, inquiry_id=inq.inquiry_id,
+            budget_slice_s=inq.budget_slice_s,
+            corpus=CorpusIndex(self._corpus_docs))
 
     # -- cadence ----------------------------------------------------------
 
@@ -281,8 +339,9 @@ class CuriosityRunController:
                 inq, cause="inquiry slice exhausted before tick")
         t0 = self._clock()
         try:
-            sres = self._loop.step(inq.loop_state, inq.ctx, inq.graph)
-        except SubstrateRefused as exc:
+            sres = self._loops[inq.loop].step(inq.loop_state, inq.ctx,
+                                              inq.graph)
+        except (SubstrateRefused, InquirySubstrateRefused) as exc:
             inq.spent_s += self._clock() - t0
             return self._handle_resource_boundary(
                 inq, cause=f"substrate refused: {exc.reason}: {exc.message}")
@@ -302,10 +361,22 @@ class CuriosityRunController:
                           terminal: Dict[str, Any]) -> Dict[str, Any]:
         """Converged: build the provenance-stamped finding, persist the
         payload + finding, attribute, route the terminal, release the
-        loop's microcontrollers."""
+        loop's microcontrollers. The payload envelope is loop-agnostic;
+        loop-specific extras come from the terminal dict with honest
+        defaults -- a missing key is an absence, never fabricated."""
         evidence_id = "ev_" + uuid.uuid4().hex[:16]
         score = terminal.get("score", 0)
-        triage = ("propose_investigation" if score >= 3 else "retain")
+        # The inquiry loop carries its own triage verdict; questioning
+        # terminals predate that key, so the score rule stands for them
+        # (their persisted payloads are byte-identical to Phase 2).
+        triage = (terminal.get("triage")
+                  or ("propose_investigation" if score >= 3 else "retain"))
+        # The inquiry loop emits verdicts, not precision scores; no
+        # relevance score is fabricated for it (D-4: advisory only).
+        if inq.loop == LOOP_QUESTIONING:
+            relevance = {"score": round(score / 3.0, 4), "d4_note": D4_NOTE}
+        else:
+            relevance = {"score": None, "d4_note": D4_NOTE}
         payload = {
             "evidence_id": evidence_id,
             "inquiry_id": inq.inquiry_id,
@@ -317,7 +388,7 @@ class CuriosityRunController:
             "precise_question": terminal.get("precise_question", ""),
             "precision_score": score,
             "passes": terminal.get("passes", []),
-            "relevance": {"score": round(score / 3.0, 4), "d4_note": D4_NOTE},
+            "relevance": relevance,
             "triage": triage,
             "triage_note": (
                 "proposed to Primary Acceptance; not accepted "
@@ -340,13 +411,12 @@ class CuriosityRunController:
             provenance=EvidenceProvenance(
                 loop=inq.loop,
                 bounded_objective=inq.trigger.bounded_objective,
-                model=LOOP_MODEL, triage=triage),
+                model=LOOP_MODELS[inq.loop], triage=triage),
             payload_ref=str(payload_path))
         self._writer.submit(finding)  # validates + persists (fenced)
         self._attribute(inq, evidence_id=evidence_id,
                         outcome=("success" if terminal["terminal_state"]
-                                 in (TERMINAL_RESOLVED, TERMINAL_BOUNDARY)
-                                 else "partial"),
+                                 in SUCCESS_TERMINALS else "partial"),
                         detail=terminal["terminal_state"])
         self._ledger.record(TerminalRoute(
             route_id="route_" + uuid.uuid4().hex[:12],
@@ -404,7 +474,7 @@ class CuriosityRunController:
         }
         # Stop the loop's machinery first (abort is idempotent).
         try:
-            self._loop.abort(inq.loop_state, inq.ctx, inq.graph)
+            self._loops[inq.loop].abort(inq.loop_state, inq.ctx, inq.graph)
         except Exception:
             pass
         # Terminal event BEFORE the checkpoint: the saved lineage must
@@ -423,11 +493,14 @@ class CuriosityRunController:
             "origin": inq.trigger.origin,
             "terminal_state": "BLOCKED",
             "resource_boundary": boundary,
-            "partial_refinement": (inq.loop_state or {}).get("passes", []),
+            "partial_refinement": (
+                (inq.loop_state or {}).get("passes", [])
+                or list((inq.loop_state or {}).get("node_summaries",
+                                                  {}).values())),
             "checkpoint_id": checkpoint_id,
             "detail": ("inquiry suspended at the resource boundary: the "
-                       "imprecise-question boundary is unresolved and "
-                       "externalized here, not dropped"),
+                       f"{inq.trigger.boundary_class} boundary is "
+                       "unresolved and externalized here, not dropped"),
             "produced_at": time.time(),
         }
         payload_path = self._payload_dir / f"{evidence_id}.json"
@@ -439,7 +512,7 @@ class CuriosityRunController:
             provenance=EvidenceProvenance(
                 loop=inq.loop,
                 bounded_objective=inq.trigger.bounded_objective,
-                model=LOOP_MODEL, triage="boundary"),
+                model=LOOP_MODELS[inq.loop], triage="boundary"),
             payload_ref=str(payload_path))
         self._writer.submit(finding)
         self._attribute(inq, evidence_id=evidence_id, outcome="failed",
@@ -492,7 +565,7 @@ class CuriosityRunController:
 
     def _execute_kill(self, inq: InquiryRecord,
                       ckpt_label: str) -> Dict[str, Any]:
-        self._loop.abort(inq.loop_state, inq.ctx, inq.graph)
+        self._loops[inq.loop].abort(inq.loop_state, inq.ctx, inq.graph)
         # Terminal event BEFORE the checkpoint: the saved lineage must
         # carry the kill, or the resumed record loses the attempt's
         # terminal event across the process boundary.
@@ -562,13 +635,9 @@ class CuriosityRunController:
             self._substrate.register_loop(
                 new.loop, budget_s=new.grant.budget_s, max_concurrent=64)
         self._substrate.import_state(from_state["substrate"])
-        from swarm_engine.curiosity.loops.questioning.loop import CorpusIndex
-        new.ctx = LoopContext(
-            substrate=self._substrate, inquiry_id=new.inquiry_id,
-            budget_slice_s=new.budget_slice_s,
-            corpus=CorpusIndex(self._corpus_docs))
+        new.ctx = self._build_ctx(new)
         new.graph = GraphController()
-        new.loop_state = self._loop.restore(from_state["loop_state"])
+        new.loop_state = self._loops[new.loop].restore(from_state["loop_state"])
         new.note("resumed_from_checkpoint",
                  f"{handoff_id} (verified); lineage continues")
         self._checkpoints.mark_consumed(loaded["checkpoint_id"])

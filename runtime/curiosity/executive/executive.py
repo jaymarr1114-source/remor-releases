@@ -46,19 +46,21 @@ from swarm_engine.curiosity.executive.boundary import (
     CuriosityTrigger,
     TriggerRefused,
 )
-from swarm_engine.curiosity.substrate import LOOP_QUESTIONING
+from swarm_engine.curiosity.substrate import (
+    LOOP_QUESTIONING, LOOP_SCIENTIFIC_INQUIRY)
 
 #: Declared ownership map: boundary class -> owning loop. Phase 2 owns
-#: exactly one boundary class.
+#: exactly one boundary class; "scientific_inquiry" admitted by James's
+#: U-1-class decision 2026-10-01 (CUR-P3A-INT).
 LOOP_OWNERSHIP: Dict[str, str] = {
     BOUNDARY_IMPRECISE_QUESTION: LOOP_QUESTIONING,
+    BOUNDARY_HYPOTHESIS_CANDIDATE: LOOP_SCIENTIFIC_INQUIRY,
+    BOUNDARY_NOVEL_OBSERVATION: LOOP_SCIENTIFIC_INQUIRY,
 }
 
 #: Boundary classes whose owning loops do not exist yet (Phase 3+).
 #: The executive names the absence; it never routes them elsewhere.
 ABSENT_OWNERSHIP: Dict[str, str] = {
-    BOUNDARY_HYPOTHESIS_CANDIDATE: "scientific_inquiry (Phase 3)",
-    BOUNDARY_NOVEL_OBSERVATION: "scientific_inquiry (Phase 3)",
     BOUNDARY_GENERATIVE_PROMPT: "creative_exploration (Phase 3)",
     BOUNDARY_NOVEL_TASK: "generalization (Phase 3)",
 }
@@ -328,6 +330,28 @@ class CuriosityExecutive:
                     f"(>{MAX_OBJECTIVE_CHARS}): unbounded scope refused")
             notes.append("fit: bounded objective "
                          f"({len(trigger.bounded_objective)} chars)")
+        elif loop == LOOP_SCIENTIFIC_INQUIRY:
+            # Inquiry-shaped: the trigger's question_text carries the
+            # hypothesis candidate / novel observation presentation. The
+            # loop itself judges falsifiability (form_hypothesis); the
+            # executive checks shape only -- mirroring the questioning
+            # division of labor.
+            text = (trigger.question_text or "").strip()
+            if not text:
+                raise ActivationRefused(
+                    f"{R_FIT}: trigger {trigger.trigger_id} carries no "
+                    "hypothesis/observation presentation (empty "
+                    "question_text): the scientific_inquiry loop cannot "
+                    "own it")
+            notes.append("fit: inquiry-shaped (hypothesis/observation "
+                         "presentation present)")
+            if len(trigger.bounded_objective) > MAX_OBJECTIVE_CHARS:
+                raise ActivationRefused(
+                    f"{R_FIT}: bounded_objective is "
+                    f"{len(trigger.bounded_objective)} chars "
+                    f"(>{MAX_OBJECTIVE_CHARS}): unbounded scope refused")
+            notes.append("fit: bounded objective "
+                         f"({len(trigger.bounded_objective)} chars)")
         return notes
 
     # -- entry ----------------------------------------------------------
@@ -372,6 +396,8 @@ class CuriosityExecutive:
             "loops": {
                 LOOP_QUESTIONING:
                     self._run_controller.loop_view(LOOP_QUESTIONING),
+                LOOP_SCIENTIFIC_INQUIRY:
+                    self._run_controller.loop_view(LOOP_SCIENTIFIC_INQUIRY),
             },
             "produced_at": self._clock(),
         }
