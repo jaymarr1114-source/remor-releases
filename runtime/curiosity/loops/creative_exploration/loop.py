@@ -675,12 +675,28 @@ class CreativeExplorationLoop:
         """Rebuild loop state from a verified checkpoint. The graph
         region is per-exploration and rebuilt; completed stage
         summaries are kept as history and the pipeline resumes at the
-        saved stage."""
+        saved stage.
+
+        The checkpoint store round-trips loop_state through JSON with
+        default=str, so the IntentState dataclass does not survive as
+        an object (it degrades to its str() form). restore() rebuilds
+        it: assess_intent is a pure function of the trigger's
+        commission and bounded objective -- both preserved verbatim in
+        the checkpoint -- so re-derivation is faithful, not
+        approximate. (Integration-exposed defect, CUR-P3B-INT: the
+        stage battery never checkpointed, so only the kill/resume
+        path exposed it.)
+        """
         state = dict(saved)
         state["region_id"] = None
         state["root_mc"] = None
         state["stage_mc"] = None
         state["status"] = "running"
+        if not isinstance(state.get("intent"), IntentState):
+            trig = state.get("trigger") or {}
+            state["intent"] = assess_intent(
+                commission=trig.get("question_text", ""),
+                bounded_objective=trig.get("bounded_objective", ""))
         return state
 
     def abort(self, state: Dict[str, Any], ctx: LoopContext,

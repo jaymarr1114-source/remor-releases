@@ -60,8 +60,15 @@ from swarm_engine.curiosity.loops.scientific_inquiry.loop import (
     LoopContext as InquiryLoopContext,
     ScientificInquiryLoop, ScientificInquiryLoopInlet,
     SubstrateRefused as InquirySubstrateRefused)
+from swarm_engine.curiosity.loops.creative_exploration.loop import (
+    MODEL_ID as CREATIVE_MODEL_ID,
+    TERMINAL_RELEASED as CREATIVE_TERMINAL_RELEASED,
+    LoopContext as CreativeLoopContext,
+    CreativeExplorationLoop, CreativeExplorationLoopInlet,
+    SubstrateRefused as CreativeSubstrateRefused,
+    VerifiedPrimitive as CreativeVerifiedPrimitive)
 from swarm_engine.curiosity.substrate import (
-    LOOP_QUESTIONING, LOOP_SCIENTIFIC_INQUIRY)
+    LOOP_CREATIVE_EXPLORATION, LOOP_QUESTIONING, LOOP_SCIENTIFIC_INQUIRY)
 
 # Inquiry states.
 ST_PENDING = "PENDING"
@@ -77,22 +84,26 @@ CKPT_KILL = "SUSPENDED_KILL"
 CKPT_RESOURCE = "SUSPENDED_RESOURCE"
 
 #: Provenance model stamps, per loop (mechanical; no external provider).
-#: The questioning string is unchanged from Phase 2; the inquiry string
-#: is the loop's own MODEL_ID.
+#: The questioning string is unchanged from Phase 2; the inquiry and
+#: creative strings are the loops' own MODEL_IDs.
 LOOP_MODELS = {
     LOOP_QUESTIONING: ("curiosity-questioning/v1 (mechanical refinement; "
                        "no external cognition provider)"),
     LOOP_SCIENTIFIC_INQUIRY: INQUIRY_MODEL_ID,
+    LOOP_CREATIVE_EXPLORATION: CREATIVE_MODEL_ID,
 }
 
 #: Terminal states that count as a decisive convergence for attribution.
 #: Mirrors the questioning division (resolved -> success, insufficient ->
 #: partial): the inquiry loop's decisive verdicts are SUPPORTED/REFUTED;
 #: INSUFFICIENT/INCONCLUSIVE converge but stay partial. BOUNDARY_ESTABLISHED
-#: is the same string for both loops (TERMINAL_BOUNDARY).
+#: is the same string for both loops (TERMINAL_BOUNDARY); the creative
+#: loop's decisive release is CANDIDATE_GENERATED (a candidate released
+#: to the Acceptance panel as a hypothesis -- never a belief, C-6.4).
 SUCCESS_TERMINALS = frozenset({
     TERMINAL_RESOLVED, TERMINAL_BOUNDARY,
-    INQUIRY_TERMINAL_SUPPORTED, INQUIRY_TERMINAL_REFUTED})
+    INQUIRY_TERMINAL_SUPPORTED, INQUIRY_TERMINAL_REFUTED,
+    CREATIVE_TERMINAL_RELEASED})
 
 D4_NOTE = ("relevance threshold 0.25 is provisional per D-4, never a "
            "universal constant; this score is ADVISORY ONLY. Primary "
@@ -189,13 +200,16 @@ class CuriosityRunController:
         self._corpus_docs = list(corpus_docs)
         self._clock = clock
         # Loop registry dispatched by inq.loop (CUR-P3A-INT). Questioning
-        # keeps its exact construction; scientific_inquiry is admitted by
-        # James's U-1-class decision 2026-10-01. Nothing else may be
-        # registered here without a James decision -- the vocabulary
-        # stays fenced (substrate.CURIOSITY_LOOPS is the authority).
+        # keeps its exact construction; scientific_inquiry was admitted by
+        # James's U-1-class decision 2026-10-01 and creative_exploration
+        # by James's U-1-class decision 2026-10-03 (CUR-P3B-INT).
+        # Nothing else may be registered here without a James decision --
+        # the vocabulary stays fenced (substrate.CURIOSITY_LOOPS is the
+        # authority).
         self._loops = {
             LOOP_QUESTIONING: QuestioningLoop(),
             LOOP_SCIENTIFIC_INQUIRY: ScientificInquiryLoop(),
+            LOOP_CREATIVE_EXPLORATION: CreativeExplorationLoop(),
         }
         self._inlets = {
             LOOP_QUESTIONING:
@@ -203,6 +217,9 @@ class CuriosityRunController:
             LOOP_SCIENTIFIC_INQUIRY:
                 ScientificInquiryLoopInlet(
                     self._loops[LOOP_SCIENTIFIC_INQUIRY]),
+            LOOP_CREATIVE_EXPLORATION:
+                CreativeExplorationLoopInlet(
+                    self._loops[LOOP_CREATIVE_EXPLORATION]),
         }
         self._inquiries: Dict[str, InquiryRecord] = {}
         self._dispatch_seq = 0  # monotonic dispatch order for FIFO tiebreak
@@ -288,21 +305,51 @@ class CuriosityRunController:
         inq.note("admitted", f"loop={inq.loop}")
 
     def _build_ctx(self, inq: InquiryRecord) -> Any:
-        """Per-loop LoopContext construction (CUR-P3A-INT). Questioning
-        probes the corpus index; the inquiry loop tests its predictions
-        against the presented evidence lines -- the corpus documents,
-        mechanically (its run_test treats empty evidence as
-        INSUFFICIENT, never as a crash)."""
+        """Per-loop LoopContext construction (CUR-P3A-INT, CUR-P3B-INT).
+        Questioning probes the corpus index; the inquiry loop tests its
+        predictions against the presented evidence lines -- the corpus
+        documents, mechanically (its run_test treats empty evidence as
+        INSUFFICIENT, never as a crash); the creative loop composes only
+        from the presented verified ledger and runs its novelty check
+        against the corpus documents as prior art."""
         if inq.loop == LOOP_SCIENTIFIC_INQUIRY:
             return InquiryLoopContext(
                 substrate=self._substrate, inquiry_id=inq.inquiry_id,
                 budget_slice_s=inq.budget_slice_s,
                 evidence=list(self._corpus_docs))
+        if inq.loop == LOOP_CREATIVE_EXPLORATION:
+            return CreativeLoopContext(
+                substrate=self._substrate,
+                exploration_id=inq.inquiry_id,
+                budget_slice_s=inq.budget_slice_s,
+                verified_ledger=self._verified_ledger(),
+                prior_art=tuple(self._corpus_docs))
         from swarm_engine.curiosity.loops.questioning.loop import CorpusIndex
         return LoopContext(
             substrate=self._substrate, inquiry_id=inq.inquiry_id,
             budget_slice_s=inq.budget_slice_s,
             corpus=CorpusIndex(self._corpus_docs))
+
+    def _verified_ledger(self) -> List[Any]:
+        """The presented verified ledger for creative composition.
+
+        Convention (documented, checkable): a corpus document line of
+        the form "primitive_id | verification_event | gate_reference"
+        presents one verified primitive; the battery verifies every
+        cited gate reference exists (git cat-file), as CUR-P3B's T00
+        did. Lines not matching the form are prior art only -- never
+        composition material. Only concretely cited entries compose
+        (the verified-factual substrate rule); nothing is fabricated
+        here.
+        """
+        ledger: List[Any] = []
+        for doc in self._corpus_docs:
+            parts = [p.strip() for p in str(doc).split("|")]
+            if len(parts) == 3 and all(parts):
+                ledger.append(CreativeVerifiedPrimitive(
+                    primitive_id=parts[0], verification_event=parts[1],
+                    gate_reference=parts[2]))
+        return ledger
 
     # -- cadence ----------------------------------------------------------
 
@@ -341,7 +388,8 @@ class CuriosityRunController:
         try:
             sres = self._loops[inq.loop].step(inq.loop_state, inq.ctx,
                                               inq.graph)
-        except (SubstrateRefused, InquirySubstrateRefused) as exc:
+        except (SubstrateRefused, InquirySubstrateRefused,
+                CreativeSubstrateRefused) as exc:
             inq.spent_s += self._clock() - t0
             return self._handle_resource_boundary(
                 inq, cause=f"substrate refused: {exc.reason}: {exc.message}")
@@ -401,6 +449,13 @@ class CuriosityRunController:
                          "grant_epoch": inq.epoch_id},
             "produced_at": time.time(),
         }
+        if inq.loop == LOOP_CREATIVE_EXPLORATION:
+            # C-6.4: the creative loop's every exit is a hypothesis for
+            # the Acceptance panel -- carried honestly from the terminal
+            # dict, never a belief, never fabricated here.
+            payload["epistemic_status"] = terminal.get(
+                "epistemic_status", "hypothesis")
+            payload["candidates"] = terminal.get("candidates", [])
         payload_path = self._payload_dir / f"{evidence_id}.json"
         payload_path.write_text(json.dumps(payload, indent=2))
         finding = CuriosityFinding(

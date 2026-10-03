@@ -38,12 +38,18 @@ from swarm_engine.curiosity.cognition import PrecisionCognitionProvider
 #: as their convergence boundaries are demonstrated -- never speculatively.
 #: "scientific_inquiry" admitted by James's U-1-class decision 2026-10-01
 #: (CUR-P3A-INT) after its stage-level convergence boundary was
-#: demonstrated (CUR-P3A, 61/61); the fence stays closed otherwise.
-CURIOSITY_LOOPS: Tuple[str, ...] = ("questioning", "scientific_inquiry")
+#: demonstrated (CUR-P3A, 61/61); "creative_exploration" admitted by
+#: James's U-1-class decision 2026-10-03 (CUR-P3B-INT) after its
+#: stage-level convergence boundary was demonstrated (CUR-P3B, 66/66).
+#: Admission is a loop classification, never a capability claim; the
+#: fence stays closed otherwise.
+CURIOSITY_LOOPS: Tuple[str, ...] = (
+    "questioning", "scientific_inquiry", "creative_exploration")
 CURIOSITY_LOOP_SET = frozenset(CURIOSITY_LOOPS)
 
 LOOP_QUESTIONING = "questioning"
 LOOP_SCIENTIFIC_INQUIRY = "scientific_inquiry"
+LOOP_CREATIVE_EXPLORATION = "creative_exploration"
 
 
 class CuriositySubstrate(MicrocontrollerSubstrate):

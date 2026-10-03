@@ -47,21 +47,23 @@ from swarm_engine.curiosity.executive.boundary import (
     TriggerRefused,
 )
 from swarm_engine.curiosity.substrate import (
-    LOOP_QUESTIONING, LOOP_SCIENTIFIC_INQUIRY)
+    LOOP_CREATIVE_EXPLORATION, LOOP_QUESTIONING, LOOP_SCIENTIFIC_INQUIRY)
 
 #: Declared ownership map: boundary class -> owning loop. Phase 2 owns
 #: exactly one boundary class; "scientific_inquiry" admitted by James's
-#: U-1-class decision 2026-10-01 (CUR-P3A-INT).
+#: U-1-class decision 2026-10-01 (CUR-P3A-INT); "creative_exploration"
+#: admitted by James's U-1-class decision 2026-10-03 (CUR-P3B-INT).
+#: Admission is a loop classification, never a capability claim.
 LOOP_OWNERSHIP: Dict[str, str] = {
     BOUNDARY_IMPRECISE_QUESTION: LOOP_QUESTIONING,
     BOUNDARY_HYPOTHESIS_CANDIDATE: LOOP_SCIENTIFIC_INQUIRY,
     BOUNDARY_NOVEL_OBSERVATION: LOOP_SCIENTIFIC_INQUIRY,
+    BOUNDARY_GENERATIVE_PROMPT: LOOP_CREATIVE_EXPLORATION,
 }
 
 #: Boundary classes whose owning loops do not exist yet (Phase 3+).
 #: The executive names the absence; it never routes them elsewhere.
 ABSENT_OWNERSHIP: Dict[str, str] = {
-    BOUNDARY_GENERATIVE_PROMPT: "creative_exploration (Phase 3)",
     BOUNDARY_NOVEL_TASK: "generalization (Phase 3)",
 }
 
@@ -352,6 +354,29 @@ class CuriosityExecutive:
                     f"(>{MAX_OBJECTIVE_CHARS}): unbounded scope refused")
             notes.append("fit: bounded objective "
                          f"({len(trigger.bounded_objective)} chars)")
+        elif loop == LOOP_CREATIVE_EXPLORATION:
+            # Creative-shaped: the trigger's question_text carries the
+            # creative commission (intent-state). The loop itself judges
+            # ownership (assess_intent); the executive checks shape
+            # only -- mirroring the questioning/inquiry division of
+            # labor. Per the §8 selection grammar, the grammar begins
+            # with intent-state ownership; the fit gate requires a
+            # non-empty commission and a bounded objective.
+            text = (trigger.question_text or "").strip()
+            if not text:
+                raise ActivationRefused(
+                    f"{R_FIT}: trigger {trigger.trigger_id} carries no "
+                    "creative commission (empty question_text): the "
+                    "creative_exploration loop cannot own it")
+            notes.append("fit: creative-shaped (commission/intent-state "
+                         "present)")
+            if len(trigger.bounded_objective) > MAX_OBJECTIVE_CHARS:
+                raise ActivationRefused(
+                    f"{R_FIT}: bounded_objective is "
+                    f"{len(trigger.bounded_objective)} chars "
+                    f"(>{MAX_OBJECTIVE_CHARS}): unbounded scope refused")
+            notes.append("fit: bounded objective "
+                         f"({len(trigger.bounded_objective)} chars)")
         return notes
 
     # -- entry ----------------------------------------------------------
@@ -398,6 +423,9 @@ class CuriosityExecutive:
                     self._run_controller.loop_view(LOOP_QUESTIONING),
                 LOOP_SCIENTIFIC_INQUIRY:
                     self._run_controller.loop_view(LOOP_SCIENTIFIC_INQUIRY),
+                LOOP_CREATIVE_EXPLORATION:
+                    self._run_controller.loop_view(
+                        LOOP_CREATIVE_EXPLORATION),
             },
             "produced_at": self._clock(),
         }
