@@ -33,7 +33,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_TREE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
+_TREE = os.path.abspath(os.path.join(_HERE, "..", ".."))
 for _p in (os.path.join(_TREE, "pylib"),
            os.path.join(_TREE, "distill1"),
            _TREE):
