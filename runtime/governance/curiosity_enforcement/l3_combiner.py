@@ -45,6 +45,26 @@ class L3Refused(EnforcementError):
 FAILED_CLASSIFICATIONS = frozenset({"MISSED", "INVALID"})
 
 
+def _attestation_field(attestation: Dict, *names: str):
+    """Read one logical field from a GAM attestation record.
+
+    The real GAM attestation record (Phase 0 design Sections 2/3,
+    runtime/curiosity/rollcall/schemas.py) uses
+    domain_id/challenge_id/attestation_id; the P1B-era proof doubles
+    used the domain/check_id aliases. Accept the real record shape
+    first, fall back to the aliases, so the combiner consumes the
+    attestation GAM actually emits. (CUR-P6C integration-exposed
+    repair 2026-10-04: the combiner rejected every real GAM record
+    with "attestation is for a different domain", so Level 3 could
+    never fire through its own combiner.)
+    """
+    for name in names:
+        value = attestation.get(name)
+        if value is not None:
+            return value
+    return None
+
+
 def evaluate_l3(
     engine: EnforcementEngine,
     domain: str,
@@ -59,8 +79,10 @@ def evaluate_l3(
 
     violation_fact: {severity, established_by, active_from, active_until|None,
                      evidence_refs}
-    attestation: GAM record {check_id, domain, issued_at, responded_at,
-                 classification, nonce}
+    attestation: GAM record -- the real attestation shape
+    ({attestation_id, challenge_id, domain_id, issued_at, responded_at,
+    classification, ...} per rollcall/schemas.py); the P1B-era
+    {check_id, domain, ...} aliases are still accepted.
     """
     now = clock()
 
@@ -75,7 +97,8 @@ def evaluate_l3(
         )
     if attestation is None:
         raise L3Refused("no roll-call attestation fact")
-    if attestation.get("domain") != domain:
+    attestation_domain = _attestation_field(attestation, "domain", "domain_id")
+    if attestation_domain != domain:
         raise L3Refused("attestation is for a different domain")
     classification = attestation.get("classification")
     if classification not in FAILED_CLASSIFICATIONS:
@@ -94,6 +117,8 @@ def evaluate_l3(
             "violation window"
         )
 
+    rollcall_check_id = _attestation_field(
+        attestation, "check_id", "challenge_id", "attestation_id")
     return engine.transition(
         domain,
         EnforcementState.BANNED_6M,
@@ -101,11 +126,11 @@ def evaluate_l3(
         reason_refs={
             "violation_ref": violation_fact.get("violation_id", "unknown"),
             "evidence_refs": violation_fact.get("evidence_refs", []),
-            "rollcall_check_id": attestation.get("check_id"),
+            "rollcall_check_id": rollcall_check_id,
             "rollcall_classification": classification,
         },
         preserved_refs={
             "violation_evidence": violation_fact.get("evidence_refs", []),
-            "rollcall_records": [attestation.get("check_id")],
+            "rollcall_records": [rollcall_check_id],
         },
     )
