@@ -19,6 +19,7 @@ from .request import (
 )
 from .takeup import ActivationTakeUp, TakeUpError
 from .termination import TerminationRefused, record_kill_termination
+from .evidence_return import ReturnRefused, present_for_acceptance
 
 __all__ = [
     "ST_ACCEPTED", "ST_KILLED", "ST_REFUSED", "ST_REQUESTED", "ST_WITHDRAWN",
@@ -27,4 +28,5 @@ __all__ = [
     "ActivationRequest", "DuplicateActiveRequest", "RequestMalformed",
     "ActivationTakeUp", "TakeUpError",
     "TerminationRefused", "record_kill_termination",
+    "ReturnRefused", "present_for_acceptance",
 ]
