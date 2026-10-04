@@ -37,8 +37,11 @@ import os
 import sys
 import traceback
 
-TREE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(TREE, "pylib"))
+TREE = os.environ.get(
+    "WT_ROOT",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, TREE)  # WT_ROOT: runtime.* import root (ledger's evidence/provenance/gap imports)
+sys.path.insert(0, os.path.join(TREE, "pylib"))  # swarm_engine import root
 
 from swarm_engine.creativity import (  # noqa: E402
     STAGE_ORDER,
@@ -329,7 +332,31 @@ def main():
     files = sorted(
         os.path.join(pkg, f) for f in os.listdir(pkg) if f.endswith(".py")
     )
-    check("package has the three modules", len(files) == 3, str(files))
+    # Scope fence (CREATIVITY-INTEGRATE-1, 2026-10-04): the original
+    # "exactly three modules" assertion post-dated — the track
+    # legitimately grew the package in causal order (ledger, critique,
+    # release, budget, executive, run_controller all crossed+landed).
+    # The fence's intent is preserved and brought to current reality:
+    # the package contains EXACTLY the track-authorized modules, and no
+    # premature machinery (peer arbitration D-7 is not built; dispatch is
+    # the standing exclusion; anything else the track plan does not
+    # authorize at this phase is forbidden).
+    modules = sorted(
+        f[:-3] for f in os.listdir(pkg)
+        if f.endswith(".py") and f != "__init__.py"
+    )
+    authorized = {
+        "stages", "intent", "ledger", "critique",
+        "release", "budget", "executive", "run_controller",
+    }
+    forbidden_kinds = ("arbitration", "dispatch")
+    extras = [m for m in modules if m not in authorized]
+    missing = sorted(authorized - set(modules))
+    premature = [m for m in modules
+                 if any(k in m for k in forbidden_kinds)]
+    check("package has exactly the track-authorized modules",
+          not extras and not missing and not premature,
+          "extras=%s missing=%s premature=%s" % (extras, missing, premature))
     ok = True
     for f in files:
         try:

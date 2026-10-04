@@ -21,6 +21,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WT_ROOT = os.environ.get("WT_ROOT", os.path.abspath(
     os.path.join(SCRIPT_DIR, "..", "..")))
 sys.path.insert(0, WT_ROOT)
+sys.path.insert(0, os.path.join(WT_ROOT, "pylib"))  # swarm_engine import root
+# (CREATIVITY-INTEGRATE-1, 2026-10-04: the package __init__ now exports
+# the executive, whose import chain needs swarm_engine; same repair
+# class as the slice1 battery's WT_ROOT fix.)
 
 from runtime.creativity.ledger import (  # noqa: E402
     CompositionVerdict,
