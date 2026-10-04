@@ -75,6 +75,11 @@ ST_TERMINATED = "TERMINATED"
 # terminal_state; these name inquiry suspensions, not Primary terminals).
 CKPT_KILL = "SUSPENDED_KILL"
 CKPT_RESOURCE = "SUSPENDED_RESOURCE"
+# CUR-P4A: ordinary-stop checkpoint label (A13/A18). The authorized C-9
+# design requires an ordinary termination path for Primary withdrawal
+# (A28); the as-built run controller had kill/pause/resume/natural-terminal
+# only. This label names ordinary stops, never kills.
+CKPT_STOP = "STOPPED_ORDINARY"
 
 #: Provenance model stamps, per loop (mechanical; no external provider).
 #: The questioning string is unchanged from Phase 2; the inquiry string
@@ -577,6 +582,103 @@ class CuriosityRunController:
         inq.result = {
             "inquiry_id": inq.inquiry_id, "state": ST_KILLED,
             "kill_reason": inq.kill_reason,
+            "checkpoint_id": checkpoint_id,
+            "spent_s": round(inq.spent_s, 6),
+        }
+        return inq.result
+
+    # -- CUR-P4A: ordinary stop (A13/A18) --------------------------------------
+    # Integration-exposed gap vs the authorized C-9 design: A28 (Primary
+    # withdrawal) requires terminating a live inquiry through the run
+    # controller's ORDINARY termination path, "not a kill". The as-built
+    # controller had kill_inquiry / pause / resume / natural-terminal only.
+    # This method is that path. It shares NO record path with kill_inquiry:
+    # no kill_requested flag is set, the state is ST_TERMINATED (never
+    # ST_KILLED), the kill ledger is untouched, and partial evidence is
+    # preserved as INCONCLUSIVE with the cause (C-9.4 preservation
+    # semantics apply to ordinary stops too: no owner may erase it).
+    # The loop's abort() primitive stops live machinery in both paths --
+    # stopping machinery is stopping machinery; the RECORDS are what
+    # distinguish withdrawal (operational) from kill (enforcement), per
+    # the design's load-bearing distinction.
+    def stop_inquiry(self, inquiry_id: str, *, cause: str) -> Dict[str, Any]:
+        """Ordinary stop: terminate a live inquiry without kill semantics."""
+        inq = self._require(inquiry_id)
+        if inq.state in (ST_TERMINATED, ST_SUSPENDED, ST_KILLED):
+            return {"inquiry_id": inquiry_id, "state": inq.state,
+                    "detail": "already stopped; ordinary stop is a no-op"}
+        if inq.state not in (ST_ACTIVE, ST_PAUSED):
+            raise AdmissionRefused(
+                f"cannot ordinary-stop inquiry in state {inq.state}")
+        # Checkpoint first: the saved lineage must carry the stop, or a
+        # later resume loses the attempt's terminal event across the
+        # process boundary (same ordering rationale as _execute_kill).
+        checkpoint_id = self._checkpoint_inquiry(inq, CKPT_STOP)
+        # Stop the loop's live machinery (retire MCs). Recorded below as
+        # an ordinary stop, never as a kill.
+        self._loops[inq.loop].abort(inq.loop_state, inq.ctx, inq.graph)
+        inq.note("stopped", cause)
+        # Preserve partial evidence as INCONCLUSIVE with the cause. The
+        # provenance is real (the loop ran and produced partial work);
+        # triage is "retain" (preserved, proposed to nothing).
+        evidence_id = "ev_" + uuid.uuid4().hex[:16]
+        payload = {
+            "evidence_id": evidence_id,
+            "inquiry_id": inq.inquiry_id,
+            "trigger_id": inq.trigger.trigger_id,
+            "loop": inq.loop,
+            "bounded_objective": inq.trigger.bounded_objective,
+            "origin": inq.trigger.origin,
+            "terminal_state": "INCONCLUSIVE",
+            "stop_cause": cause,
+            "precise_question": "",
+            "precision_score": 0,
+            "passes": [],
+            "relevance": {"score": None, "d4_note": D4_NOTE},
+            "triage": "retain",
+            "triage_note": (
+                f"partial evidence preserved after ordinary stop "
+                f"({cause}); proposed to nothing"),
+            "resource": {"spent_s": round(inq.spent_s, 6),
+                         "slice_s": inq.budget_slice_s,
+                         "grant_epoch": inq.epoch_id},
+            "produced_at": time.time(),
+        }
+        payload_path = self._payload_dir / f"{evidence_id}.json"
+        payload_path.write_text(json.dumps(payload, indent=2))
+        finding = CuriosityFinding(
+            evidence_id=evidence_id, loop=inq.loop,
+            bounded_objective=inq.trigger.bounded_objective,
+            origin=inq.trigger.origin,
+            terminal_state="INCONCLUSIVE",
+            provenance=EvidenceProvenance(
+                loop=inq.loop,
+                bounded_objective=inq.trigger.bounded_objective,
+                model=LOOP_MODELS[inq.loop], triage="retain"),
+            payload_ref=str(payload_path))
+        self._writer.submit(finding)  # validates + persists (fenced)
+        # Attribution outcome is "partial" (the frozen Result vocabulary is
+        # success|partial|failed): the inquiry did partial work. The
+        # withdrawal is named in detail, the stop_cause, and the lineage.
+        self._attribute(inq, evidence_id=evidence_id,
+                        outcome="partial", detail=f"WITHDRAWN: {cause}")
+        self._ledger.record(TerminalRoute(
+            route_id="route_" + uuid.uuid4().hex[:12],
+            loop=inq.loop, terminal_state="INCONCLUSIVE",
+            consumer="curiosity_evidence_store",
+            reason=(f"inquiry {inq.inquiry_id} ordinary-stopped: {cause}"),
+            evidence_refs={"evidence_id": evidence_id}))
+        self._release_inquiry_loop(inq)
+        inq.evidence_id = evidence_id
+        inq.terminal_state = "INCONCLUSIVE"
+        inq.state = ST_TERMINATED
+        inq.note("terminated", f"INCONCLUSIVE (ordinary stop: {cause}) -> "
+                               f"{evidence_id} spent={inq.spent_s:.4f}s")
+        inq.result = {
+            "inquiry_id": inq.inquiry_id, "state": ST_TERMINATED,
+            "stop_cause": cause,
+            "terminal_state": "INCONCLUSIVE",
+            "evidence_id": evidence_id,
             "checkpoint_id": checkpoint_id,
             "spent_s": round(inq.spent_s, 6),
         }
