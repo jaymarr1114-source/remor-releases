@@ -39,8 +39,9 @@ from swarm_engine.curiosity.cognition import PrecisionCognitionProvider
 #: "scientific_inquiry" admitted by James's U-1-class decision 2026-10-01
 #: (CUR-P3A-INT) after its stage-level convergence boundary was
 #: demonstrated (CUR-P3A, 61/61); the fence stays closed otherwise.
-#: "creative_exploration" admitted by James 2026-10-03 (loop-classification
-#: vocabulary only, never a claim of independent creative reasoning).
+#: "creative_exploration" admitted by James 2026-10-03 (CUR-P3B-INT;
+#: loop-classification vocabulary only, never a claim of independent
+#: creative reasoning; stage boundary demonstrated CUR-P3B, 66/66).
 #: "discovery_novelty" admitted by James 2026-10-03 (loop-classification
 #: vocabulary only, never a claim of independent scientific reasoning).
 CURIOSITY_LOOPS: Tuple[str, ...] = (
