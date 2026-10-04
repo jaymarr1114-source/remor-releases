@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional
 
 from .request import (
     ST_ACCEPTED,
+    ST_KILLED,
     ST_REFUSED,
     ST_REQUESTED,
     ST_WITHDRAWN,
@@ -203,8 +204,28 @@ class ActivationTakeUp:
             req.state = ST_WITHDRAWN
             return req.view()
         # REFUSED / WITHDRAWN: already terminal; named no-op.
+        # ST_KILLED: the kill termination stands — withdrawal after a kill
+        # must not rewrite kill history (CUR-P4B race ordering).
+        if req.state == ST_KILLED:
+            return dict(req.view(), _withdrawal_note=(
+                f"request already KILLED "
+                f"({req.termination['reason'] if req.termination else '?'}): "
+                f"withdrawal is a no-op; the kill termination stands"))
         return dict(req.view(), _withdrawal_note=(
             f"request already {req.state}: withdrawal is a no-op"))
+
+    # -- kill termination (C-9 R7; CUR-P4B) ----------------------------------
+    def record_termination(self, request_id: str,
+                           kill_result: Dict[str, Any], *,
+                           level: str, issuer: str) -> Dict[str, Any]:
+        """Write the named KILLED termination after a REAL kill.
+
+        Thin delegate to termination.record_kill_termination (fail-closed:
+        real kill cross-checked against the run controller's live record).
+        """
+        from .termination import record_kill_termination
+        return record_kill_termination(self, request_id, kill_result,
+                                       level=level, issuer=issuer)
 
     # -- internals ----------------------------------------------------------
     def _bounded_objective(self, req: ActivationRequest) -> str:

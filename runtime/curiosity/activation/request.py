@@ -30,6 +30,9 @@ ST_REQUESTED = "REQUESTED"
 ST_ACCEPTED = "ACCEPTED"
 ST_REFUSED = "REFUSED"
 ST_WITHDRAWN = "WITHDRAWN"
+ST_KILLED = "KILLED"  # CUR-P4B: terminal state for a killed Primary-requested
+# inquiry (R7). The termination record (below) names the kill; the state
+# marks the request terminal so withdrawal cannot rewrite kill history.
 
 # Refusal / terminal names (design §4 refusal-state table R1–R7).
 R_REQUEST_MALFORMED = "REQUEST_MALFORMED"            # R1
@@ -58,8 +61,8 @@ class ActivationRequest:
     Primary-written (set at construction, never mutated by take-up):
     request_id, issued_at, issued_by, operational_objective_ref,
     knowledge_gap, bounded_requirement, epoch_context.
-    Curiosity-written (takeup.py only): state, decision, decision_basis,
-    inquiry_id, withdrawn_at, withdrawn_reason.
+    Curiosity-written (takeup.py / termination.py only): state, decision,
+    decision_basis, inquiry_id, withdrawn_at, withdrawn_reason, termination.
     """
 
     # -- Primary-written ---------------------------------------------------
@@ -78,6 +81,12 @@ class ActivationRequest:
     inquiry_id: Optional[str] = None
     withdrawn_at: Optional[float] = None
     withdrawn_reason: Optional[str] = None
+    # CUR-P4B: the named KILLED termination record (R7). Written exactly
+    # once by termination.record_kill_termination after a REAL kill. This
+    # is a TERMINATION, not a finding: it carries no charter terminal_state,
+    # no provenance block, no evidence payload — it names the enforcement
+    # act (level, reason, issuer, checkpoint, preserved partial evidence).
+    termination: Optional[Dict[str, Any]] = None
 
     def validate(self) -> "ActivationRequest":
         """Fail-closed: a malformed record is not an activation request."""
@@ -131,4 +140,6 @@ class ActivationRequest:
             "inquiry_id": self.inquiry_id,
             "withdrawn_at": self.withdrawn_at,
             "withdrawn_reason": self.withdrawn_reason,
+            "termination": (dict(self.termination)
+                            if self.termination else None),
         }

@@ -576,13 +576,69 @@ class CuriosityRunController:
         # terminal event across the process boundary.
         inq.note("killed", inq.kill_reason or ckpt_label)
         checkpoint_id = self._checkpoint_inquiry(inq, ckpt_label)
-        self._attribute(inq, evidence_id=None, outcome="failed",
+        # -- CUR-P4B: C-9.4 preservation -----------------------------------
+        # Integration-exposed gap vs the authorized C-9 design: a killed
+        # inquiry's partial evidence must survive as INCONCLUSIVE with the
+        # kill cause recorded (C-9.4: "no owner may erase it"). The as-built
+        # kill path checkpointed but persisted no finding. This block
+        # mirrors the ordinary-stop preservation above, with kill-appropriate
+        # cause naming. It is ADDITIVE: the kill records below (ST_KILLED,
+        # kill_requested, kill ledger notes, outcome="failed") are unchanged.
+        # The provenance is real (the loop ran and produced partial work);
+        # triage is "retain" (preserved, proposed to nothing).
+        evidence_id = "ev_" + uuid.uuid4().hex[:16]
+        payload = {
+            "evidence_id": evidence_id,
+            "inquiry_id": inq.inquiry_id,
+            "trigger_id": inq.trigger.trigger_id,
+            "loop": inq.loop,
+            "bounded_objective": inq.trigger.bounded_objective,
+            "origin": inq.trigger.origin,
+            "terminal_state": "INCONCLUSIVE",
+            "kill_cause": inq.kill_reason,
+            "precise_question": "",
+            "precision_score": 0,
+            "passes": [],
+            "relevance": {"score": None, "d4_note": D4_NOTE},
+            "triage": "retain",
+            "triage_note": (
+                f"partial evidence preserved after kill "
+                f"({inq.kill_reason}); proposed to nothing"),
+            "resource": {"spent_s": round(inq.spent_s, 6),
+                         "slice_s": inq.budget_slice_s,
+                         "grant_epoch": inq.epoch_id},
+            "produced_at": time.time(),
+        }
+        payload_path = self._payload_dir / f"{evidence_id}.json"
+        payload_path.write_text(json.dumps(payload, indent=2))
+        finding = CuriosityFinding(
+            evidence_id=evidence_id, loop=inq.loop,
+            bounded_objective=inq.trigger.bounded_objective,
+            origin=inq.trigger.origin,
+            terminal_state="INCONCLUSIVE",
+            provenance=EvidenceProvenance(
+                loop=inq.loop,
+                bounded_objective=inq.trigger.bounded_objective,
+                model=LOOP_MODELS[inq.loop], triage="retain"),
+            payload_ref=str(payload_path))
+        self._writer.submit(finding)  # validates + persists (fenced)
+        # -- end CUR-P4B ----------------------------------------------------
+        self._attribute(inq, evidence_id=evidence_id, outcome="failed",
                         detail=f"killed: {inq.kill_reason}")
+        self._ledger.record(TerminalRoute(
+            route_id="route_" + uuid.uuid4().hex[:12],
+            loop=inq.loop, terminal_state="INCONCLUSIVE",
+            consumer="curiosity_evidence_store",
+            reason=(f"inquiry {inq.inquiry_id} killed: {inq.kill_reason}"),
+            evidence_refs={"evidence_id": evidence_id}))
+        inq.evidence_id = evidence_id
+        inq.terminal_state = "INCONCLUSIVE"
         inq.state = ST_KILLED
         inq.result = {
             "inquiry_id": inq.inquiry_id, "state": ST_KILLED,
             "kill_reason": inq.kill_reason,
             "checkpoint_id": checkpoint_id,
+            "evidence_id": evidence_id,
             "spent_s": round(inq.spent_s, 6),
         }
         return inq.result
