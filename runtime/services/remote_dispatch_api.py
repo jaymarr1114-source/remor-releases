@@ -82,16 +82,24 @@ class RemoteDispatchService:
         device_id = (body.get("device_id") or "").strip()
         scope_d = dict(body.get("scope") or {"actions": []})
         # budget/ttl_s are Scope fields, not controller kwargs.
-        if "budget" in scope_d:
-            scope_d["max_actions"] = int(scope_d.pop("budget"))
-        scope = Scope.from_dict(scope_d)
+        # The int() cast is inside the try so a bad budget value raises
+        # SessionError (client-facing 4xx) instead of an uncaught ValueError (500).
+        try:
+            if "budget" in scope_d:
+                try:
+                    scope_d["max_actions"] = int(scope_d.pop("budget"))
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": "invalid budget: must be an integer"}
+            scope = Scope.from_dict(scope_d)
+        except SessionError as e:
+            return {"ok": False, "error": "invalid scope"}
         if not device_id:
             return {"ok": False, "error": "device_id required"}
         try:
             out = self.controller.request_session(device_id, scope)
             return {"ok": True, **out}
-        except SessionError as e:
-            return {"ok": False, "error": str(e)}
+        except SessionError:
+            return {"ok": False, "error": "session request failed"}
 
     def list_sessions(self, body: Dict[str, Any]) -> Dict[str, Any]:
         import sqlite3
@@ -159,13 +167,17 @@ class RemoteDispatchService:
             # offline?)" pre-check is gone, replaced by the precise
             # resolution refusal or the true transport error.
             sess = self.controller.connect(session_id, session_token)
-        except Exception as e:  # noqa: BLE001 -- refusal is body data
+        except (ControllerError, SessionError) as e:
             return {"ok": False, "refused": f"connect: {e}"}
+        except Exception:  # noqa: BLE001 -- never leak internals
+            return {"ok": False, "refused": "connect: internal error"}
         try:
             results = sess.act_batch(actions)
             return {"ok": True, "results": results}
-        except Exception as e:  # noqa: BLE001
+        except (ControllerError, SessionError) as e:
             return {"ok": False, "refused": str(e)}
+        except Exception:  # noqa: BLE001 -- never leak internals
+            return {"ok": False, "refused": "action failed: internal error"}
         finally:
             try:
                 sess.channel.close()

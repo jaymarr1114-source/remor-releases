@@ -101,7 +101,16 @@ class AuthGate:
         BaseHTTPRequestHandler; plain dicts in tests).
         """
         if self._token is None:
-            return None  # permissive local-first default
+            # Fail closed: no token configured anywhere. The local-first
+            # default is preserved by provisioning a token when base_dir is
+            # set; reaching here means the gate was constructed without any
+            # token source, which must not silently allow access.
+            return 401, {
+                "ok": False,
+                "error": "unauthorized: no API token configured "
+                         "(set REMOR_API_TOKEN or provide a base_dir)",
+                "code": AUTH_REQUIRED_CODE,
+            }
         presented = self._bearer(headers)
         if presented is None:
             return 401, {
