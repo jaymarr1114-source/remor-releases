@@ -42,12 +42,14 @@ from swarm_engine.curiosity.executive.boundary import (
     BOUNDARY_HYPOTHESIS_CANDIDATE,
     BOUNDARY_IMPRECISE_QUESTION,
     BOUNDARY_NOVEL_OBSERVATION,
+    BOUNDARY_NOVEL_PATTERN,
     BOUNDARY_NOVEL_TASK,
     CuriosityTrigger,
     TriggerRefused,
 )
 from swarm_engine.curiosity.substrate import (
-    LOOP_QUESTIONING, LOOP_SCIENTIFIC_INQUIRY)
+    LOOP_QUESTIONING, LOOP_SCIENTIFIC_INQUIRY,
+    LOOP_CREATIVE_EXPLORATION, LOOP_DISCOVERY_NOVELTY)
 
 #: Declared ownership map: boundary class -> owning loop. Phase 2 owns
 #: exactly one boundary class; "scientific_inquiry" admitted by James's
@@ -56,12 +58,13 @@ LOOP_OWNERSHIP: Dict[str, str] = {
     BOUNDARY_IMPRECISE_QUESTION: LOOP_QUESTIONING,
     BOUNDARY_HYPOTHESIS_CANDIDATE: LOOP_SCIENTIFIC_INQUIRY,
     BOUNDARY_NOVEL_OBSERVATION: LOOP_SCIENTIFIC_INQUIRY,
+    BOUNDARY_GENERATIVE_PROMPT: LOOP_CREATIVE_EXPLORATION,
+    BOUNDARY_NOVEL_PATTERN: LOOP_DISCOVERY_NOVELTY,
 }
 
 #: Boundary classes whose owning loops do not exist yet (Phase 3+).
 #: The executive names the absence; it never routes them elsewhere.
 ABSENT_OWNERSHIP: Dict[str, str] = {
-    BOUNDARY_GENERATIVE_PROMPT: "creative_exploration (Phase 3)",
     BOUNDARY_NOVEL_TASK: "generalization (Phase 3)",
 }
 

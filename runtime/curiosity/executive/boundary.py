@@ -26,6 +26,7 @@ BOUNDARY_HYPOTHESIS_CANDIDATE = "hypothesis_candidate"      # -> scientific_inqu
 BOUNDARY_NOVEL_OBSERVATION = "novel_observation"            # -> scientific_inquiry
 BOUNDARY_GENERATIVE_PROMPT = "generative_prompt"            # -> creative_exploration
 BOUNDARY_NOVEL_TASK = "novel_task"                          # -> generalization
+BOUNDARY_NOVEL_PATTERN = "novel_pattern"                    # -> discovery_novelty
 
 ORIGINS = ("PRIMARY_REQUESTED", "CURIOUSITY_INITIATED")
 
