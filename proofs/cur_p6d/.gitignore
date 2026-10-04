@@ -1,0 +1,4 @@
+# P6D drill state (fresh per run)
+.p6d_state/
+*.log
+p6d_attempt_log.json

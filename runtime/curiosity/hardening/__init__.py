@@ -14,4 +14,8 @@ doubles); every enforcement transition happens in the proof driver, run
 as __main__ -- the governance-plane caller.
 
 CUR-P6C owns p6c_drill.py in this package (new file; branch cur-p6c).
+CUR-P6D owns p6d_drill.py and p6d_curiosity_probe.py in this package
+(branch cur-p6d, report-don't-land).
+
+This file carries no code -- only the package docstring.
 """
