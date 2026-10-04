@@ -952,6 +952,10 @@ class _Service:
         # not a parallel identity store -- and merged into the contract
         # route table. Fail-closed at boot.
         self._wire_remote_dispatch()
+        # [TRACK2-READ-1] P1-P10 read-only contracts (experiences,
+        # candidates, capabilities detail, providers, agent provenance,
+        # intellect events). Grounded in the real org/intellect stores.
+        self._wire_track2()
 
     # -- dispatch learning (Worker 1 / LIVE DISPATCH FLOW) ----------------------------
     def _boot_dispatch_learning(self):
@@ -1375,6 +1379,39 @@ class _Service:
         self.ff["contract_routes"].update(
             routes_for_remote_dispatch(svc))
 
+    # -- track2 read surface (P1-P10, 2026-09-25 integration design) ------
+    def _wire_track2(self):
+        """Mount the P1-P10 read-only contracts on the contract table.
+
+        Grounded in the real stores: ExperienceStore over the
+        deployment-convention OrgStore (<engine-db-dir>/agent_org.db),
+        ExperienceLog over the engine DB, CapabilityAPI from the service
+        dict, and direct OrgStore table reads for P8 (column lists
+        verified against runtime/agent_org/store.py SCHEMAS).
+
+        Read methods on ExperienceStore need no verifier attachment
+        (_require_board is only called by promote/record_l3), so no
+        governance bypass is involved. All routes are GET / read-only.
+        Missing org DB -> routes return 404-shaped honest errors.
+        """
+        from swarm_engine.agent_org.experience import ExperienceStore
+        from swarm_engine.agent_org.store import OrgStore
+        from swarm_engine.intellect.experience import ExperienceLog
+
+        org_db = os.path.join(os.path.dirname(self.engine.db_path),
+                              "agent_org.db")
+        org_store = OrgStore(org_db)
+        exp_store = ExperienceStore(org_store)
+        intellect_log = ExperienceLog(db_path=self.engine.db_path)
+        capabilities_api = self.ff["capabilities"]
+        self.ff["track2"] = {
+            "exp_store": exp_store, "intellect_log": intellect_log,
+            "org_store": org_store,
+        }
+        self.ff["contract_routes"].update(
+            routes_for_track2(exp_store, intellect_log, capabilities_api,
+                              org_store, self.engine))
+
     # -- media front (wired to the verified substrate) -------------------------
     def _wire_media(self):
         """Wire the verified media substrate behind the governed HTTP
@@ -1691,6 +1728,272 @@ def _aid(s: str) -> int:
         return int(s)
     except ValueError:
         raise ValueError(f"bad artifact id: {s!r}")
+
+
+def routes_for_track2(exp_store, intellect_log, capabilities_api, org_store,
+                      engine) -> Dict[Any, Any]:
+    """Route table: (method, path) -> handler(body_dict) -> JSON dict.
+
+    P1-P10 PROPOSED contracts from the 2026-09-25 integration design
+    (02_EXPERIENCE_CONTRACTS.md, 03_ROUTE_ALIGNMENT.md). All routes are
+    READ-ONLY GETs under /api/track2/. No writes, no admission changes.
+
+    `exp_store` is an ExperienceStore (reads need no verifier attachment).
+    `intellect_log` is an ExperienceLog. `capabilities_api` is a
+    CapabilityAPI. `org_store` is an OrgStore for P8 table reads.
+    `engine` is the SwarmEngine (for P6 effective_status).
+    """
+    from swarm_engine.synthesis.integrity import effective_status
+
+    # -- shapes ---------------------------------------------------------
+    def _summary(exp) -> Dict[str, Any]:
+        """Summary shape: full OrganizationalExperience MINUS `code`."""
+        return {
+            "exp_id": exp.exp_id, "level": exp.level,
+            "technique_name": exp.technique_name,
+            "problem_class": exp.problem_class,
+            "entrypoint": exp.entrypoint, "tags": list(exp.tags),
+            "io_contract": dict(exp.io_contract), "params": dict(exp.params),
+            "derived_from": list(exp.derived_from),
+            "code_digest": exp.code_digest, "created_at": exp.created_at,
+            "discovered_by": exp.discovered_by, "origin": exp.origin,
+            "verdict_execution_id": exp.verdict_execution_id,
+        }
+
+    def _full(exp) -> Dict[str, Any]:
+        """Full record: summary PLUS `code` and `validation_evidence`."""
+        rec = _summary(exp)
+        rec["code"] = exp.code
+        rec["validation_evidence"] = dict(exp.validation_evidence)
+        return rec
+
+    def _candidate_shape(cand) -> Dict[str, Any]:
+        return {
+            "candidate_id": cand.candidate_id, "wp_id": cand.wp_id,
+            "agent_id": cand.agent_id, "problem_class": cand.problem_class,
+            "technique_name": cand.technique_name,
+            "description": cand.description, "code": cand.code,
+            "entrypoint": cand.entrypoint,
+            "io_contract": dict(cand.io_contract), "tags": list(cand.tags),
+            "params": dict(cand.params),
+            "evidence_refs": dict(cand.evidence_refs),
+            "created_at": cand.created_at,
+        }
+
+    def _parse_limit(body: Dict[str, Any], default: int,
+                     max_n: int) -> Tuple[Optional[int], Optional[Dict]]:
+        raw = (body or {}).get("limit", default)
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return None, {"ok": False,
+                          "error": f"bad limit {raw!r}: must be an integer"}
+        if n < 1 or n > max_n:
+            return None, {"ok": False,
+                          "error": f"bad limit {n}: must be 1..{max_n}"}
+        return n, None
+
+    # -- P1: list experiences -------------------------------------------
+    def _p1_list(body: Dict[str, Any]) -> Dict[str, Any]:
+        body = body or {}
+        level = body.get("level")
+        if level is not None and level not in ("L2", "L3"):
+            return {"ok": False,
+                    "error": f"bad level {level!r}: must be L2 or L3"}
+        limit, err = _parse_limit(body, 50, 1000)
+        if err:
+            return err
+        problem_class = body.get("problem_class")
+        exps = exp_store.list_experiences(problem_class=problem_class)
+        if level is not None:
+            exps = [e for e in exps if e.level == level]
+        # Newest first by created_at.
+        exps.sort(key=lambda e: e.created_at or "", reverse=True)
+        return {"ok": True, "experiences": [_summary(e) for e in exps[:limit]],
+                "limit": limit}
+
+    # -- P2: get one experience -----------------------------------------
+    def _p2_get(body: Dict[str, Any]) -> Dict[str, Any]:
+        exp_id = str((body or {}).get("exp_id", ""))
+        try:
+            exp = exp_store.get_experience(exp_id)
+        except KeyError:
+            return {"ok": False,
+                    "error": f"unknown experience {exp_id!r}"}
+        return {"ok": True, "experience": _full(exp)}
+
+    # -- P3: experience lineage -----------------------------------------
+    def _p3_lineage(body: Dict[str, Any]) -> Dict[str, Any]:
+        exp_id = str((body or {}).get("exp_id", ""))
+        try:
+            exp = exp_store.get_experience(exp_id)
+        except KeyError:
+            return {"ok": False,
+                    "error": f"unknown experience {exp_id!r}"}
+        # Stored derived_from lists are always resolvable (unknown ids
+        # raise VerificationFailed at write time).
+        lineage = [_summary(exp_store.get_experience(d))
+                   for d in exp.derived_from]
+        return {"ok": True, "exp_id": exp_id, "derived_from": lineage}
+
+    # -- P4: candidates ---------------------------------------------------
+    def _p4_list(body: Dict[str, Any]) -> Dict[str, Any]:
+        limit, err = _parse_limit(body or {}, 50, 1000)
+        if err:
+            return err
+        cands = exp_store.list_candidates()
+        cands.sort(key=lambda c: c.created_at or "", reverse=True)
+        return {"ok": True,
+                "candidates": [_candidate_shape(c) for c in cands[:limit]],
+                "limit": limit}
+
+    def _p4_get(body: Dict[str, Any]) -> Dict[str, Any]:
+        cid = str((body or {}).get("candidate_id", ""))
+        try:
+            cand = exp_store.get_candidate(cid)
+        except KeyError:
+            return {"ok": False, "error": f"unknown candidate {cid!r}"}
+        return {"ok": True, "candidate": _candidate_shape(cand)}
+
+    # -- P5: relevance query ----------------------------------------------
+    def _p5_relevant(body: Dict[str, Any]) -> Dict[str, Any]:
+        problem_class = (body or {}).get("problem_class")
+        if not problem_class:
+            return {"ok": False,
+                    "error": "problem_class is required"}
+        # get_relevant() is L2-only, no code, no agent-private state.
+        return {"ok": True,
+                "experiences": exp_store.get_relevant(str(problem_class))}
+
+    # -- P6: capability detail ----------------------------------------------
+    def _p6_capability(body: Dict[str, Any]) -> Dict[str, Any]:
+        cap_id = str((body or {}).get("id", ""))
+        res = capabilities_api.get_capability(cap_id)
+        if not res.get("ok"):
+            return res
+        try:
+            eff = effective_status(engine, cap_id)
+        except Exception:
+            eff = {"effective": "unknown"}
+        detail = dict(res.get("capability") or {})
+        detail["effective_status"] = eff
+        out = {"ok": True, "capability": detail}
+        for k in ("scope", "developer_gating"):
+            if k in res:
+                out[k] = res[k]
+        return out
+
+    # -- P7: providers ------------------------------------------------------
+    def _p7_providers(body: Dict[str, Any]) -> Dict[str, Any]:
+        # Honest empty: no production ProviderRegistry is wired (the
+        # providers.py module is test-only / dead-code-classified).
+        return {"ok": True, "providers": []}
+
+    # -- P8: agent provenance -----------------------------------------------
+    # Column lists verified against runtime/agent_org/store.py SCHEMAS
+    # (2026-10-04): ao_agents, ao_agent_events, ao_work_products,
+    # ao_review_verdicts field names below match exactly.
+    def _p8_agents(body: Dict[str, Any]) -> Dict[str, Any]:
+        body = body or {}
+        limit, err = _parse_limit(body, 50, 1000)
+        if err:
+            return err
+        state = body.get("state")
+        rows = org_store.rows("ao_agents")
+        # Latest row per agent_id governs (history rows remain).
+        latest: Dict[str, Dict] = {}
+        for r in rows:
+            latest[r["agent_id"]] = r
+        agents = list(latest.values())
+        if state is not None:
+            agents = [a for a in agents if a.get("state") == state]
+        agents.sort(key=lambda a: a.get("created_at") or "", reverse=True)
+        return {"ok": True, "agents": agents[:limit], "limit": limit}
+
+    def _p8_agent(body: Dict[str, Any]) -> Dict[str, Any]:
+        agent_id = str((body or {}).get("agent_id", ""))
+        rows = org_store.rows("ao_agents", "agent_id", agent_id)
+        if not rows:
+            return {"ok": False, "error": f"unknown agent {agent_id!r}"}
+        events = org_store.rows("ao_agent_events", "agent_id", agent_id)
+        return {"ok": True, "agent": rows[-1], "events": events}
+
+    def _p8_work_products(body: Dict[str, Any]) -> Dict[str, Any]:
+        body = body or {}
+        limit, err = _parse_limit(body, 50, 1000)
+        if err:
+            return err
+        agent_id = body.get("agent_id")
+        if agent_id:
+            rows = org_store.rows("ao_work_products", "agent_id",
+                                  str(agent_id))
+        else:
+            rows = org_store.rows("ao_work_products")
+        latest: Dict[str, Dict] = {}
+        for r in rows:
+            latest[r["wp_id"]] = r
+        wps = list(latest.values())
+        wps.sort(key=lambda w: w.get("created_at") or "", reverse=True)
+        return {"ok": True, "work_products": wps[:limit], "limit": limit}
+
+    def _p8_verdicts(body: Dict[str, Any]) -> Dict[str, Any]:
+        body = body or {}
+        limit, err = _parse_limit(body, 50, 1000)
+        if err:
+            return err
+        wp_id = body.get("wp_id")
+        if wp_id:
+            rows = org_store.rows("ao_review_verdicts", "wp_id", str(wp_id))
+        else:
+            rows = org_store.rows("ao_review_verdicts")
+        rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+        # Read-only by design: verdict rows are written only by
+        # ReviewBoard._store_verdict. No write path exists here.
+        return {"ok": True, "verdicts": rows[:limit], "limit": limit}
+
+    # -- P9: intellect events -----------------------------------------------
+    def _p9_events(body: Dict[str, Any]) -> Dict[str, Any]:
+        body = body or {}
+        limit, err = _parse_limit(body, 50, 1000)
+        if err:
+            return err
+        kind = body.get("kind")
+        import sqlite3
+        con = sqlite3.connect(intellect_log.db_path)
+        try:
+            con.row_factory = sqlite3.Row
+            if kind:
+                rows = con.execute(
+                    "SELECT data FROM experience_events WHERE kind=? "
+                    "ORDER BY at DESC LIMIT ?", (str(kind), limit)).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT data FROM experience_events ORDER BY at DESC "
+                    "LIMIT ?", (limit,)).fetchall()
+        finally:
+            con.close()
+        import json as _json
+        events = [_json.loads(r["data"]) for r in rows]
+        return {"ok": True, "events": events, "limit": limit}
+
+    return {
+        ("GET", "/api/track2/experiences"): _p1_list,
+        # NOTE: literal "relevant" must precede {exp_id} — the contract
+        # dispatcher matches in insertion order and {exp_id} would
+        # otherwise swallow it.
+        ("GET", "/api/track2/experiences/relevant"): _p5_relevant,
+        ("GET", "/api/track2/experiences/{exp_id}"): _p2_get,
+        ("GET", "/api/track2/experiences/{exp_id}/lineage"): _p3_lineage,
+        ("GET", "/api/track2/experience-candidates"): _p4_list,
+        ("GET", "/api/track2/experience-candidates/{candidate_id}"): _p4_get,
+        ("GET", "/api/track2/capabilities/{id}"): _p6_capability,
+        ("GET", "/api/track2/providers"): _p7_providers,
+        ("GET", "/api/track2/agents"): _p8_agents,
+        ("GET", "/api/track2/agents/{agent_id}"): _p8_agent,
+        ("GET", "/api/track2/work-products"): _p8_work_products,
+        ("GET", "/api/track2/review/verdicts"): _p8_verdicts,
+        ("GET", "/api/track2/intellect/events"): _p9_events,
+    }
 
 
 def build_services(base_dir: str) -> Dict[str, Any]:
