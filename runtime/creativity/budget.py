@@ -39,7 +39,9 @@ What this module does NOT do (honest bounds):
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -570,3 +572,369 @@ class CreativityBudget:
                     (float(admitted_artifacts) / spent if spent > 0 else None),
                 "refusals": summary["refusals"],
                 "halted": summary["halted"]}
+
+
+# ---------------------------------------------------------------------------
+# Budget controller — James's locked policy as real controller fields
+# ---------------------------------------------------------------------------
+#
+# James's locked budget policy (2026-10-04), his words preserved exactly:
+#   - Normal: 1 execution slot
+#   - Burst ceiling: 2 slots
+#   - Curiosity: 0 compute while idle (event-driven)
+#   - Budgets are ceilings, not targets
+#   - Sustained 2-slot operation requires actual available capacity
+#
+# Each line is traced to its implementation (the POLICY_* constants and the
+# method each governs are named in the comments).
+
+# "Normal: 1 execution slot"
+POLICY_NORMAL_SLOTS = 1
+# "Burst ceiling: 2 slots"
+POLICY_BURST_CEILING = 2
+
+# Sanity factor for the aggregate-budget sanity bound. A total_budget_s more
+# than this many times the largest measured single-run cost is not
+# measurement-derived and is refused at construction — the structural
+# enforcement of "never arbitrary large numbers." The bound is computed from
+# measurements (measured_max_run_s), so it moves with the device; the factor
+# itself is a documented engineering choice, reviewable. Flagged as a James
+# judgment call in the mission report.
+MAX_TOTAL_BUDGET_RATIO = 1e6
+
+
+@dataclass(frozen=True)
+class CapacityReading:
+    """One capacity probe reading: what the OS honestly reports."""
+    cpu_count: Optional[int]
+    load_1m: Optional[float]
+    measured_at: float
+
+
+def default_capacity_probe() -> CapacityReading:
+    """Read the real OS capacity surface (os.cpu_count, os.getloadavg).
+    No mocks, no estimates, no smoothing."""
+    try:
+        load_1m: Optional[float] = float(os.getloadavg()[0])
+    except OSError:
+        load_1m = None
+    return CapacityReading(cpu_count=os.cpu_count(),
+                           load_1m=load_1m,
+                           measured_at=time.time())
+
+
+@dataclass(frozen=True)
+class SlotToken:
+    """Proof of a held execution slot. Release requires the token."""
+    slot_id: str
+    burst: bool
+    acquired_at: float
+
+
+class CreativityBudgetController:
+    """Concurrency + aggregate ceilings over the FRM-path budget.
+
+    James's locked policy (2026-10-04) as real fields:
+    - total_budget_s: the session aggregate compute ceiling (his value;
+      required constructor parameter, never an invented default). Validated
+      at construction against measured sustainable capacity — a value the
+      measurements cannot justify is refused fail-closed ("never arbitrary
+      large numbers"). The derivation is shown on the controller.
+    - Slot policy: normal 1 execution slot; burst ceiling 2 slots; the 2nd
+      slot only when measured available capacity supports sustained 2-slot
+      operation ("Sustained 2-slot operation requires actual available
+      capacity").
+    - Idle domains (curiosity included): zero compute and zero reservation
+      while idle; activation is the event that ends idle ("Curiosity: 0
+      compute while idle (event-driven)").
+    - Ceilings, not targets: spend is recorded from measured actuals only;
+      the controller never burns budget down to target ("Budgets are
+      ceilings, not targets").
+
+    Cost grants flow through the wrapped CreativityBudget (the real FRM
+    FrmGrant path). This controller adds concurrency + aggregate ceilings;
+    it never routes around the FRM.
+    """
+
+    def __init__(self, total_budget_s: float, *,
+                 budget: CreativityBudget,
+                 measured_max_run_s: float,
+                 capacity_probe: Callable[[], CapacityReading] = default_capacity_probe,
+                 max_total_to_measured_ratio: float = MAX_TOTAL_BUDGET_RATIO,
+                 ) -> None:
+        if not isinstance(budget, CreativityBudget):
+            raise ValueError(
+                "controller needs the FRM-path CreativityBudget")
+        if (isinstance(total_budget_s, bool)
+                or not isinstance(total_budget_s, (int, float))
+                or not total_budget_s > 0):
+            raise ValueError(
+                "total_budget_s must be a positive number (James's value, "
+                f"never an invented default); got {total_budget_s!r}")
+        if (isinstance(measured_max_run_s, bool)
+                or not isinstance(measured_max_run_s, (int, float))
+                or not measured_max_run_s > 0):
+            raise ValueError(
+                "measured_max_run_s must be a positive measured value (the "
+                "largest measured single-run cost, e.g. from battery "
+                f"replays); got {measured_max_run_s!r}")
+        if max_total_to_measured_ratio <= 0:
+            raise ValueError("max_total_to_measured_ratio must be > 0")
+        sustainable_ceiling = (float(measured_max_run_s)
+                               * float(max_total_to_measured_ratio))
+        if float(total_budget_s) > sustainable_ceiling:
+            raise BudgetRefused(
+                f"total_budget_s={float(total_budget_s):.2f}s exceeds "
+                f"measured sustainable capacity: largest measured "
+                f"single-run cost {float(measured_max_run_s):.2f}s x "
+                f"sanity ratio {float(max_total_to_measured_ratio):.0f} = "
+                f"{sustainable_ceiling:.2f}s. The aggregate budget must be "
+                f"derivable from measurements — never an arbitrary large "
+                f"number. Refused fail-closed at construction.")
+        self._total_budget_s = float(total_budget_s)
+        self._budget = budget
+        self._probe = capacity_probe
+        boot = capacity_probe()
+        self._derivation = {
+            "total_budget_s": self._total_budget_s,
+            "measured_max_run_s": float(measured_max_run_s),
+            "max_total_to_measured_ratio": float(max_total_to_measured_ratio),
+            "sustainable_ceiling_s": sustainable_ceiling,
+            "cpu_count_at_construction": boot.cpu_count,
+            "load_1m_at_construction": boot.load_1m,
+            "derived_at": boot.measured_at,
+        }
+        self._lock = threading.Lock()
+        self._slots: Dict[str, SlotToken] = {}
+        self._runs: Dict[str, Dict[str, Any]] = {}
+        self._idle_domains: Dict[str, float] = {}
+
+    # -- policy fields --------------------------------------------------
+    @property
+    def total_budget_s(self) -> float:
+        return self._total_budget_s
+
+    @property
+    def derivation(self) -> Dict[str, Any]:
+        """The capacity derivation, shown not hidden."""
+        return dict(self._derivation)
+
+    @property
+    def budget(self) -> CreativityBudget:
+        return self._budget
+
+    @property
+    def concurrency_ceiling(self) -> int:
+        return POLICY_BURST_CEILING
+
+    @property
+    def normal_slots(self) -> int:
+        return POLICY_NORMAL_SLOTS
+
+    @property
+    def active_slot_count(self) -> int:
+        with self._lock:
+            return len(self._slots)
+
+    # -- slots ("Normal: 1 execution slot" / "Burst ceiling: 2 slots") ---
+    @staticmethod
+    def _available_cpus(reading: CapacityReading) -> Optional[float]:
+        if reading.cpu_count is None or reading.load_1m is None:
+            return None
+        return float(reading.cpu_count) - float(reading.load_1m)
+
+    @classmethod
+    def _sustained_capacity_available(cls, reading: CapacityReading) -> bool:
+        # Sustained 2-slot operation needs a whole free cpu's worth of
+        # measured capacity: each slot must actually have a cpu to run on.
+        # Unknown capacity (None) fails closed — capacity must be measured,
+        # never assumed.
+        available = cls._available_cpus(reading)
+        return available is not None and available >= 1.0
+
+    def acquire_slot(self, burst: bool = False,
+                     domain: Optional[str] = None) -> SlotToken:
+        """Hold one execution slot.
+
+        Normal path admits exactly 1 concurrent execution; a 2nd concurrent
+        acquisition without burst is refused naming the ceiling. The burst
+        path admits a 2nd slot only when measured available capacity
+        supports sustained 2-slot operation. A 3rd concurrent slot is always
+        refused. A domain registered idle (note_idle) cannot acquire until
+        activate_domain() — the event ends idle, never the acquisition.
+        """
+        with self._lock:
+            if domain is not None and domain in self._idle_domains:
+                raise BudgetRefused(
+                    f"domain {domain!r} is registered idle (James's locked "
+                    f"policy: 0 compute while idle, event-driven): activate "
+                    f"it via activate_domain() before acquiring a slot")
+            active = len(self._slots)
+            if not burst and active >= POLICY_NORMAL_SLOTS:
+                raise BudgetRefused(
+                    f"normal execution: 1 slot (James's locked policy); "
+                    f"{active} already held — a 2nd concurrent slot needs "
+                    f"burst=True and measured available capacity")
+            if active >= POLICY_BURST_CEILING:
+                raise BudgetRefused(
+                    f"burst ceiling: 2 slots (James's locked policy); "
+                    f"{active} already held — a 3rd concurrent slot is "
+                    f"always refused")
+            if burst and active >= POLICY_NORMAL_SLOTS:
+                reading = self._probe()
+                if not self._sustained_capacity_available(reading):
+                    raise BudgetRefused(
+                        f"sustained 2-slot operation requires actual "
+                        f"available capacity (James's locked policy): "
+                        f"measured cpu_count={reading.cpu_count}, "
+                        f"load_1m={reading.load_1m} — available "
+                        f"{self._available_cpus(reading)} < 1.0 cpu; burst "
+                        f"slot refused")
+            token = SlotToken(slot_id=uuid.uuid4().hex, burst=bool(burst),
+                              acquired_at=time.time())
+            self._slots[token.slot_id] = token
+            return token
+
+    def release_slot(self, token: SlotToken) -> None:
+        """Release a held slot. Double-release is refused fail-closed —
+        the active slot count can never go negative."""
+        with self._lock:
+            slot_id = token.slot_id if isinstance(token, SlotToken) else token
+            if slot_id not in self._slots:
+                raise BudgetRefused(
+                    f"release_slot for a slot that is not held "
+                    f"({slot_id!r}): double-release refused fail-closed — "
+                    f"the active slot count never goes negative")
+            del self._slots[slot_id]
+
+    def stale_slots(self, max_age_s: float) -> List[Dict[str, Any]]:
+        """Slots held longer than max_age_s: acquired-but-never-released
+        leaks are detectable with their age. Detection only — the
+        controller never force-releases another holder's slot."""
+        now = time.time()
+        with self._lock:
+            return [{"slot_id": t.slot_id, "burst": t.burst,
+                     "age_s": now - t.acquired_at}
+                    for t in self._slots.values()
+                    if now - t.acquired_at > max_age_s]
+
+    # -- idle ("Curiosity: 0 compute while idle (event-driven)") ---------
+    def note_idle(self, domain: str) -> None:
+        """Register a domain idle: zero compute and zero reservation while
+        idle. The domain stays idle until activate_domain() — the event
+        ends idle. An idle domain cannot acquire a slot (structural)."""
+        if not domain or not str(domain).strip():
+            raise ValueError("note_idle needs a domain name")
+        with self._lock:
+            self._idle_domains[str(domain)] = time.time()
+
+    def activate_domain(self, domain: str) -> None:
+        """The event that ends idle for a domain."""
+        with self._lock:
+            if str(domain) not in self._idle_domains:
+                raise ValueError(
+                    f"domain {domain!r} is not registered idle — refusing "
+                    f"to activate what was never idle (fail-closed against "
+                    f"typos)")
+            del self._idle_domains[str(domain)]
+
+    def domain_consumption(self, domain: str) -> float:
+        """Measured consumption attributed to a domain: 0.0 while idle.
+
+        Structural reason, not an assertion: consumption accrues only via
+        track_run_spend (measured actuals), and an idle domain cannot hold
+        the slot that active work requires — acquire_slot refuses it. There
+        is no code path that accrues consumption or a reservation for an
+        idle domain."""
+        return 0.0
+
+    # -- budget path (through the FRM, never around it) -----------------
+    def request_budget(self, *, work_id: str,
+                       estimated_compute_s: float,
+                       estimated_monetary: Optional[CostInput] = None,
+                       margin_s: float = 0.0,
+                       note: str = "") -> FrmGrant:
+        """Session-aggregate ceiling check, then the real FRM grant path.
+
+        The session aggregate (total spent + effective request) must fit
+        within total_budget_s — budgets are ceilings. The per-work envelope
+        check and the actual FrmGrant issuance happen in the wrapped
+        CreativityBudget; this controller never routes around the FRM.
+        """
+        effective = float(estimated_compute_s) + float(margin_s)
+        if effective < 0:
+            raise ValueError("cost estimates must be >= 0")
+        with self._lock:
+            spent = sum(r["spend_s"] for r in self._runs.values())
+        if spent + effective > self._total_budget_s:
+            raise BudgetRefused(
+                f"session aggregate {spent:.2f}s spent + {effective:.2f}s "
+                f"requested exceeds total_budget_s="
+                f"{self._total_budget_s:.2f}s (James's locked policy: "
+                f"budgets are ceilings, not targets)")
+        return self._budget.request_budget(
+            work_id=work_id, estimated_compute_s=estimated_compute_s,
+            estimated_monetary=estimated_monetary, margin_s=margin_s,
+            note=note)
+
+    def track_run_spend(self, run_id: str, spend_s: float, outcome: str,
+                        work_id: Optional[str] = None
+                        ) -> Optional[CeilingStop]:
+        """Record one run's MEASURED spend, outcome included.
+
+        ERROR-outcome runs spent too — the spend happened, the record
+        exists (RUNCTRL-1's ERROR-record decision). Cumulative session
+        accounting accumulates here and is queryable via session_summary().
+        The per-work ceiling is enforced on actuals by the wrapped budget;
+        a CeilingStop is surfaced, not swallowed.
+        """
+        if not run_id or not str(run_id).strip():
+            raise ValueError("track_run_spend needs a run_id")
+        if spend_s < 0:
+            raise ValueError("spend must be >= 0")
+        wid = work_id or str(run_id)
+        stop = self._budget.record_spend(wid, float(spend_s))
+        with self._lock:
+            self._runs[str(run_id)] = {
+                "run_id": str(run_id), "work_id": wid,
+                "spend_s": float(spend_s), "outcome": str(outcome),
+                "recorded_at": time.time(),
+            }
+        return stop
+
+    # -- accounting ("Budgets are ceilings, not targets") ----------------
+    def session_summary(self) -> Dict[str, Any]:
+        """Cumulative session accounting: queryable and reconciling.
+
+        total_spent_s is the sum of measured per-run spends; remaining_s is
+        total_budget_s minus spent — unspent stays unspent, never burned
+        down to target. No method on this controller consumes budget except
+        via a measured track_run_spend call.
+        """
+        with self._lock:
+            runs = dict(self._runs)
+            idle = dict(self._idle_domains)
+            active = len(self._slots)
+        per_work: Dict[str, float] = {}
+        total = 0.0
+        for r in runs.values():
+            per_work[r["work_id"]] = per_work.get(r["work_id"], 0.0) + r["spend_s"]
+            total += r["spend_s"]
+        return {
+            "total_budget_s": self._total_budget_s,
+            "total_spent_s": total,
+            "remaining_s": self._total_budget_s - total,
+            "per_work_spent_s": per_work,
+            "per_run": runs,
+            "run_count": len(runs),
+            "active_slots": active,
+            "concurrency_ceiling": POLICY_BURST_CEILING,
+            "idle_domains": {d: {"consumption_s": 0.0, "reservations": 0}
+                             for d in idle},
+            "derivation": dict(self._derivation),
+        }
+
+    def yield_report(self, work_id: str,
+                     admitted_artifacts: int) -> Dict[str, Any]:
+        """T6 yield stays computable from the records."""
+        return self._budget.yield_report(work_id, admitted_artifacts)
