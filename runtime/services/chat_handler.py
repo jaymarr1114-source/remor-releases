@@ -30,7 +30,14 @@ module only ever sees chat-mode text or an ambiguity flag):
       document      -> EvidenceStore.get_document(name)          [hosted doc]
       status        -> metering.tier() + metering.tasks_today()  [real caps]
       evidence      -> EvidenceStore.list_entries()              [real store]
-      file_action   -> honest "no": this handler is read-only
+      file_action   -> honest "no": this handler is read-only for questions
+                       about past actions; file CREATION requests route to
+                       file_create/file_write below
+      file_create   -> create a new file via the governed files service
+                       [STATE-CHANGING: writes through ScopedFileService,
+                       path-escape protected, audit-logged]
+      file_write    -> write/overwrite file content via the governed files
+                       service [STATE-CHANGING: same governed path]
       name          -> honest "I don't know": no identity store exists
       chit_chat     -> minimal acknowledgment, never invents facts
       unknown       -> honest "I don't know" (the fallback is refusal,
@@ -132,6 +139,24 @@ _PATTERNS: List[Tuple[str, List[str]]] = [
         r"\bevidence\b",
         r"\bwhat have you learned\b",
     ]),
+    ("file_create", [
+        r"\bcreate (?:a |the )?file (?:called |named )?(.{1,80}?)"
+        r"(?: with content (.+))?$",
+        r"\bmake (?:a |the )?file (?:called |named )?(.{1,80}?)"
+        r"(?: with content (.+))?$",
+        r"\bcreate (?:a |the )?(.{1,60}?\.[\w]{1,10})\b",
+        r"\bnew file (?:called |named )?(.{1,80})$",
+    ]),
+    ("file_write", [
+        r"\bwrite (.+) to (?:the |a )?file (.{1,80})$",
+        r"\bwrite (.+) to (.{1,60}?\.[\w]{1,10})\b",
+        r"\bput (.+) in (?:the |a )?file (.{1,80})$",
+        r"\bsave (.+) (?:to|as) (.{1,60}?\.[\w]{1,10})\b",
+        r"\bupdate (?:the |a )?file (.{1,80}?) with (.+)$",
+        r"\bmodify (?:the |a )?file (.{1,80}?) (?:with|to) (.+)$",
+        r"\bchange (?:the |a )?file (.{1,80}?) to (.+)$",
+        r"\bappend (.+) to (?:the |a )?(?:file )?(.{1,80})$",
+    ]),
     ("file_action", [
         r"\bdid you (?:delete|modify|change|create|write|remove|touch)\b",
         r"\bhave you deleted\b",
@@ -207,6 +232,10 @@ def answer(text: Any, services: Optional[Dict[str, Any]],
         return _answer_status(services)
     if kind == "evidence":
         return _answer_evidence(services)
+    if kind == "file_create":
+        return _answer_file_create(match, text, services)
+    if kind == "file_write":
+        return _answer_file_write(match, text, services)
     if kind == "file_action":
         return _answer_file_action()
     if kind == "name":
@@ -586,6 +615,126 @@ def _answer_evidence(services: Dict[str, Any]) -> Dict[str, Any]:
                     f"observations {by_kind.get('observation', 0)}, "
                     f"inferences {by_kind.get('inference', 0)}. Latest: "
                     f"{latest}."}
+
+
+def _answer_file_create(match: Optional[re.Match], text: str,
+                        services: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle a file-creation request through the governed files service.
+
+    Extracts the filename from the classifier match. Content comes from
+    an explicit "with content ..." clause; when absent, the request is
+    clarified rather than guessed (no language substrate to invent
+    content with).
+    """
+    files = services.get("files")
+    if files is None:
+        return {"mode": "answer", "kind": "file_create",
+                "grounded": {"kind": "file_create", "store": "files",
+                             "note": "files service absent"},
+                "text": "I can't create files right now: the file service "
+                        "isn't available in this session."}
+    # match groups: (filename, content-or-None) for the "with content"
+    # patterns; (filename,) for bare "create X.ext".
+    filename = None
+    content = None
+    if match:
+        groups = [g for g in match.groups() if g is not None]
+        if groups:
+            filename = groups[0].strip().strip("'\"")
+            if len(groups) > 1:
+                content = groups[1].strip().strip("'\"")
+    if not filename:
+        return {"mode": "clarify", "kind": "file_create",
+                "grounded": {"kind": "file_create", "store": None,
+                             "note": "no filename parsed"},
+                "text": "What should the file be called?"}
+    if content is None:
+        return {"mode": "clarify", "kind": "file_create",
+                "grounded": {"kind": "file_create", "store": None,
+                             "note": "no content specified"},
+                "text": f"What content should go in '{filename}'? "
+                        f"(Say: create a file called {filename} with "
+                        f"content ...)"}
+    result = files.write_text(filename, content)
+    if result.get("ok"):
+        return {"mode": "answer", "kind": "file_create",
+                "grounded": {"kind": "file_create", "store": "files",
+                             "path": result.get("rel"),
+                             "bytes": result.get("bytes")},
+                "text": f"Created '{result.get('rel')}' "
+                        f"({result.get('bytes', 0)} bytes)."}
+    return {"mode": "answer", "kind": "file_create",
+            "grounded": {"kind": "file_create", "store": "files",
+                         "error": result.get("error")},
+            "text": f"Couldn't create '{filename}': {result.get('error')}"}
+
+
+def _answer_file_write(match: Optional[re.Match], text: str,
+                       services: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle a file write/overwrite/append request via the governed path."""
+    files = services.get("files")
+    if files is None:
+        return {"mode": "answer", "kind": "file_write",
+                "grounded": {"kind": "file_write", "store": "files",
+                             "note": "files service absent"},
+                "text": "I can't write files right now: the file service "
+                        "isn't available in this session."}
+    content = None
+    filename = None
+    is_append = False
+    if match:
+        groups = [g for g in match.groups() if g is not None]
+        lowered_pat = (match.re.pattern or "").lower()
+        # "write CONTENT to FILE" / "put CONTENT in FILE" /
+        # "save CONTENT to FILE" -> groups are (content, filename)
+        # "update FILE with CONTENT" etc -> groups are (filename, content)
+        if "append" in lowered_pat:
+            is_append = True
+            if len(groups) >= 2:
+                content, filename = groups[0].strip(), groups[1].strip()
+        elif lowered_pat.startswith("\\bwrite") or \
+                lowered_pat.startswith("\\bput") or \
+                lowered_pat.startswith("\\bsave"):
+            if len(groups) >= 2:
+                content, filename = groups[0].strip(), groups[1].strip()
+        else:  # update/modify/change FILE with/to CONTENT
+            if len(groups) >= 2:
+                filename, content = groups[0].strip(), groups[1].strip()
+    if filename:
+        filename = filename.strip().strip("'\"")
+    if content:
+        content = content.strip().strip("'\"")
+        # Strip a leading natural-language "content" marker ("with content X"
+        # -> the user means X, not the literal word "content").
+        if content.lower().startswith("content "):
+            content = content[8:].strip()
+    if not filename or not content:
+        return {"mode": "clarify", "kind": "file_write",
+                "grounded": {"kind": "file_write", "store": None,
+                             "note": "could not parse filename/content"},
+                "text": "I couldn't tell which file or what content. "
+                        "Try: write <content> to <filename>."}
+    if is_append:
+        # Read existing content first, then write back concatenated.
+        existing = files.read_text(filename)
+        if existing.get("ok"):
+            content = existing.get("content", "") + content
+        # If the read failed (e.g. file doesn't exist), fall through and
+        # just write the new content.
+    result = files.write_text(filename, content)
+    if result.get("ok"):
+        verb = "Appended to" if is_append else "Wrote"
+        return {"mode": "answer", "kind": "file_write",
+                "grounded": {"kind": "file_write", "store": "files",
+                             "path": result.get("rel"),
+                             "bytes": result.get("bytes"),
+                             "append": is_append},
+                "text": f"{verb} '{result.get('rel')}' "
+                        f"({result.get('bytes', 0)} bytes)."}
+    return {"mode": "answer", "kind": "file_write",
+            "grounded": {"kind": "file_write", "store": "files",
+                         "error": result.get("error")},
+            "text": f"Couldn't write '{filename}': {result.get('error')}"}
 
 
 def _answer_file_action() -> Dict[str, Any]:
