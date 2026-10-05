@@ -2050,7 +2050,20 @@ class PlanComposer:
         # current depth (each nesting level adds at most one new param;
         # deeper nesting cannot introduce new information). Sound: for
         # a 2-param goal at depth 2, recursion is wasted work.
-        if depth >= self.MAX_NEST_DEPTH or not skeys:
+        # GEN-SYNTH-7: arity-gated depth extension. MAX_NEST_DEPTH bounds
+        # fan-out, but when the objective has MORE params than the cap,
+        # deeper nesting can still introduce new information -- the dual
+        # of the skip principle above (each level adds at most one new
+        # param, so a 4-param goal needs depth 4). Allow exactly one
+        # level beyond MAX_NEST_DEPTH in that case, still gated by the
+        # sound _nest_may_complete prune. This is not a silent budget
+        # increase: goals with <= MAX_NEST_DEPTH params see identical
+        # behavior to before, and depth remains hard-capped (at 4, not
+        # unbounded). A 5-param goal still fails honestly at depth 4 --
+        # that is the next named boundary, not this mission.
+        _effective_cap = self.MAX_NEST_DEPTH + (
+            1 if len(objective.params) > self.MAX_NEST_DEPTH else 0)
+        if depth >= _effective_cap or not skeys:
             return False
         prune_ctx = (_pair_prims, _static_ops, _goal_first_key,
                      _goal_second_key)
