@@ -74,8 +74,19 @@ class CuriosityWriter:
     write path, and the fence runs inside it.
     """
 
-    def __init__(self, store: CuriosityEvidenceStore):
+    def __init__(self, store: CuriosityEvidenceStore,
+                 epistemic: Optional[object] = None):
         self._store = store
+        # UNIFIED-MEMORY-1: optional epistemic store for unified visibility.
+        # When provided, every fenced submit also flows a visibility record
+        # through the unified memory path (record_experience). The fenced
+        # store remains the physical substrate and the security boundary;
+        # the unified path is the cross-loop visibility facade (gaps.py
+        # pattern). The visibility record carries metadata (evidence_id,
+        # loop, timestamp), not the finding's full content — the fenced
+        # store holds the content; Primary inspects it read-only via the
+        # governed P5C path.
+        self._epistemic = epistemic
 
     def submit(self, finding: CuriosityFinding) -> CuriosityFinding:
         """Validate, domain-check, then persist. Raises DomainFenceError
@@ -83,4 +94,21 @@ class CuriosityWriter:
         ValueError for duplicate evidence_id. Never partially writes."""
         require_curiosity_caller()
         finding.validate()
-        return self._store._insert(finding)
+        result = self._store._insert(finding)
+        # UNIFIED-MEMORY-1: cross-loop visibility through the unified path.
+        if self._epistemic is not None:
+            try:
+                from swarm_engine.intellect.unified_memory import (
+                    record_experience)
+                record_experience(
+                    self._epistemic,
+                    origin_loop="curiosity",
+                    kind="evidence",
+                    content=(f"curiosity finding submitted: "
+                             f"{finding.evidence_id}"),
+                    raw={"evidence_id": finding.evidence_id,
+                         "fenced_store": "curiosity_evidence"},
+                    source="curiosity/evidence")
+            except Exception:
+                pass  # Visibility is advisory; fenced write already done.
+        return result
