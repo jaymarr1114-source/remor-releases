@@ -41,6 +41,7 @@ from swarm_engine.curiosity.executive.boundary import (
     BOUNDARY_GENERATIVE_PROMPT,
     BOUNDARY_HYPOTHESIS_CANDIDATE,
     BOUNDARY_IMPRECISE_QUESTION,
+    BOUNDARY_MISSING_TEACHER,
     BOUNDARY_NOVEL_OBSERVATION,
     BOUNDARY_NOVEL_PATTERN,
     BOUNDARY_NOVEL_TASK,
@@ -62,6 +63,11 @@ LOOP_OWNERSHIP: Dict[str, str] = {
     BOUNDARY_NOVEL_OBSERVATION: LOOP_SCIENTIFIC_INQUIRY,
     BOUNDARY_GENERATIVE_PROMPT: LOOP_CREATIVE_EXPLORATION,
     BOUNDARY_NOVEL_PATTERN: LOOP_DISCOVERY_NOVELTY,
+    # CURIOSITY-HAIRTRIGGER-1: a "no teacher" gap routes to the
+    # acquisition-oriented loop. The loop does not run its inquiry
+    # graph for this class; the executive fires the acquisition bridge
+    # directly (see activate()).
+    BOUNDARY_MISSING_TEACHER: LOOP_SCIENTIFIC_INQUIRY,
 }
 
 #: Boundary classes whose owning loops do not exist yet (Phase 3+).
@@ -98,6 +104,7 @@ R_ATTESTATION_INVALID = "ATTESTATION_INVALID"
 R_NO_BUDGET = "NO_BUDGET"
 R_NO_SLOT = "NO_SLOT"
 R_FIT = "FIT"
+R_NO_ACQUISITION_BRIDGE = "NO_ACQUISITION_BRIDGE"
 
 
 class ActivationRefused(Exception):
@@ -167,6 +174,13 @@ class CuriosityExecutive:
         (primary from the Primary RunController's arbitration_status,
         curiosity from this run_controller's inquiry_views) -- SEAM-WIRE-1.
         Unbound, the standing fallback demands apply and the notes say so.
+    acquisition_bridge: optional callable invoked when a BOUNDARY_MISSING_TEACHER
+        trigger is activated. Signature: bridge(requirement) -> result,
+        where requirement is a CapabilityRequirement built from the
+        trigger and result is the acquisition outcome. When None (default),
+        a missing_teacher activation is refused (NO_ACQUISITION_BRIDGE):
+        the gap is named but the firing path is absent -- fail-closed,
+        never faked. (CURIOSITY-HAIRTRIGGER-1.)
     """
 
     def __init__(self, *, frm: Any, enforcement_state_dir: str,
@@ -174,6 +188,7 @@ class CuriosityExecutive:
                  demand_budget_s: float = 60.0,
                  demand_concurrent: int = 2,
                  demand_bridge: Any = None,
+                 acquisition_bridge: Any = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._frm = frm
         self._enforcement_state_dir = enforcement_state_dir
@@ -182,6 +197,7 @@ class CuriosityExecutive:
         self._demand_budget_s = demand_budget_s
         self._demand_concurrent = demand_concurrent
         self._demand_bridge = demand_bridge
+        self._acquisition_bridge = acquisition_bridge
         self._clock = clock
 
     # -- activation -----------------------------------------------------
@@ -336,6 +352,29 @@ class CuriosityExecutive:
             notes.append("fit: bounded objective "
                          f"({len(trigger.bounded_objective)} chars)")
         elif loop == LOOP_SCIENTIFIC_INQUIRY:
+            # CURIOSITY-HAIRTRIGGER-1: a missing_teacher trigger does not
+            # run the inquiry graph. It must name the missing teacher /
+            # capability gap in question_text; the executive fires the
+            # acquisition bridge at activate() time. Shape check only.
+            if trigger.boundary_class == BOUNDARY_MISSING_TEACHER:
+                text = (trigger.question_text or "").strip()
+                if not text:
+                    raise ActivationRefused(
+                        f"{R_FIT}: trigger {trigger.trigger_id} carries no "
+                        "teacher-gap description (empty question_text): "
+                        "a missing_teacher trigger must name what teacher "
+                        "is missing")
+                notes.append("fit: teacher-gap named (missing_teacher "
+                             "presentation present)")
+                if len(trigger.bounded_objective) > MAX_OBJECTIVE_CHARS:
+                    raise ActivationRefused(
+                        f"{R_FIT}: bounded_objective is "
+                        f"{len(trigger.bounded_objective)} chars "
+                        f"(>{MAX_OBJECTIVE_CHARS}): unbounded scope "
+                        "refused")
+                notes.append("fit: bounded objective "
+                             f"({len(trigger.bounded_objective)} chars)")
+                return notes
             # Inquiry-shaped: the trigger's question_text carries the
             # hypothesis candidate / novel observation presentation. The
             # loop itself judges falsifiability (form_hypothesis); the
@@ -387,11 +426,21 @@ class CuriosityExecutive:
     def activate(self, decision: ActivationDecision) -> CuriosityLoopOutcome:
         """Enter the loop through the Run Controller and drive the
         inquiry to terminal. The executive never touches microcontrollers:
-        the outcome's view is a LoopView aggregate."""
+        the outcome's view is a LoopView aggregate.
+
+        CURIOSITY-HAIRTRIGGER-1: a BOUNDARY_MISSING_TEACHER decision does
+        not enter the run controller. The hair-trigger fires the
+        acquisition bridge directly: the "no teacher" gap is routed to
+        governed external acquisition, not to an inquiry graph. Fail-closed:
+        with no bridge bound the activation is refused (the gap is named,
+        the firing path is absent -- never faked).
+        """
         if not decision.approved:
             raise ActivationRefused(
                 f"cannot activate a refused decision "
                 f"({decision.refusal_reason})")
+        if decision.trigger.boundary_class == BOUNDARY_MISSING_TEACHER:
+            return self._fire_acquisition(decision)
         result = self._run_controller.run_inquiry(decision)
         return CuriosityLoopOutcome(
             loop=decision.loop or "",
@@ -401,6 +450,42 @@ class CuriosityExecutive:
                     f"{result.get('terminal_state')} -> evidence "
                     f"{result.get('evidence_id')}"),
             view=self._run_controller.loop_view(decision.loop or ""),
+        )
+
+    def _fire_acquisition(
+            self, decision: ActivationDecision) -> CuriosityLoopOutcome:
+        """The hair-trigger: a "no teacher" gap fires governed external
+        acquisition. Builds a CapabilityRequirement from the trigger and
+        invokes the acquisition bridge. Fail-closed when unbound."""
+        if self._acquisition_bridge is None:
+            raise ActivationRefused(
+                f"{R_NO_ACQUISITION_BRIDGE}: trigger "
+                f"{decision.trigger.trigger_id} presents "
+                f"{BOUNDARY_MISSING_TEACHER} but no acquisition_bridge is "
+                "bound: the gap is named, the firing path is absent")
+        from swarm_engine.acquisition.pipeline import CapabilityRequirement
+        trigger = decision.trigger
+        requirement = CapabilityRequirement(
+            name=f"teacher:{trigger.trigger_id}",
+            description=trigger.question_text,
+            keywords=["teacher", "demonstration", "external"],
+            origin={
+                "boundary_class": BOUNDARY_MISSING_TEACHER,
+                "trigger_id": trigger.trigger_id,
+                "bounded_objective": trigger.bounded_objective,
+                "origin": trigger.origin,
+            },
+        )
+        acq_result = self._acquisition_bridge(requirement)
+        detail = (
+            f"acquisition fired for {trigger.trigger_id}: "
+            f"accepted={getattr(acq_result, 'accepted', '?')}")
+        return CuriosityLoopOutcome(
+            loop=decision.loop or "",
+            entered=True,
+            result=acq_result,
+            detail=detail,
+            view=None,
         )
 
     def kill_inquiry(self, inquiry_id: str, reason: str) -> Dict[str, Any]:

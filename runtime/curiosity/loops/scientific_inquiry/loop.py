@@ -44,6 +44,7 @@ from swarm_engine.curiosity.cognition import (
 )
 from swarm_engine.curiosity.executive.boundary import (
     BOUNDARY_HYPOTHESIS_CANDIDATE,
+    BOUNDARY_MISSING_TEACHER,
     BOUNDARY_NOVEL_OBSERVATION,
 )
 from swarm_engine.curiosity.evidence.records import (
@@ -65,6 +66,11 @@ LOOP_SCIENTIFIC_INQUIRY = "scientific_inquiry"
 INQUIRY_BOUNDARIES = (
     BOUNDARY_HYPOTHESIS_CANDIDATE,
     BOUNDARY_NOVEL_OBSERVATION,
+    # CURIOSITY-HAIRTRIGGER-1: the loop accepts the missing_teacher
+    # boundary so the executive's routing is not refused at the inlet.
+    # The executive fires the acquisition bridge directly at activate()
+    # time; the loop never runs its inquiry graph for this class.
+    BOUNDARY_MISSING_TEACHER,
 )
 
 #: Model/provider stamp for provenance (mechanical inquiry; no external

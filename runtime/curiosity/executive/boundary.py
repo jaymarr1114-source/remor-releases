@@ -28,6 +28,12 @@ BOUNDARY_GENERATIVE_PROMPT = "generative_prompt"            # -> creative_explor
 BOUNDARY_NOVEL_TASK = "novel_task"                          # -> generalization
 BOUNDARY_NOVEL_PATTERN = "novel_pattern"                    # -> discovery_novelty
 
+#: A mission reports it has no teacher: the capability it needs has no
+#: available demonstration source. The hair-trigger fires external
+#: acquisition (CURIOSITY-HAIRTRIGGER-1): the executive routes this to
+#: the acquisition-oriented loop instead of running an inquiry graph.
+BOUNDARY_MISSING_TEACHER = "missing_teacher"                 # -> scientific_inquiry
+
 ORIGINS = ("PRIMARY_REQUESTED", "CURIOUSITY_INITIATED")
 
 
