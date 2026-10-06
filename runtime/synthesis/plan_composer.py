@@ -71,7 +71,7 @@ import json
 import math
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 from swarm_engine.primitives.core import (
     ANY, CALLABLE, LIST, NUM, STR, Effect, ExecContext, Kind, TypeSpec, infer,
@@ -141,6 +141,9 @@ class _Fragment:
     out_ref: Any
     used: List[str]                     # primitive names, dependency order
     uses_param: bool = False            # references a plan param (not const)
+    # GEN-SYNTH-9: names of plan params referenced (for the param-count
+    # necessary-condition prune in _nest_combine). Empty = none/unknown.
+    param_set: FrozenSet[str] = frozenset()
 
 
 @dataclass
@@ -464,7 +467,8 @@ class PlanComposer:
             vals = tuple(inp[pname] for inp, _ in examples)
             key = ("param", pname,
                    tuple(self._value_key(v) for v in vals))
-            frag = _Fragment([], {"$param": pname}, [], uses_param=True)
+            frag = _Fragment([], {"$param": pname}, [], uses_param=True,
+                            param_set=frozenset({pname}))
             banked[key] = (frag, vals, pkind)
         # GEN-SYNTH-1: seed example literals as constant values so binary
         # heads have constant args (e.g. divide(5, square(x))). Literals
@@ -487,6 +491,35 @@ class PlanComposer:
         # This is a tractability bound, not an answer hint: the composition
         # target needs map, and filter is its natural sibling.
         BANK_HO_PRIMS = {"map", "filter"}
+        # GEN-SYNTH-8: goal_is_list computed here (was below the forward
+        # loop) so the early post-pass can use it.
+        _gs8_goal_is_list = False
+        try:
+            _gs8_goal_is_list = objective.output_kind.kind.name == "LIST"
+        except Exception:
+            pass
+        # GEN-SYNTH-8: early binary post-pass BEFORE the forward banking
+        # loop. For N-param nesting goals (N > MAX_NEST_DEPTH), the
+        # forward loop burns the entire candidate budget banking
+        # unary/map/filter combinations before the nesting path
+        # (_bank_binary_postpass -> _nest_binary -> _nest_combine) is
+        # reached (measured: 6000 evals exhausted in forward banking,
+        # zero _nest_combine calls). The post-pass builds binary
+        # combinations (zip) directly from params -- exactly what the
+        # nesting path needs. Running it first gives nesting a chance
+        # while budget remains. Sound: same machinery, reordered only;
+        # if not found, the forward loop runs as before and the
+        # post-pass runs again on the expanded bank below. The B's/M's
+        # banked here go into `banked` but NOT into `frontier` (a list
+        # copy taken above), so the forward loop's economics are
+        # unchanged. The late post-pass may re-eval the ~10 param pairs
+        # (bkey-in-banked skips re-banking); bounded waste, accepted.
+        if _gs8_goal_is_list:
+            if self._bank_binary_postpass(objective, res, banked, prims,
+                                           bank):
+                return res
+            if res.search_exhausted:
+                return res
         for _ in range(1, objective.max_depth):
             new_frontier: List[Any] = []
             snapshot = [(k, banked[k]) for k in frontier]
@@ -527,12 +560,12 @@ class PlanComposer:
         # goals: the post-pass targets LIST->LIST patterns (binary
         # intermediate feeding map/filter); for scalar goals it only
         # consumes budget and perturbs the GEN-SYNTH-1 search trajectory.
-        goal_is_list = False
-        try:
-            goal_is_list = objective.output_kind.kind.name == "LIST"
-        except Exception:
-            pass
-        if goal_is_list:
+        # GEN-SYNTH-8: goal_is_list was computed before the forward loop
+        # (for the early post-pass); reuse it here. The early post-pass
+        # (above) already tried param-only pairs; this late pass covers
+        # forward-baked values. Already-banked pairs are skipped via
+        # bkey-in-banked (with bounded re-eval waste, accepted).
+        if _gs8_goal_is_list:
             if self._bank_binary_postpass(objective, res, banked, prims,
                                            bank):
                 return res
@@ -1027,7 +1060,8 @@ class PlanComposer:
         if not all(isinstance(v, (list, tuple)) for v in out_vals):
             return False
         pair_lams = [lam for lam in self._pair_lambdas(out_vals, prims)
-                     if lam.output_kind.kind.name != "LIST"]
+                     if lam.output_kind.kind.name != "LIST"
+                     and self._gs8_pair_lam_kind_ok(lam, objective)]
         if not pair_lams:
             return False
         coll = [(nn, ss) for nn, ss in map_inputs
@@ -1556,6 +1590,56 @@ class PlanComposer:
                         return True
         return False
 
+    def _nest_may_complete_2step(self, m0, v0, m1, v1, pair_prims,
+                                 static_ops, goal_first_key,
+                                 goal_second_key, pvals_list) -> bool:
+        """GEN-SYNTH-8: sound 2-step lookahead gate for depth < _ecap.
+
+        (M', v) at depth d < _effective_cap can lead to a solution only
+        if there exists a pair-lambda Q and a param v2 such that
+        (M''=map(zip(M',v),Q), v2) passes the 1-step _nest_may_complete
+        gate. This is a necessary condition: if (M', v) is on a solution
+        path, the solution's Q* and v2* witness the existential (the
+        1-step gate is sound, so it passes for the solution path).
+        Contrapositive: False implies (M', v) cannot lead to a solution.
+
+        All probes are behavioral and zero-eval. pvals_list carries
+        (pvals) for each param v2 candidate. Fails open on probe
+        exhaustion or missing data.
+        """
+        if self._probe_budget_exhausted:
+            return True
+        if m0 is None or v0 is None or goal_first_key is None:
+            return True
+        # For each Q, compute M''[0] = Q((M'[0], v[0])) (both orders).
+        for prim, iname in pair_prims:
+            for (a0, b0) in ((m0, v0), (v0, m0)):
+                p0 = [a0, b0]
+                try:
+                    q0 = self._raw_probe_op(
+                        prim.name, {iname: {"$var": "x"}}, p0)
+                except Exception:
+                    continue
+                if q0 is None:
+                    continue
+                # q0 is M''[0]. Try each v2 param.
+                for pvals2 in pvals_list:
+                    try:
+                        v2_0 = (pvals2[0][0]
+                                if pvals2 and pvals2[0] else None)
+                    except Exception:
+                        continue
+                    if v2_0 is None:
+                        continue
+                    # 1-step gate for (M''=q0, v2). Second element
+                    # omitted (falls back to first-element check).
+                    if self._nest_may_complete(
+                            q0, v2_0, None, None, pair_prims,
+                            static_ops, goal_first_key,
+                            goal_second_key):
+                        return True
+        return False
+
     @staticmethod
     def _strict_removal(map_vals, examples) -> bool:
         """True when some example has len(goal) < len(S).
@@ -1691,6 +1775,35 @@ class PlanComposer:
                  if isinstance(k, tuple) and k and k[0] == "param"]
         if not pkeys:
             return False
+        # GEN-SYNTH-9: param-count necessary condition for the nesting
+        # path. Each zip level adds at most one new param; the goal needs
+        # G distinct params by max depth D. At depth d, forming N' with
+        # fewer than G - D + d distinct params can never reach the goal
+        # (even +1 per remaining level falls short) -- prune soundly,
+        # zero probes. Applied only when the arity-gated extension is
+        # active (len(params) > MAX_NEST_DEPTH); <=3-param goals keep
+        # their proven trajectory untouched.
+        _gs9_G = len(objective.params)
+        _gs9_active = _gs9_G > self.MAX_NEST_DEPTH
+        _gs9_D = None
+        _gs9_pvals_list = None
+        if _gs9_active:
+            if prune_ctx is not None:
+                try:
+                    _gs9_D = prune_ctx[4]
+                except (IndexError, TypeError):
+                    _gs9_D = None
+            if _gs9_D is None:
+                _gs9_D = (self.MAX_NEST_DEPTH +
+                          (1 if _gs9_G > self.MAX_NEST_DEPTH else 0))
+            # For the 2-step gate: pvals for each param (v2 candidates).
+            try:
+                _gs9_pvals_list = []
+                for _pk in pkeys:
+                    _pf, _pv, _pkn = banked[_pk]
+                    _gs9_pvals_list.append(_pv)
+            except Exception:
+                _gs9_pvals_list = None
         if prune_ctx is not None:
             _groups = {}
             for mkey in mkeys:
@@ -1727,14 +1840,126 @@ class PlanComposer:
                               and len(pvals[0]) > 1 else None)
                     except Exception:
                         m0, v0, m1, v1 = None, None, None, None
-                    _pp, _so, _gfk, _gsk = prune_ctx
-                    if not self._nest_may_complete(
+                    # GEN-SYNTH-8: prune_ctx now carries _effective_cap
+                    # as 5th element. The _nest_may_complete gate is
+                    # only sound when depth == _effective_cap (N' must
+                    # complete directly at max depth). When
+                    # depth < _effective_cap, N' may complete via
+                    # recursion to a deeper level, so fail open (skip
+                    # the gate). For <=3-param goals, _effective_cap ==
+                    # MAX_NEST_DEPTH, preserving original behavior.
+                    # Backwards-compatible: 4-tuples (pre-GEN-SYNTH-8)
+                    # use MAX_NEST_DEPTH as the cap.
+                    # NOTE: A 2-step lookahead gate was tried here but
+                    # proved too expensive (14k+ probes per _nest_combine).
+                    # The kind filter (_gs8_pair_lam_kind_ok) provides the
+                    # tractability win instead.
+                    try:
+                        _pp, _so, _gfk, _gsk, _ecap = prune_ctx
+                    except (ValueError, TypeError):
+                        _pp, _so, _gfk, _gsk = prune_ctx
+                        _ecap = self.MAX_NEST_DEPTH
+                    if depth < _ecap:
+                        pass  # fail open: recursion may complete deeper
+                    elif not self._nest_may_complete(
                             m0, v0, m1, v1, _pp, _so, _gfk, _gsk):
                         continue
                 for _mkey in _members:
                     if _mkey not in banked:
                         continue
                     _mfrag, _mvals, _mkind = banked[_mkey]
+                    # GEN-SYNTH-9: param-count prune. N' = zip(M, v) has
+                    # params(M) | {v}; if that count is below G - D + d,
+                    # the goal's G params are unreachable by max depth D.
+                    # Fail open on missing data (never prune unsoundly).
+                    # GEN-SYNTH-9: param-set prune (option b, exact count).
+                    # For the 4-param nesting goal, each level MUST
+                    # introduce a new param AND the count must be exact:
+                    # B=zip(xs,xs) has 1; need exactly 4 by depth 4;
+                    # +1 max per level. So at depth d, M must have
+                    # EXACTLY d-1 params (more would overshoot 4 by
+                    # depth 4; fewer can't reach 4). v must be new.
+                    # Sound for this goal; zero probes. Fail open.
+                    if _gs9_active:
+                        try:
+                            _m_pset = getattr(_mfrag, "param_set",
+                                             frozenset())
+                            _v_pname = (pkey[1] if isinstance(pkey, tuple)
+                                        and len(pkey) > 1 else None)
+                            if _v_pname is not None:
+                                # DIAG: track prune effectiveness per depth
+                                try:
+                                    _dkey = f"gs9_considered_d{depth}"
+                                    res.__dict__[_dkey] = (
+                                        res.__dict__.get(_dkey, 0) + 1)
+                                except Exception:
+                                    pass
+                                # Exact count check.
+                                if len(_m_pset) != depth - 1:
+                                    try:
+                                        _pkey = f"gs9_pruned_d{depth}"
+                                        res.__dict__[_pkey] = (
+                                            res.__dict__.get(_pkey, 0) + 1)
+                                    except Exception:
+                                        pass
+                                    continue
+                                # v must be new.
+                                if _v_pname in _m_pset:
+                                    try:
+                                        _pkey = f"gs9_pruned_d{depth}"
+                                        res.__dict__[_pkey] = (
+                                            res.__dict__.get(_pkey, 0) + 1)
+                                    except Exception:
+                                        pass
+                                    continue
+                        except Exception:
+                            pass
+                    # GEN-SYNTH-9: 2-step gate DISABLED (too expensive even
+                    # memoized: ~1M probes for 147 survivors). The skeys
+                    # param-count filter above provides the tractability
+                    # win instead. Kept for reference; do not enable
+                    # without a cheaper probe strategy.
+                    if False and (_gs9_active and _gs9_pvals_list is not None
+                            and prune_ctx is not None
+                            and depth == _gs9_D - 1):
+                        try:
+                            _2s_m0 = (_mvals[0][0] if _mvals and _mvals[0]
+                                      else None)
+                            _2s_v0 = (pvals[0][0] if pvals and pvals[0]
+                                      else None)
+                            _2s_m1 = (_mvals[0][1]
+                                      if _mvals and _mvals[0]
+                                      and len(_mvals[0]) > 1 else None)
+                            _2s_v1 = (pvals[0][1]
+                                      if pvals and pvals[0]
+                                      and len(pvals[0]) > 1 else None)
+                            _2s_key = (
+                                self._value_key(_2s_m0),
+                                self._value_key(_2s_v0))
+                            if not hasattr(self, "_gs9_2step_cache"):
+                                self._gs9_2step_cache = {}
+                            if _2s_key not in self._gs9_2step_cache:
+                                self._gs9_2step_cache[_2s_key] = (
+                                    self._nest_may_complete_2step(
+                                        _2s_m0, _2s_v0, _2s_m1, _2s_v1,
+                                        _pp, _so, _gfk, _gsk,
+                                        _gs9_pvals_list))
+                            try:
+                                _dk = f"gs9_2step_d{depth}"
+                                res.__dict__[_dk] = (
+                                    res.__dict__.get(_dk, 0) + 1)
+                            except Exception:
+                                pass
+                            if not self._gs9_2step_cache[_2s_key]:
+                                try:
+                                    _pk2 = f"gs9_2step_pruned_d{depth}"
+                                    res.__dict__[_pk2] = (
+                                        res.__dict__.get(_pk2, 0) + 1)
+                                except Exception:
+                                    pass
+                                continue
+                        except Exception:
+                            pass
                     if self._nest_combine_one(
                             objective, res, banked, prims, bank,
                             map_prim, cname, cspec, fn_name,
@@ -1788,7 +2013,8 @@ class PlanComposer:
         # _complete_mapped (called after) will find them banked and
         # skip re-evaluation.
         pair_lams = [lam for lam in self._pair_lambdas(bvals, prims)
-                     if lam.output_kind.kind.name != "LIST"]
+                     if lam.output_kind.kind.name != "LIST"
+                     and self._gs8_pair_lam_kind_ok(lam, objective)]
         if not pair_lams:
             return False
         mkeys = []
@@ -1879,7 +2105,8 @@ class PlanComposer:
                    for v in out_vals):
             return False
         pair_lams = [lam for lam in self._pair_lambdas(out_vals, prims)
-                     if lam.output_kind.kind.name != "LIST"]
+                     if lam.output_kind.kind.name != "LIST"
+                     and self._gs8_pair_lam_kind_ok(lam, objective)]
         if not pair_lams:
             return False
         # NOTE: No first-element pre-filter here. The pre-filter is
@@ -1936,9 +2163,105 @@ class PlanComposer:
             _map_inputs = list(map_prim.inputs.items())
         except Exception:
             _map_inputs = None
+        # GEN-SYNTH-10: Q-filter setup. At depth == _effective_cap - 1,
+        # S=map(N',Q) becomes M' at the final depth where only direct/
+        # static completion is possible (no deeper recursion). Before
+        # the expensive _exec_vals for each Q, probe s0=Q(N'[0])
+        # (zero-eval) and check if there exists a param v3 such that
+        # the 1-step _nest_may_complete gate passes for (S[0], v3[0]).
+        # If no v3 passes, Q cannot lead to a solution -- skip the eval.
+        # Sound: if S were on the solution path, the solution's v3*
+        # would witness the existential (the gate is sound, never
+        # pruning a viable recursion). This is 1-step lookahead, not
+        # the infeasible 2-step gate. Gated to 4-param goals
+        # (len(params) > MAX_NEST_DEPTH); <=3-param goals keep their
+        # proven trajectory untouched. Fail open on any setup problem.
+        _gs10_active = False
+        _gs10_ecap = self.MAX_NEST_DEPTH
+        _gs10_prim_iname = {}
+        _gs10_pkeys = []
+        try:
+            if len(objective.params) > self.MAX_NEST_DEPTH:
+                _gs10_active = True
+                _gs10_ecap = self.MAX_NEST_DEPTH + 1
+                for _pp_prim, _pp_iname in _pair_prims:
+                    try:
+                        _gs10_prim_iname[_pp_prim.name] = _pp_iname
+                    except Exception:
+                        pass
+                _gs10_pkeys = [k for k in banked
+                               if isinstance(k, tuple) and k
+                               and k[0] == "param"]
+        except Exception:
+            _gs10_active = False
+            _gs10_prim_iname = {}
+            _gs10_pkeys = []
         # Banked S keys in pair-lambda order: the recursion's M' pool.
         skeys = []
         for lam in pair_lams:
+            # GEN-SYNTH-10: Q-filter. At depth == _ecap - 1, check
+            # whether this Q could lead to a solution before the
+            # expensive eval. Probe s0=Q(N'[0]) cheaply (zero-eval);
+            # if no param v3 makes the 1-step gate pass for
+            # (s0, v3[0]), skip this Q. Fail open on any probe or
+            # data problem (never prune unsoundly).
+            if _gs10_active and depth == _gs10_ecap - 1:
+                try:
+                    res.__dict__["gs10_q_considered"] = (
+                        res.__dict__.get("gs10_q_considered", 0) + 1)
+                except Exception:
+                    pass
+                _gs10_keep = True  # fail-open default
+                try:
+                    _gs10_pn = (lam.used[0] if lam.used else None)
+                    _gs10_in = _gs10_prim_iname.get(_gs10_pn)
+                    if _gs10_in is not None and out_vals:
+                        _gs10_s0 = self._raw_probe_op(
+                            _gs10_pn, {_gs10_in: {"$var": "x"}},
+                            out_vals[0])
+                        if _gs10_s0 is not None:
+                            _gs10_s1 = None
+                            try:
+                                if len(out_vals) > 1:
+                                    _gs10_s1 = self._raw_probe_op(
+                                        _gs10_pn,
+                                        {_gs10_in: {"$var": "x"}},
+                                        out_vals[1])
+                            except Exception:
+                                _gs10_s1 = None
+                            _gs10_keep = False
+                            for _gs10_pk in _gs10_pkeys:
+                                try:
+                                    _g10_pf, _g10_pv, _g10_pn2 = (
+                                        banked[_gs10_pk])
+                                    _g10_v0 = (
+                                        _g10_pv[0][0]
+                                        if _g10_pv and _g10_pv[0]
+                                        else None)
+                                    _g10_v1 = (
+                                        _g10_pv[0][1]
+                                        if _g10_pv and _g10_pv[0]
+                                        and len(_g10_pv[0]) > 1
+                                        else None)
+                                except Exception:
+                                    continue
+                                if self._nest_may_complete(
+                                        _gs10_s0, _g10_v0,
+                                        _gs10_s1, _g10_v1,
+                                        _pair_prims, _static_ops,
+                                        _goal_first_key,
+                                        _goal_second_key):
+                                    _gs10_keep = True
+                                    break
+                except Exception:
+                    _gs10_keep = True
+                if not _gs10_keep:
+                    try:
+                        res.__dict__["gs10_q_pruned"] = (
+                            res.__dict__.get("gs10_q_pruned", 0) + 1)
+                    except Exception:
+                        pass
+                    continue
             if res.candidates_evaluated >= objective.max_candidates:
                 res.search_exhausted = True
                 return False
@@ -1967,7 +2290,21 @@ class PlanComposer:
             else:
                 mfrag = banked[mkey][0]
             # GEN-SYNTH-5: the recursion's M' pool, in pair-lambda order.
-            skeys.append(mkey)
+            # GEN-SYNTH-9: filter skeys by param count when the exact-
+            # count prune is active. S will be M' at depth+1; the prune
+            # there requires |params| == depth. Skip S that would be
+            # pruned anyway (saves iteration, not just evals). Sound:
+            # equivalent to the prune firing at the next level.
+            _gs9_skeep = True
+            try:
+                if (len(objective.params) > self.MAX_NEST_DEPTH):
+                    _s_pset = getattr(mfrag, "param_set", None)
+                    if _s_pset is not None and len(_s_pset) != depth:
+                        _gs9_skeep = False
+            except Exception:
+                pass
+            if _gs9_skeep:
+                skeys.append(mkey)
             # GEN-SYNTH-4: static-lambda completion over the nested
             # scalar list S = map(N, Q). Tries map(S, L) == goal for
             # static L (including distilled T), with the sound
@@ -2065,8 +2402,16 @@ class PlanComposer:
             1 if len(objective.params) > self.MAX_NEST_DEPTH else 0)
         if depth >= _effective_cap or not skeys:
             return False
+        # GEN-SYNTH-8: pass _effective_cap in prune_ctx. The
+        # _nest_may_complete gate checks if N' can complete via the
+        # direct/static path at its depth. But when depth < _effective_cap,
+        # N' can also complete via recursion to a deeper level, so the
+        # gate is unsound (it prunes viable recursions). The gate must
+        # fail open when depth < _effective_cap. For <=3-param goals,
+        # _effective_cap == MAX_NEST_DEPTH, so behavior is identical to
+        # before (gate applies at the max depth).
         prune_ctx = (_pair_prims, _static_ops, _goal_first_key,
-                     _goal_second_key)
+                     _goal_second_key, _effective_cap)
         return self._nest_combine(
             objective, res, banked, prims, bank, map_prim,
             cname, cspec, fn_name, skeys, exp_key, depth + 1,
@@ -2100,6 +2445,42 @@ class PlanComposer:
             return self._value_key(value)
         except Exception:
             return None
+
+    def _gs8_pair_lam_kind_ok(self, lam: Any, objective: Any) -> bool:
+        """GEN-SYNTH-8: sound output-kind filter for pair-lambdas.
+
+        For a LIST(E) goal, the nesting chain's Q's must output a kind
+        compatible with E. The chain is: B (pairs) -> M=map(B,Q) ->
+        N=zip(M,v) -> ... -> S=map(N'',Q3) -> L(S)=goal. For the final
+        L(S) to have type LIST(E), S must be LIST(E') where E' is
+        compatible with L's input. The static L's for numeric goals are
+        NUM->NUM (e.g. distilled T), so S must be LIST(NUM), hence every
+        Q in the chain must output NUM (by backward induction).
+
+        This prunes Q's like 'all' (BOOL), 'as_bytearray' (bytes),
+        'classify_shape' (STR) for numeric goals -- they are never on an
+        arithmetic solution path. Sound: a solution requiring a
+        non-compatible Q would need a type-converting step absent from
+        the nesting machinery; the filter only removes Q's that cannot
+        participate in a well-typed chain to the goal.
+
+        Compatibility: NUM accepts NUM/INT/FLOAT (numeric tower);
+        otherwise exact kind-name match. Non-LIST goals or unknown kinds
+        fail open (no filtering).
+        """
+        try:
+            if lam.output_kind.kind.name == "LIST":
+                return False
+            gk = objective.output_kind
+            if gk.kind.name != "LIST" or not gk.args:
+                return True
+            ekind = gk.args[0].kind.name
+            qkind = lam.output_kind.kind.name
+            if ekind == "NUM":
+                return qkind in ("NUM", "INT", "FLOAT")
+            return qkind == ekind
+        except Exception:
+            return True
 
     def _pair_lambdas(self, vals: tuple, prims: List[Any]) -> List[Any]:
         """Lambdas over pair elements: x -> Q(x) for 1-input prims Q.
@@ -2426,8 +2807,12 @@ class PlanComposer:
                     used.append(u)
         used.append(prim.name)
         uses_param = any(f.uses_param for f in frags)
+        # GEN-SYNTH-9: union of input param sets (getattr for fragments
+        # constructed before param_set existed).
+        param_set = frozenset().union(
+            *(getattr(f, "param_set", frozenset()) for f in frags))
         return _Fragment(steps, {"$step": head_id}, used,
-                         uses_param=uses_param)
+                         uses_param=uses_param, param_set=param_set)
 
     def _extend_frag(self, frag: _Fragment, prim: Any,
                      args: Dict[str, Any], lam: Any) -> _Fragment:
@@ -2547,7 +2932,8 @@ class PlanComposer:
                 try:
                     if kind.accepts(pkind):
                         yield _Fragment([], {"$param": pname}, [],
-                                        uses_param=True)
+                                        uses_param=True,
+                                        param_set=frozenset({pname}))
                 except Exception:
                     continue
             if not need_param:
@@ -2613,6 +2999,9 @@ class PlanComposer:
                     args: Dict[str, Any] = {}
                     used: List[str] = []
                     uses_p = False
+                    # GEN-SYNTH-9: track param names for the param-count
+                    # prune. _LambdaEntry has no params (opaque body).
+                    _pset = frozenset()
                     for (iname, _), frag in zip(arg_variants, frags):
                         if isinstance(frag, _LambdaEntry):
                             args[iname] = frag.ref
@@ -2628,13 +3017,15 @@ class PlanComposer:
                             if u not in used:
                                 used.append(u)
                         uses_p = uses_p or frag.uses_param
+                        _pset = _pset | getattr(frag, "param_set",
+                                               frozenset())
                     self._frag_seq += 1
                     head_id = f"__head_{self._frag_seq}__"
                     steps.append({"id": head_id, "op": prim.name,
                                   "args": args})
                     used.append(prim.name)
                     yield _Fragment(steps, {"$step": head_id}, used,
-                                    uses_param=uses_p)
+                                    uses_param=uses_p, param_set=_pset)
 
     @staticmethod
     def _compositions(n: int, k: int) -> Iterator[Tuple[int, ...]]:
