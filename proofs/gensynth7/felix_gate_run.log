@@ -1,0 +1,46 @@
+Tree: feb4be5952097e9df15d8db3b8a4a3b1e81ec211 (clean)
+Repair markers verified
+Driver targeting verified: all drivers staged under /home/hatch/workspace/worktrees/gate-gensynth11/proofs/gensynth11
+=== DRIVER gs6_filter_nested ===
+  load=0.74
+  gs6_filter_nested: PASS
+=== DRIVER gs6_threelevel_runcycle ===
+  load=1.16
+  gs6_threelevel_runcycle: PASS
+=== DRIVER gs5_three_level ===
+  load=1.25
+  gs5_three_level: PASS
+=== DRIVER gs5_mixed ===
+  load=1.81
+  gs5_mixed: PASS
+=== DRIVER gs5_runcycle ===
+  load=1.59
+  gs5_runcycle: PASS
+=== DRIVER gs5_repair_focused ===
+  load=1.32
+  gs5_repair_focused: PASS
+=== DRIVER gs4_battery ===
+  load=1.05
+  gs4_battery: PASS
+=== DRIVER gs3_battery ===
+  load=1.40
+  gs3_battery: PASS
+=== DRIVER gs2_battery ===
+  load=1.06
+  gs2_battery: PASS
+=== DRIVER gs1_battery ===
+  load=1.25
+  gs1_battery: PASS
+=== DRIVER gxdom_battery ===
+  load=1.39
+  gxdom_battery: PASS
+=== DRIVER genv_battery ===
+  load=1.37
+  genv_battery: PASS
+=== DRIVER gctrl_battery ===
+  load=1.25
+  gctrl_battery: PASS
+
+========================================
+GEN-SYNTH-11 Felix gate: 13/13 PASS, 0/13 FAIL
+ALL 13 DRIVERS PASS
