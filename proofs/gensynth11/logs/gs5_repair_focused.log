@@ -1,0 +1,33 @@
+[PASS] T1a old key conflated list/tuple (hole existed) -- key=('list', (('num', 1.0), ('num', 2.0)))
+[PASS] T1b old key conflated int/float (hole existed) -- key=('num', 3.0)
+[PASS] T1c freeze separates list/tuple
+[PASS] T1d freeze separates int/float
+[PASS] T1e freeze separates bool/int
+[PASS] T1f freeze separates set/frozenset
+[PASS] T1g freeze dict order-insensitive
+[PASS] T1h freeze nested exactness
+[PASS] T1i freeze hashable
+[PASS] T1j args key separates int/float
+[PASS] T2a int probe matches wrapper -- probe='int' wrapper='int'
+[PASS] T2b float probe not a phantom cache hit -- probe='float' wrapper='float'
+[PASS] T2c two distinct cache entries -- entries=2
+[PASS] T2d order-independent -- float->'float' int->'int'
+[PASS] T3a list probe matches wrapper -- probe='list[int]' wrapper='list[int]'
+[PASS] T3b tuple probe not a phantom cache hit -- probe='tuple[int, int]' wrapper='tuple[int, int]'
+[PASS] T3c two distinct cache entries -- entries=2
+[PASS] T4a compose under running loop completes
+[PASS] T4b plan found under running loop -- composed_of=['abs', 'map', 'sum']
+[PASS] T4c probe executes inside running loop (not silent-failed) -- ok=True val='int' probe_evals=1
+[PASS] T4d no probe exhaustion on smoke
+[PASS] T5a exhaustion flag set -- flag=True
+[PASS] T5b evals counted honestly -- probe_evals=4
+[PASS] T5c control: gate prunes on genuine no-match
+[PASS] T5d exhausted gate fails open (never prunes on unknown)
+[INFO] baseline: found=True evals=6440 probe_evals=49416 exhausted=False composed_of=['zip', 'sum', 'map', 'map']
+[PASS] T5e-baseline crosses with normal probe budget
+[PASS] T5e-baseline no exhaustion recorded
+[INFO] tiny-budget: found=False evals=20000 probe_evals=9870 exhausted=True composed_of=[]
+[PASS] T5e exhaustion recorded honestly on ComposeResult -- probe_evals=9870 budget=12354
+[PASS] T5f degraded search completes honestly -- found=False evals=20000 exhausted=True
+
+=== 29/29 focused checks passed ===

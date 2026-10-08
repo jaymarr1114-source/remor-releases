@@ -514,7 +514,17 @@ class PlanComposer:
         # copy taken above), so the forward loop's economics are
         # unchanged. The late post-pass may re-eval the ~10 param pairs
         # (bkey-in-banked skips re-banking); bounded waste, accepted.
-        if _gs8_goal_is_list:
+        # GEN-SYNTH-11: the early post-pass must ONLY run for 4-param
+        # goals (N > MAX_NEST_DEPTH). For <=3-param goals it banks
+        # excessive filter intermediates before the forward loop prunes,
+        # causing unbounded memory growth (driver 2 OOM: 5.7GB). The
+        # 3-param path worked without it (GEN-SYNTH-6 green).
+        _gs11_early_pp = False
+        try:
+            _gs11_early_pp = (len(objective.params) > self.MAX_NEST_DEPTH)
+        except Exception:
+            pass
+        if _gs8_goal_is_list and _gs11_early_pp:
             if self._bank_binary_postpass(objective, res, banked, prims,
                                            bank):
                 return res
@@ -1854,13 +1864,21 @@ class PlanComposer:
                     # proved too expensive (14k+ probes per _nest_combine).
                     # The kind filter (_gs8_pair_lam_kind_ok) provides the
                     # tractability win instead.
+                    # GEN-SYNTH-11: the fail-open must ONLY apply when
+                    # the 4-param extension is active (_ecap >
+                    # MAX_NEST_DEPTH). For standard <=3-param goals, the
+                    # gate was sound and necessary for tractability
+                    # (GEN-SYNTH-6 green). GS8's unconditional fail-open
+                    # removed pruning at depths 1-2 for 3-param goals,
+                    # causing unbounded memory growth (driver 2 OOM).
                     try:
                         _pp, _so, _gfk, _gsk, _ecap = prune_ctx
                     except (ValueError, TypeError):
                         _pp, _so, _gfk, _gsk = prune_ctx
                         _ecap = self.MAX_NEST_DEPTH
-                    if depth < _ecap:
-                        pass  # fail open: recursion may complete deeper
+                    if (_ecap > self.MAX_NEST_DEPTH
+                            and depth < _ecap):
+                        pass  # fail open: 4-param recursion may go deeper
                     elif not self._nest_may_complete(
                             m0, v0, m1, v1, _pp, _so, _gfk, _gsk):
                         continue
@@ -2467,6 +2485,10 @@ class PlanComposer:
         Compatibility: NUM accepts NUM/INT/FLOAT (numeric tower);
         otherwise exact kind-name match. Non-LIST goals or unknown kinds
         fail open (no filtering).
+
+        GEN-SYNTH-11: ANY (unknown kind) must be allowed -- it is not
+        provably incompatible. Blocking ANY pruned the viable
+        filter-fusion plan (coalesce:ANY) and was unsound. Fail open.
         """
         try:
             if lam.output_kind.kind.name == "LIST":
@@ -2477,8 +2499,8 @@ class PlanComposer:
             ekind = gk.args[0].kind.name
             qkind = lam.output_kind.kind.name
             if ekind == "NUM":
-                return qkind in ("NUM", "INT", "FLOAT")
-            return qkind == ekind
+                return qkind in ("NUM", "INT", "FLOAT", "ANY")
+            return qkind == ekind or qkind == "ANY"
         except Exception:
             return True
 

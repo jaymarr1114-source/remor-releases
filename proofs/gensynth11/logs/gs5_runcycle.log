@@ -1,0 +1,10 @@
+D0: success=True name=acquired.acq_distilled_dlt_0687_17779fbe9ff4
+TRAIN: [[71, 171], [21, 35]]
+HELD: [[39, 59]]
+Running run_cycle...
+run_cycle: outcome=crossed mechanism=compose
+  reason=composed ['zip', 'coalesce', 'map', 'sum', 'product', 'acquired.acq_distilled_dlt_0687_17779fbe9ff4', 'map'] in 5377 evaluations; Q8 authenticated; causal contrast clean; admitted
+  heldout=1/1
+  capability_id=cap_cbc8cb67557bdd9ec92c
+  retired_clean=True
+RUN_CYCLE END-TO-END CROSSED

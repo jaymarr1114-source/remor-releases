@@ -1,0 +1,12 @@
+[PASS] D0: T(x)=x+11 distills -- name=acquired.acq_distilled_dlt_b160_2c6aca8ca8de
+[    19.8s] B1: direct compose ...
+[    72.6s] B1 done: found=True eval=6530
+[PASS] B1: three-level crosses via direct composer -- eval=6530 exhausted=False composed_of=['zip', 'sum', 'map', 'acquired.acq_distilled_dlt_b160_2c6aca8ca8de', 'map']
+[    72.6s] B2: run_cycle ...
+[   629.6s] B2 done: outcome=crossed mechanism=compose
+[PASS] B2: run_cycle crosses via compose -- outcome=crossed heldout=4/4 retired_clean=True reason=composed ['zip', 'sum', 'map', 'acquired.acq_distilled_dlt_b160_2c6aca8ca8de', 'map'] in 6530 evaluations; Q8 authenticated; causal contrast clean; admitted
+[PASS] B3a: generalize-leg guard reports inapplicable (arity mismatch) -- guard must refuse bound-constant re-parameterization for 3 params
+[PASS] B3b: generalize-leg skip recorded as envelope observation -- skip records=1
+[PASS] B5: fresh OS process executes plan 4/4 held-out -- B5_CHILD_OK 4/4
+
+=== 6/6 checks passed ===

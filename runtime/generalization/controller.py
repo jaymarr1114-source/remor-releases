@@ -385,7 +385,15 @@ class GeneralizationController:
                 params=dict(params), output_kind=output_kind,
                 examples=list(train_examples),
                 held_out=list(held_out), forbidden=tuple(regs))
-            cres = pc.compose(contrast)
+            # GEN-SYNTH-11: use a FRESH PlanComposer for the contrast.
+            # Reusing pc accumulates instance caches (_probe_cache,
+            # _pair_lam_cache, etc.) across the two composes, causing
+            # unbounded memory growth (driver 2 OOM: 10MB -> 5.7GB).
+            # The contrast is an independent search and must not inherit
+            # the main compose's cached state.
+            from swarm_engine.synthesis.plan_composer import PlanComposer as _PC2
+            pc_contrast = _PC2(self.engine.composer)
+            cres = pc_contrast.compose(contrast)
             if cres.found:
                 return {"status": "contrast_failed",
                         "composed_of": list(res.composed_of),

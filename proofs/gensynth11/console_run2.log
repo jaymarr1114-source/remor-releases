@@ -1,0 +1,45 @@
+Tree verified: 60caca4698f59fa5d8cf72b8057833d9d0a01cd2
+Driver targeting verified: all 13 drivers point at /home/hatch/workspace/worktrees/warm-generalization
+=== DRIVER gs6_filter_nested ===
+  load=3.57
+  gs6_filter_nested: PASS
+=== DRIVER gs6_threelevel_runcycle ===
+  load=1.45
+  gs6_threelevel_runcycle: PASS
+=== DRIVER gs5_three_level ===
+  load=2.16
+  gs5_three_level: PASS
+=== DRIVER gs5_mixed ===
+  load=1.70
+  gs5_mixed: PASS
+=== DRIVER gs5_runcycle ===
+  load=1.78
+  gs5_runcycle: PASS
+=== DRIVER gs5_repair_focused ===
+  load=1.62
+  gs5_repair_focused: PASS
+=== DRIVER gs4_battery ===
+  load=2.22
+  gs4_battery: PASS
+=== DRIVER gs3_battery ===
+  load=1.44
+  gs3_battery: PASS
+=== DRIVER gs2_battery ===
+  load=1.37
+  gs2_battery: PASS
+=== DRIVER gs1_battery ===
+  load=1.04
+  gs1_battery: PASS
+=== DRIVER gxdom_battery ===
+  load=1.09
+  gxdom_battery: PASS
+=== DRIVER genv_battery ===
+  load=1.44
+  genv_battery: PASS
+=== DRIVER gctrl_battery ===
+  load=3.06
+  gctrl_battery: PASS
+
+========================================
+GEN-SYNTH-11 gate: 13/13 PASS, 0/13 FAIL
+ALL 13 DRIVERS PASS

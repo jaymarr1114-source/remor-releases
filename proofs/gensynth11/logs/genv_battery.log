@@ -1,0 +1,29 @@
+[PASS] D0a: square distilled through the real loop -- route=fresh-synthesis heldout=3/3
+[PASS] D0b: add-three distilled through the real loop -- route=fresh-synthesis heldout=3/3
+[PASS] D1a: substrate interface is the frozen v1 -- microcontroller-interface/v1
+[PASS] D1b: controller constructs, loop starts idle -- Generalization is idle (active=0 spawned=0 retired=0 refused=0)
+[PASS] D1c: baseline envelope seeded -- obs=exp_93d2eb23b0ae
+[PASS] D2a: sweep arm fires on square's bound exponent -- consts=[2.0] note=bound constants: [2.0]
+[PASS] D2b: square sweep targets are 4.0 and 6.0, hypothesis crossed -- sweep arm: 2 variants from bound constants: [2.0]
+[PASS] D3a: sweep arm yields 2 variants from add-three's bound constant -- consts=[3.0] variants=['sweep_3_to_5', 'sweep_3_to_7']
+[PASS] D3b: sweep targets are 5.0 and 7.0, hypothesis crossed -- sweep arm: 2 variants from bound constants: [3.0]
+[PASS] P1a: square variants match the automation's hypotheses 6/6 -- neg_square=crossed/compose; neg_fourth=bound_marked/compose; eighth=bound_marked/compose; div5_sq=bound_marked/compose; sweep_2_to_4=crossed/generalize; sweep_2_to_6=crossed/generalize
+[PASS] P1b: every cycle retired clean, loop idle afterwards -- retired=[True, True, True, True, True, True]
+[PASS] P1c: depth-3 bounds fail honestly with named reasons -- neg_fourth: causal contrast failed; eighth: Q8 refused the composed plan
+[PASS] P4a: square's exponent sweep crossed via the generalize leg -- sweep_2_to_4=crossed/generalize promoted=acquired.acq_generalized_dlt_70df_d55cea71cac8; sweep_2_to_6=crossed/generalize promoted=acquired.acq_generalized_dlt_70df_9d180678978e
+[PASS] P4b: held-out full on both exponent-sweep crossings -- heldout=['3/3', '3/3']
+[PASS] P2a: add-three envelope holds no crossings before probing -- crossed=0
+[PASS] P2b: both sweep variants crossed via the generalize leg -- sweep_3_to_5=crossed/generalize promoted=acquired.acq_generalized_dlt_2529_cf9d4a0d3453; sweep_3_to_7=crossed/generalize promoted=acquired.acq_generalized_dlt_2529_fa2c8f82b75a
+[PASS] P2c: held-out full on both sweep crossings -- heldout=['3/3', '3/3']
+[PASS] P2d: add-three envelope grew from empty to 2 expansions -- crossed=2
+[PASS] P3a: summary report published per technique -- sq=1 a3=1
+[PASS] P3b: square report lists 3 expansions and 3 bounds -- exp=['neg_square', 'sweep_2_to_4', 'sweep_2_to_6'] bounds=['neg_fourth', 'eighth', 'div5_sq']
+_verdict_promote_acquired('generalized_dlt_2529') failed: ValueError: promote: primitive 'acquired.acq_generalized_dlt_2529_cf9d4a0d3453' already registered (pass overwrite=True to re-promote under a live verdict)
+[PASS] A1a: independent re-probe of published add-five agrees -- agreement-with-idempotence: generalize leg reproduced the substitution but promotion refused already-registered bytes; published=crossed reprobe=bound_marked
+[PASS] A1b: independent re-probe of published 5/x^2 agrees (now crossed) -- published=crossed reprobe=crossed/compose
+[PASS] A2: crossed compose cycle names Q8, the contrast, and admission -- composed ['acquired.acq_distilled_dlt_70df_9f9f8d41afc8', 'negate'] in 283 evaluations; Q8 authenticated; causal contrast clean; admitted
+[PASS] F1a: fresh engine executes the automation-crossed add-five -- held=[True, True, True]
+[PASS] F1b: envelope records readable from a fresh process -- env=12 base=1
+
+25/25 checks passed
+GEN-ENV-1 proof battery GREEN

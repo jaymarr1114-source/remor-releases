@@ -1,0 +1,4 @@
+D0: True
+expected: [[71, 171], [21, 35]]
+mixed_v4: found=True eval=5377 exhausted=False
+composed_of=['zip', 'coalesce', 'map', 'sum', 'product', 'acquired.acq_distilled_dlt_5421_56661ae4300f', 'map']

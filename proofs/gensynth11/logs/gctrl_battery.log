@@ -1,0 +1,26 @@
+[PASS] D0: square distilled through the real loop -- route=fresh-synthesis heldout=3/3
+[PASS] D1a: substrate interface is the frozen v1 -- microcontroller-interface/v1
+[PASS] D1b: loop registered, status starts idle -- Generalization is idle (active=0 spawned=0 retired=0 refused=0)
+[PASS] D2: baseline envelope seeded from GEN-STRUCT-1's published envelope -- obs=exp_e2bbd27670e1
+[PASS] D3: technique registrations resolved without prefix doubling -- ['acquired.cap_aab2e4ba3056d05e976e', 'acquired.acq_distilled_dlt_d4fd_50bddb650171']
+[PASS] P1a: controller crossed -(x^2) via compose -- outcome=crossed mech=compose cap=cap_adbb295cbea9e2b52162 reason=composed ['acquired.acq_distilled_dlt_d4fd_50bddb650171', 'negate'] in 230 evaluations; Q8 authenticated; causal contrast clean; admitted
+[PASS] P1b: held-out 4/4 claimed on the cycle -- 4/4
+[PASS] P1c: stack unwound to the controller -- retired_clean=True legs=2
+[PASS] P1d: executive saw only 'Generalization is active' while live -- views=['active', 'active', 'active', 'active', 'active', 'idle']
+[PASS] P1e: envelope expansion recorded -- env_obs=exp_e7983ceed3c4
+[PASS] P2a: x^4 honestly marks a bound -- the completed plan space reveals the distilled square is not causally necessary (contrast finds power(abs(x),4)) -- outcome=bound_marked mech=compose cap=None reason=causal contrast failed
+[PASS] P2b: the second-order reuse mechanism is intact -- the open search still finds square(square(x)) -- found=True composed_of=['acquired.acq_distilled_dlt_d4fd_50bddb650171', 'acquired.acq_distilled_dlt_d4fd_50bddb650171']
+[PASS] B1a: 5/x^2 recorded as a marked bound, never admitted -- outcome=bound_marked mech=compose reason=causal contrast failed
+[PASS] B1b: stack unwound on the bound path too -- retired_clean=True
+[PASS] B1c: bound record names the obstruction -- bound_records=2
+[PASS] A1a: re-retire refused already_retired -- reason=already_retired
+[PASS] A1b: unknown id refused unknown_microcontroller -- reason=unknown_microcontroller
+[PASS] A1c: cross-loop retire refused cross_loop -- reason=cross_loop
+[PASS] A2a: tiny budget -> budget_exhausted, honestly -- outcome=budget_exhausted mech=generalize
+[PASS] A2b: exhausted leg ledgered as exhausted, never fabricated-resolve -- leg_outcomes=['exhausted'] flags=[[]]
+[PASS] A2c: root retired clean after exhaustion -- retired_clean=True
+[PASS] F1a: fresh engine executes the controller-admitted -(x^2) -- single=True held4=[True, True, True, True]
+[PASS] F1b: envelope records readable from a fresh process -- env=4 base=1
+
+23/23 checks passed
+GEN-CTRL-1 proof battery GREEN

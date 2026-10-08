@@ -1,0 +1,31 @@
+[PASS] D0a: T(x)=x+11 distills through the real loop -- route=fresh-synthesis name=acquired.acq_distilled_dlt_18a5_263792ec37b9
+[PASS] D0b: distilled T held-out 2/2 -- 2/2
+[PASS] D0c: T promoted name recorded -- name=acquired.acq_distilled_dlt_18a5_263792ec37b9
+[PASS] D1a: controller honors the frozen microcontroller interface v1 -- microcontroller-interface/v1 loop=generalization
+[PASS] D1b: baseline envelope seeded from the published envelope -- holds=4 breaks=3
+[PASS] D1c: distilled T resolvable for the contrast -- regs=['acquired.cap_7a6488b1249bdb6add1e', 'acquired.acq_distilled_dlt_18a5_263792ec37b9']
+[PASS] D2a: candidate pool clean of forbidden T -- pool=252
+[PASS] D2b: static lambda bank clean of forbidden T -- lams=771
+[PASS] D2c: dynamic pair-lambdas clean of forbidden T -- pair_lams=27
+[PASS] D2d: forbidden-T search honestly finds no plan -- found=False exhausted=True
+[PASS] D2e: per-compose cache reset (no cross-run leakage) -- found=False
+[PASS] P1a: binary-intermediate task crosses via the compose leg -- outcome=crossed mech=compose
+[PASS] P1b: held-out 4/4 -- held=4/4
+[PASS] P1c: reason names Q8 auth and a clean causal contrast -- composed ['zip', 'coalesce', 'map', 'sum', 'acquired.acq_distilled_dlt_18a5_263792ec37b9', 'map'] in 3661 evaluations; Q8 authenticated; causal contrast clean; 
+[PASS] P1d: envelope expansion recorded for the binary crossing -- records=1
+[PASS] P1e: the composed plan incorporates the distilled T -- composed_of=['zip', 'coalesce', 'map', 'sum', 'acquired.acq_distilled_dlt_18a5_263792ec37b9', 'map']
+[PASS] P1f: plan shows binary intermediate feeding higher-order ops -- composed_of=['zip', 'coalesce', 'map', 'sum', 'acquired.acq_distilled_dlt_18a5_263792ec37b9', 'map']
+[PASS] P1g: microcontroller stack retired cleanly -- root=mc-60f6f
+[PASS] P1h: executive saw only Generalization active/idle -- views=['active', 'active', 'active', 'idle']
+[PASS] P1i: crossing admitted a capability id -- cap=cap_130d092e96e71da7a56b
+[PASS] B1a: plain pairwise sums cross (binary intermediate feeds map) -- found=True composed_of=['zip', 'coalesce', 'map', 'sum', 'map']
+[PASS] B1b: Q8 authenticates the pairwise-sums plan 4/4 held-out -- no bound training-output constants in plan; train re-verification: 4/4 match; held-out generalization: 4/4 match
+FRESH_HELDOUT=4/4 ENV=2
+
+
+[PASS] F1a: fresh OS process executes admitted P1 plan 4/4 held-out -- rc=0
+[PASS] F1b: envelope records readable from a fresh process -- FRESH_HELDOUT=4/4 ENV=2
+
+============================================================
+GEN-SYNTH-2: 24/24 passed
+ALL GREEN

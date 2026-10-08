@@ -1,0 +1,14 @@
+[PASS] D0: T(x)=x+11 distills -- name=acquired.acq_distilled_dlt_400e_76ea71d6c983
+[PASS] D2: forbidden-T nested search honestly finds no plan -- eval=20000 forbidden=2
+[PASS] P1a: nested two-input with T crosses -- eval=4484 composed_of=['zip', 'coalesce', 'map', 'sum', 'acquired.acq_distilled_dlt_400e_76ea71d6c983', 'map']
+[PASS] P1b: plan incorporates the distilled T -- T=acquired.acq_distilled_dlt_400e_76ea71d6c983
+[PASS] P1c: Q8 authenticates on train+held-out -- no bound training-output constants in plan; train re-verification: 3/3 match; held-out generalization: 4/4 match
+[PASS] P1d: held-out 4/4 via direct execution -- 4/4
+[PASS] P2a: three-input with T crosses -- eval=6093 composed_of=['zip', 'coalesce', 'map', 'sum', 'acquired.acq_distilled_dlt_400e_76ea71d6c983', 'map']
+[PASS] P2b: plan incorporates the distilled T
+[PASS] P2c: Q8 authenticates on train+held-out -- no bound training-output constants in plan; train re-verification: 2/2 match; held-out generalization: 4/4 match
+[PASS] B1: plain nested (no T) crosses as mechanism control -- eval=4446
+[PASS] B2: plain three-input (no T) crosses as mechanism control -- eval=6185
+[PASS] F1: fresh OS process executes P1 plan 4/4 held-out -- F1_CHILD_OK 4/4
+
+=== 12/12 checks passed ===

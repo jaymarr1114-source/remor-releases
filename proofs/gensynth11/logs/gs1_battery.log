@@ -1,0 +1,30 @@
+[PASS] D0a: square distills through the real loop -- route=fresh-synthesis name=acquired.acq_distilled_dlt_ad18_336b69d86c92
+[PASS] D0b: distilled technique held-out 2/2 -- 2/2
+[PASS] D1a: controller honors the frozen microcontroller interface v1 -- microcontroller-interface/v1 loop=generalization
+[PASS] D1b: baseline envelope seeded from the published envelope -- holds=4 breaks=3
+[PASS] D1c: both source registrations resolvable for the contrast -- regs=['acquired.cap_aab2e4ba3056d05e976e', 'acquired.acq_distilled_dlt_ad18_336b69d86c92']
+[PASS] D2a: candidate pool excludes both forbidden registrations -- pool=252
+[PASS] D2b: no banked lambda rebuilds a forbidden technique -- bank=0 leak=0
+[PASS] D2c: behavioral contrast -- binary task unreachable without the distilled square (search exhausts honestly) -- found=False exhausted=True evaluated=20000
+[PASS] D2d: positive control -- open search finds the binary plan over the distilled square -- found=True composed_of=['acquired.acq_distilled_dlt_ad18_336b69d86c92', 'divide'] evaluated=4741
+[PASS] P1a: binary combination crosses via the compose leg -- outcome=crossed mech=compose
+[PASS] P1b: held-out 4/4 -- held=4/4
+[PASS] P1c: reason names Q8 auth and a clean causal contrast -- composed ['acquired.acq_distilled_dlt_ad18_336b69d86c92', 'divide'] in 4741 evaluations; Q8 authenticated; causal contrast clean; admitted
+[PASS] P1d: envelope expansion recorded for the binary crossing -- records=1
+[PASS] P1e: the composed plan incorporates the distilled technique -- composed_of=['acquired.acq_distilled_dlt_ad18_336b69d86c92', 'divide']
+[PASS] P1f: microcontroller stack retired cleanly -- root=mc-a497e
+[PASS] P1g: executive saw only Generalization active/idle -- views=['active', 'active', 'active', 'active', 'active', 'idle']
+[PASS] P1h: crossing admitted a capability id -- cap=cap_034506fbbdbe96584618
+[PASS] P1x-a: the admission registered the transfer as a searchable primitive -- new=['acquired.cap_034506fbbdbe96584618']
+[PASS] P1x-b: post-admission the contrast objective is solvable via the admitted transfer capability -- found=True via_transfer=['acquired.cap_034506fbbdbe96584618']
+[PASS] B1a: pairwise sums over collections still mark a bound -- outcome=bound_marked mech=compose
+[PASS] B1b: the bound names the honest obstruction -- causal contrast failed
+[PASS] B1c: nothing admitted on the bound path -- cap=None
+[PASS] F1a: fresh OS process executes the admitted divide-plan 4/4 held-out -- held4=[True, True, True, True]
+[PASS] F1b: envelope records readable from a fresh process -- env=3
+[PASS] A1a: re-probe does not claim a second crossing -- outcome=bound_marked mech=compose
+[PASS] A1b: the refusal names the causal contrast -- causal contrast failed
+[PASS] A1c: no duplicate capability admitted on the re-probe -- cap=None
+
+27/27 checks passed
+GEN-SYNTH-1 proof battery GREEN

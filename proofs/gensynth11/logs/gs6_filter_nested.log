@@ -1,0 +1,17 @@
+[PASS] D0: T(x)=x+11 distills -- name=acquired.acq_distilled_dlt_62cc_0303abdad57b
+[    13.8s] A1: composing ...
+[    74.8s] A1 done: found=True eval=6719
+[PASS] A1: filter-fusion-over-nested crosses -- eval=6719 exhausted=False composed_of=['zip', 'sum', 'map', 'greater_than', 'filter', 'acquired.acq_distilled_dlt_62cc_0303abdad57b', 'map']
+[PASS] A2: plan incorporates the distilled T -- T=acquired.acq_distilled_dlt_62cc_0303abdad57b
+[PASS] A3: Q8 authenticates on train+held-out -- no bound training-output constants in plan; train re-verification: 5/5 match; held-out generalization: 4/4 match
+[PASS] A4: held-out 4/4 via direct execution -- 4/4
+[    74.8s] A5: contrast (T forbidden) ...
+[   308.6s] A5 done: found=False eval=20000
+[PASS] A5: forbidden-T search honestly finds no plan -- eval=20000 forbidden=2
+[   308.6s] A6: run_cycle ...
+[   594.2s] A6 done: outcome=crossed mechanism=compose
+[PASS] A6: run_cycle crosses via compose -- outcome=crossed heldout=4/4 retired_clean=True reason=composed ['zip', 'sum', 'map', 'greater_than', 'filter', 'acquired.acq_distilled_dlt_62cc_0303abdad57b', 'map'] in 6719 evaluations; Q8 authenticated; causal co
+[PASS] A6b: generalize-leg skip recorded as envelope observation -- skip records=1
+[PASS] A7: fresh OS process executes plan 4/4 held-out -- A7_CHILD_OK 4/4
+
+=== 9/9 checks passed ===
