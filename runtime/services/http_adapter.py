@@ -966,6 +966,13 @@ class _Service:
         # candidates, capabilities detail, providers, agent provenance,
         # intellect events). Grounded in the real org/intellect stores.
         self._wire_track2()
+        # [BRIDGE-BOOT-1] authorize the curiosity acquisition bridge at
+        # engine boot (and nowhere else): construct the production
+        # curiosity executive with its bridge bound to the real governed
+        # pipeline, so a missing_teacher activation fires the pipeline
+        # instead of refusing on an unbound constructor. Fail-safe at
+        # boot (previous behavior preserved on construction failure).
+        self._wire_curiosity_executive()
 
     # -- dispatch learning (Worker 1 / LIVE DISPATCH FLOW) ----------------------------
     def _boot_dispatch_learning(self):
@@ -1421,6 +1428,52 @@ class _Service:
         self.ff["contract_routes"].update(
             routes_for_track2(exp_store, intellect_log, capabilities_api,
                               org_store, self.engine))
+
+    # -- curiosity executive (BRIDGE-BOOT-1: bridge authorized at boot) ------
+    def _wire_curiosity_executive(self):
+        """Construct the production curiosity executive at engine boot.
+
+        BRIDGE-BOOT-1 (James's order 2026-10-09): authorize the bridge at
+        engine boot, and nowhere else. Calls
+        swarm_engine.curiosity.executive.production.build_production_executive()
+        (ACQ-BRIDGE-1, landed), which binds acquisition_bridge to the real
+        governed AcquisitionPipeline (LocalSource + governor-gated
+        NetworkSource). The executive is stored as self.curiosity_executive
+        — the curiosity executive the engine uses.
+
+        Fail-safe (mandate): any construction failure leaves
+        self.curiosity_executive = None — the previous behavior (no bound
+        executive -> honest refusal) — loudly logged; boot continues and
+        never crashes on this wiring.
+
+        Scope: this method only ADDS the construction. It does not modify
+        production.py, the bridge, the pipeline, or refusal logic. It does
+        not conduct the roll-call attestation: no production challenge
+        responder exists (the Phase-2 run-controller handler is unbuilt;
+        the only responders are test doubles), so attesting at boot would
+        be vacuous. Per build_production_executive's contract, the caller
+        (proofs, future engine integration) conducts the attestation
+        following the drill pattern; without a MET attestation,
+        request_activation refuses exactly as designed.
+        """
+        self.curiosity_executive = None
+        self._curiosity_stack = None
+        try:
+            from swarm_engine.curiosity.executive.production import (
+                build_production_executive)
+            curiosity_dir = os.path.abspath(
+                os.path.join(self.base_dir, "curiosity"))
+            stack = build_production_executive(base_dir=curiosity_dir)
+        except Exception as exc:  # fail-safe: previous behavior preserved,
+            # loudly logged; boot continues.
+            print(f"http_adapter: curiosity executive UNAVAILABLE at boot "
+                  f"({type(exc).__name__}: {exc}); missing_teacher "
+                  f"activations will refuse honestly (unbound)", flush=True)
+            return
+        self._curiosity_stack = stack
+        self.curiosity_executive = stack["executive"]
+        print("http_adapter: curiosity executive bound at boot "
+              "(acquisition_bridge -> real governed pipeline)", flush=True)
 
     # -- media front (wired to the verified substrate) -------------------------
     def _wire_media(self):
