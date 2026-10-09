@@ -17,7 +17,7 @@ Engine front (Track 2B/3 — served from the engine-bound _Service):
   GET  /api/dispatch_evidence/<id> dispatch evidence (Track 3, read-only)
   GET  /api/voice/status           voice substrate status
                                   (TTS proven-bounded, STT unavailable)
-  POST /api/voice/stt -> 501 honest refusal (no STT machinery exists)
+  POST /api/voice/stt -> real transcript (faster-whisper) or 501 honest refusal
   POST /api/voice/tts             governed TTS -> real WAV (+ download)
   GET  /api/media/status           media substrate status (proven-bounded)
   POST /api/media/image|/video|/song -> governed generation -> real bytes
@@ -759,10 +759,20 @@ class _Handler(BaseHTTPRequestHandler):
             # trust:transition; restore_everywhere re-enforces them.
             return self._send(*svc.restore_capability(m.group(1), body, caller))
         if path == "/api/voice/stt":
-            # Honest unavailability: no STT machinery exists anywhere in
-            # the substrate; a transcript is never fabricated.
-            return self._send(*svc.unavailable(
-                lambda: voice_svc.transcribe()))
+            # STT via the governed faster-whisper substrate (ACQ-STT-1):
+            # real transcripts when acquired, honest 501 when not.
+            # Body: {"audio_b64": ...} (base64 WAV) or {"audio_path": ...}
+            # (server-side path).
+            try:
+                stt_audio = _stt_audio_from_body(body)
+            except ValueError as exc:
+                return self._send(400, {"ok": False, "error": str(exc)})
+            try:
+                result = voice_svc.transcribe(stt_audio)
+            except CapabilityUnavailable as exc:
+                return self._send(
+                    501, {"ok": False, "unavailable": exc.as_dict()})
+            return self._send(200, result)
         if path == "/api/voice/tts":
             # Governed TTS: bearer auth (checked first, above) -> scoped
             # WRITE_FS grant -> admitted capability -> real WAV bytes.
@@ -1710,6 +1720,28 @@ class _Service:
         except CapabilityUnavailable as exc:
             return 501, {"ok": False, "unavailable": exc.as_dict()}
         return 200, {"ok": True}
+
+
+def _stt_audio_from_body(body):
+    """Extract STT audio from the POST /api/voice/stt JSON body.
+
+    Accepts {"audio_b64": ...} (base64-encoded WAV) or {"audio_path": ...}
+    (server-side file path). Returns bytes or a path string for
+    voice.transcribe(). Raises ValueError on missing/invalid input.
+    """
+    if not isinstance(body, dict):
+        raise ValueError("expected a JSON object body")
+    if "audio_b64" in body:
+        try:
+            return base64.b64decode(body["audio_b64"])
+        except Exception as exc:
+            raise ValueError(f"audio_b64 is not valid base64: {exc}")
+    if "audio_path" in body:
+        p = body["audio_path"]
+        if not isinstance(p, str) or not os.path.isfile(p):
+            raise ValueError("audio_path must be an existing file")
+        return p
+    raise ValueError("no audio provided: expected 'audio_b64' or 'audio_path'")
 
 
 def _status_for(result: Dict[str, Any]) -> int:

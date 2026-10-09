@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import threading
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -67,17 +68,117 @@ def _probe_stt_substrate() -> List[str]:
     return missing
 
 
+# --- ACQ-STT-1: governed faster-whisper substrate ---------------------------
+# Acquired 2026-10-08 through the governed external-acquisition loop
+# (faster-whisper 1.2.1, PyPI, MIT; CTranslate2 checkpoint
+# Systran/faster-whisper-base at revision ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66,
+# license mit). The model directory lives outside the git tree; the runtime
+# resolves it via REMOR_STT_MODEL_DIR or the default below, and fails closed
+# (CapabilityUnavailable, never a fabricated transcript) when absent.
+
+_STT_MODEL_DIR_ENV = "REMOR_STT_MODEL_DIR"
+_STT_DEFAULT_MODEL_DIR = os.path.expanduser(
+    "~/workspace/models/faster-whisper-base")
+_STT_MODEL_ID = "Systran/faster-whisper-base"
+_STT_MODEL_REVISION = "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66"
+
+_stt_lock = threading.Lock()
+_stt_model: Any = None
+
+
+def _stt_model_dir() -> str:
+    return os.environ.get(_STT_MODEL_DIR_ENV, _STT_DEFAULT_MODEL_DIR)
+
+
+def _load_stt_model() -> Any:
+    """Load the governed faster-whisper substrate (process-cached).
+
+    Raises ImportError when faster-whisper is not installed and
+    FileNotFoundError when the verified model directory is absent —
+    both surface as honest CapabilityUnavailable from transcribe().
+    """
+    global _stt_model
+    with _stt_lock:
+        if _stt_model is None:
+            from faster_whisper import WhisperModel  # noqa: F401
+            model_dir = _stt_model_dir()
+            if not os.path.isdir(model_dir):
+                raise FileNotFoundError(
+                    "STT model dir missing: %s" % model_dir)
+            _stt_model = WhisperModel(
+                model_dir, device="cpu", compute_type="int8")
+        return _stt_model
+
+
+def _probe_stt_available() -> Tuple[bool, str, List[str]]:
+    """Truthful STT availability: the substrate must actually load."""
+    try:
+        _load_stt_model()
+    except Exception as exc:  # noqa: BLE001 - probe must never raise
+        return (False,
+                "STT substrate unavailable (%s: %s)"
+                % (type(exc).__name__, exc),
+                _probe_stt_substrate())
+    return True, "faster-whisper substrate loaded and ready", []
+
+
 def transcribe(audio: Any = None, *, source: str = "microphone",
                language: str = "en") -> Dict[str, Any]:
-    """Speech-to-text. Always raises CapabilityUnavailable: no STT
-    machinery exists anywhere in the substrate; a transcript is never
-    fabricated."""
-    missing = _probe_stt_substrate()
-    raise CapabilityUnavailable(
-        capability="voice.speech_to_text",
-        reason=("no speech-recognition machinery exists; refusing to "
-                "fabricate a transcript"),
-        missing=missing)
+    """Speech-to-text via the governed faster-whisper substrate.
+
+    Returns {"ok": True, "transcript": ...} when the substrate is acquired.
+    Raises CapabilityUnavailable — never a fabricated transcript — when the
+    substrate cannot be loaded, or when no audio is given (the microphone
+    input path is unproven on bench: no /dev/snd).
+
+    audio: file path, bytes, file-like object, or numpy array (16 kHz mono
+    preferred; faster-whisper resamples). Uses vad_filter=True so silence
+    does not hallucinate (proven in the ACQ-STT-1 WER battery).
+    """
+    if audio is None:
+        missing = _probe_stt_substrate()
+        raise CapabilityUnavailable(
+            capability="voice.speech_to_text",
+            reason=("no audio input provided and no microphone path; "
+                    "refusing to fabricate a transcript"),
+            missing=missing)
+    try:
+        model = _load_stt_model()
+    except Exception as exc:  # noqa: BLE001 - fail closed, honestly
+        missing = _probe_stt_substrate()
+        raise CapabilityUnavailable(
+            capability="voice.speech_to_text",
+            reason=("no speech-recognition machinery available "
+                    "(%s); refusing to fabricate a transcript"
+                    % type(exc).__name__),
+            missing=missing) from exc
+    # Normalize bytes -> temp file: faster-whisper's in-memory av decode
+    # path is av-version fragile (av 14.1.0 rejects its BytesIO wrapper);
+    # a real file decodes stably across versions.
+    tmp = None
+    try:
+        if isinstance(audio, (bytes, bytearray, memoryview)):
+            fd, tmp = tempfile.mkstemp(suffix=".wav", prefix="remor_stt_")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(bytes(audio))
+            audio = tmp
+        segments, info = model.transcribe(
+            audio, language=language, beam_size=5, vad_filter=True)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    transcript = " ".join(s.text for s in segments).strip()
+    return {
+        "ok": True,
+        "transcript": transcript,
+        "language": info.language,
+        "language_probability": round(info.language_probability, 4),
+        "engine": "faster-whisper",
+        "model": "%s@%s" % (_STT_MODEL_ID, _STT_MODEL_REVISION[:12]),
+    }
 
 
 def speak(text: str, *, voice: Optional[str] = None,
@@ -133,10 +234,18 @@ def status() -> Dict[str, Any]:
     }
     if not tts_ok:
         tts["reason"] = tts_detail
+    stt_ok, stt_detail, stt_missing = _probe_stt_available()
+    stt: Dict[str, Any] = {
+        "available": bool(stt_ok),
+        "classification": "PROVEN" if stt_ok else "UNAVAILABLE",
+        "engine": "faster-whisper (CTranslate2), offline",
+        "model": "%s@%s" % (_STT_MODEL_ID, _STT_MODEL_REVISION[:12]),
+        "probe": stt_detail,
+    }
+    if not stt_ok:
+        stt["missing"] = stt_missing
     return {
-        "speech_to_text": {
-            "available": False, "classification": "UNAVAILABLE",
-            "missing": _probe_stt_substrate()},
+        "speech_to_text": stt,
         "text_to_speech": tts,
     }
 

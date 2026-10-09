@@ -210,13 +210,26 @@ def main():
         # voice: honestly unavailable (not admitted at boot; piper absent).
         # The two endpoints carry different merged 501 shapes: stt uses the
         # typed UNAVAILABLE shape, tts the medium_not_admitted refusal.
-        s, b = call("POST", "/api/voice/stt", {"text": "hello"}, headers=BH)
+        # ACQ-STT-1: stt is substrate-aware now — 200 with real transcripts
+        # when the governed faster-whisper substrate is present, honest 501
+        # without it (original intent preserved). Missing audio is 400.
+        import base64 as _b64, io as _io, wave as _wave
+        _buf = _io.BytesIO()
+        with _wave.open(_buf, "wb") as _w:
+            _w.setnchannels(1); _w.setsampwidth(2); _w.setframerate(16000)
+            _w.writeframes(b"\x00" * 16000 * 2)
+        _tiny_wav_b64 = _b64.b64encode(_buf.getvalue()).decode()
+        s, b = call("POST", "/api/voice/stt", {"audio_b64": _tiny_wav_b64},
+                    headers=BH)
         un = b.get("unavailable") or {}
-        check("http: /api/voice/stt -> 501 honest unavailability",
-              s == 501 and un.get("classification") == "UNAVAILABLE"
-              and un.get("capability") == "voice.speech_to_text"
-              and len(un.get("missing", [])) > 0,
-              f"{s} {b}")
+        check("http: /api/voice/stt honest (200 with substrate / 501 without)",
+              (s == 200 and b.get("ok") is True)
+              or (s == 501
+                  and un.get("capability") == "voice.speech_to_text"),
+              f"{s} {str(b)[:160]}")
+        s, b = call("POST", "/api/voice/stt", {"text": "hello"}, headers=BH)
+        check("http: /api/voice/stt no audio -> 400",
+              s == 400 and b.get("ok") is False, f"{s} {b}")
         s, b = call("POST", "/api/voice/tts", {"text": "hello"}, headers=BH)
         check("http: /api/voice/tts -> 501 honest unavailability",
               s == 501 and b.get("ok") is False
